@@ -1,7 +1,7 @@
-// src/controllers/health.controller.js
 const HealthActivity = require('../models/HealthActivity.model');
 const BmiRecord      = require('../models/BmiRecord.model');
 const Gamification   = require('../models/Gamification.model');
+const User           = require('../models/User.model');
 const { success, error } = require('../utils/response');
 const { buildDateRange, toDayLabel, todayISO, isConsecutiveDay } = require('../utils/date');
 
@@ -445,6 +445,12 @@ const saveBmi = async (req, res, next) => {
       { user: userId, date: todayISO() },
       { $set: { weight: parseFloat(weight.toFixed(1)) } },
       { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
+
+    // Update User model with height and weight
+    await User.findByIdAndUpdate(
+      userId,
+      { $set: { weight: parseFloat(weight.toFixed(1)), height: parseFloat((height * 100).toFixed(0)) } }
     );
 
     return success(res, 'BMI saved', record.toJSON(), 201);
