@@ -1,9 +1,9 @@
 // src/controllers/gamification.controller.js
-const Gamification = require("../models/Gamification.model");
-const HealthActivity = require("../models/HealthActivity.model");
-const Order = require("../models/Order.model");
-const { success, error } = require("../utils/response");
-const { todayISO, buildDateRange } = require("../utils/date");
+const Gamification = require('../models/Gamification.model');
+const HealthActivity = require('../models/HealthActivity.model');
+const Order = require('../models/Order.model');
+const { success, error } = require('../utils/response');
+const { todayISO, buildDateRange } = require('../utils/date');
 
 // ─── GET /gamification/me ─────────────────────────────────────────────────────
 // Returns: GamificationState (coinsBalance, streakDays, etc.)
@@ -15,7 +15,7 @@ const getGamification = async (req, res, next) => {
       gam = await Gamification.create({ user: req.user._id });
     }
 
-    return success(res, "Gamification data fetched", {
+    return success(res, 'Gamification data fetched', {
       coinsBalance: gam.coinsBalance,
       streakDays: gam.streakDays,
       bestStreakDays: gam.bestStreakDays,
@@ -45,7 +45,7 @@ const getStreaks = async (req, res, next) => {
       badges: gam.getBadgeList(),
     };
 
-    return success(res, "Streaks fetched", data);
+    return success(res, 'Streaks fetched', data);
   } catch (err) {
     next(err);
   }
@@ -89,7 +89,7 @@ const syncGamification = async (req, res, next) => {
 
     await gam.save();
 
-    return success(res, "Gamification synced");
+    return success(res, 'Gamification synced');
   } catch (err) {
     next(err);
   }
@@ -102,7 +102,7 @@ const earnCoins = async (req, res, next) => {
     const { coinsToAdd, goalMet } = req.body;
 
     if (!coinsToAdd || coinsToAdd <= 0) {
-      return error(res, "coinsToAdd must be positive", 400);
+      return error(res, 'coinsToAdd must be positive', 400);
     }
 
     const today = todayISO();
@@ -125,10 +125,20 @@ const earnCoins = async (req, res, next) => {
     if (actualCoins > 0) {
       // Ensure we are working with integers
       gam.coinsBalance = Math.round(gam.coinsBalance + actualCoins);
-      gam.coinsEarnedToday = Math.round(
-        (gam.coinsEarnedToday || 0) + actualCoins,
-      );
+      gam.coinsEarnedToday = Math.round((gam.coinsEarnedToday || 0) + actualCoins);
       gam.lastCoinDate = today;
+
+      if (!gam.claimHistory) gam.claimHistory = [];
+      gam.claimHistory.push({
+        rewardId: 'steps_daily_card',
+        amount: actualCoins,
+        source: 'Daily Step Reward',
+        createdAt: new Date(),
+      });
+
+      if (gam.claimHistory.length > 50) {
+        gam.claimHistory.shift();
+      }
     }
 
     await gam.save();
@@ -148,7 +158,7 @@ const getLeaderboard = async (req, res, next) => {
     const top = await Gamification.find()
       .sort({ coinsBalance: -1 })
       .limit(20)
-      .populate("user", "name avatarUrl");
+      .populate('user', 'name avatarUrl');
 
     const data = top.map((g, i) => ({
       rank: i + 1,
@@ -157,10 +167,10 @@ const getLeaderboard = async (req, res, next) => {
       avatarUrl: g.user.avatarUrl,
       coinsBalance: g.coinsBalance,
       streakDays: g.streakDays,
-      badgesCount: g.getBadgeList().filter((b) => b.unlocked).length,
+      badgesCount: g.getBadgeList().filter(b => b.unlocked).length,
     }));
 
-    return success(res, "Leaderboard fetched", data);
+    return success(res, 'Leaderboard fetched', data);
   } catch (err) {
     next(err);
   }
@@ -183,12 +193,13 @@ const getCoinData = async (req, res, next) => {
     const recentOrders = await Order.find({ user: userId })
       .sort({ createdAt: -1 })
       .limit(10)
-      .select("totalCoins totalPrice createdAt _id paymentMethod");
+      .select('totalCoins totalPrice createdAt _id paymentMethod');
+
 
     // Last 30 days of health activity where goal was met = EARNED
     const thirtyDaysAgo = new Date();
     thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-    const thirtyAgoISO = thirtyDaysAgo.toISOString().split("T")[0];
+    const thirtyAgoISO = thirtyDaysAgo.toISOString().split('T')[0];
 
     const activities = await HealthActivity.find({
       user: userId,
@@ -197,42 +208,47 @@ const getCoinData = async (req, res, next) => {
     })
       .sort({ date: -1 })
       .limit(20)
-      .select("date steps calories goalMet coinsEarned");
+      .select('date steps calories goalMet coinsEarned');
 
     const transactions = [
-      // Earned from step goals
-      ...activities.map((a) => ({
+      // Earned from passive step generation
+      ...activities.map(a => ({
         id: `act_${a._id}`,
-        type: "EARNED",
-        amount: a.coinsEarned || 10, // fallback 10 if field missing
-        source: `Step Goal Achieved — ${a.steps.toLocaleString()} steps`,
+        type: 'EARNED',
+        amount: a.coinsEarned || 10,
+        source: `Passive Step Coins — ${a.steps.toLocaleString()} steps`,
         createdAt: new Date(a.date).toISOString(),
       })),
       // Spent on orders (only coin purchases)
       ...recentOrders
-        .filter((o) => o.totalCoins > 0 && o.paymentMethod === "COIN_PURCHASE")
-        .map((o) => ({
+        .filter(o => o.totalCoins > 0 && o.paymentMethod === 'COIN_PURCHASE')
+        .map(o => ({
           id: `ord_${o._id}`,
-          type: "SPENT",
+          type: 'SPENT',
           amount: o.totalCoins,
           source: `Shop Purchase — Order #${o._id.toString().slice(-6).toUpperCase()}`,
           createdAt: o.createdAt.toISOString(),
         })),
+        // Hydration and Streak Claims
+      ...(gam.claimHistory || []).map(c => ({
+        id: `claim_${c._id}`,
+        type: 'EARNED',
+        amount: c.amount,
+        source: c.source || `Claimed ${c.rewardId}`,
+        createdAt: c.createdAt.toISOString(),
+      })),
     ].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 
     // ── Build claimable rewards ───────────────────────────────────────────────
-    const todayActivity = await HealthActivity.findOne({
-      user: userId,
-      date: today,
-    });
-    const todaySteps = todayActivity?.steps ?? 0;
-    const todayWater = todayActivity?.hydration ?? 0;
-    const streakDays = gam.streakDays ?? 0;
-    const dailyGoal = req.user.dailyStepGoal || 10000;
+    const todayActivity = await HealthActivity.findOne({ user: userId, date: today });
+    const todaySteps     = todayActivity?.steps ?? 0;
+    const todayWater     = todayActivity?.hydration ?? 0;
+    const streakDays     = gam.streakDays ?? 0;
+    const dailyGoal      = req.user.dailyStepGoal || 10000;
 
     const claimable = [
       {
-        id: "steps_daily",
+        id: 'steps_daily',
         title: `Walk ${dailyGoal.toLocaleString()} Steps`,
         threshold: dailyGoal,
         reward: 50,
@@ -240,32 +256,40 @@ const getCoinData = async (req, res, next) => {
         isClaimed: todaySteps >= dailyGoal && gam.lastCoinDate === today,
       },
       {
-        id: "hydration_daily",
-        title: "Daily Water Goal (2000ml)",
+        id: 'hydration_daily',
+        title: 'Daily Water Goal (2000ml)',
         threshold: 2000,
         reward: 20,
         currentValue: todayWater,
-        isClaimed: todayWater >= 2000,
+        isClaimed: gam.lastWaterCoinDate === today,
       },
       {
-        id: "streak_weekly",
-        title: "Complete 7-Day Streak",
+        id: 'streak_weekly',
+        title: 'Complete 7-Day Streak',
         threshold: 7,
         reward: 200,
         currentValue: streakDays,
         isClaimed: gam.badges?.consistent?.unlocked ?? false,
       },
       {
-        id: "streak_biweekly",
-        title: "Complete 15-Day Streak",
+        id: 'streak_biweekly',
+        title: 'Complete 15-Day Streak',
         threshold: 15,
-        reward: 500,
+        reward: 400,
         currentValue: streakDays,
         isClaimed: gam.badges?.finisher?.unlocked ?? false,
       },
+      {
+        id: 'streak_monthly',
+        title: 'Complete 30-Day Streak',
+        threshold: 30,
+        reward: 800,
+        currentValue: streakDays,
+        isClaimed: gam.badges?.elite?.unlocked ?? false,
+      },
     ];
 
-    return success(res, "Coin data fetched", {
+    return success(res, 'Coin data fetched', {
       balance: gam.coinsBalance,
       transactions,
       claimable,
@@ -283,63 +307,85 @@ const claimReward = async (req, res, next) => {
     const { rewardId } = req.body;
     const today = todayISO();
 
-    if (!rewardId) return error(res, "rewardId is required", 400);
+    if (!rewardId) return error(res, 'rewardId is required', 400);
 
     let gam = await Gamification.findOne({ user: userId });
     if (!gam) gam = await Gamification.create({ user: userId });
 
-    const todayActivity = await HealthActivity.findOne({
-      user: userId,
-      date: today,
-    });
+    const todayActivity = await HealthActivity.findOne({ user: userId, date: today });
     const todaySteps = todayActivity?.steps ?? 0;
     const todayWater = todayActivity?.hydration ?? 0;
-    const dailyGoal = req.user.dailyStepGoal || 10000;
+    const dailyGoal  = req.user.dailyStepGoal || 10000;
 
     const REWARDS = {
       steps_daily: {
+        title: `Walk ${dailyGoal.toLocaleString()} Steps`,
         reward: 50,
         isMet: () => todaySteps >= dailyGoal,
         isAlreadyClaimed: () => gam.lastCoinDate === today,
       },
       hydration_daily: {
+        title: 'Daily Water Goal Completed',
         reward: 20,
         isMet: () => todayWater >= 2000,
-        isAlreadyClaimed: () => false, // no persistent flag for hydration yet
+        isAlreadyClaimed: () => gam.lastWaterCoinDate === today,
       },
       streak_weekly: {
+        title: '7-Day Streak Complete',
         reward: 200,
         isMet: () => gam.streakDays >= 7,
         isAlreadyClaimed: () => gam.badges?.consistent?.unlocked ?? false,
       },
       streak_biweekly: {
-        reward: 500,
+        title: '15-Day Streak Complete',
+        reward: 400,
         isMet: () => gam.streakDays >= 15,
         isAlreadyClaimed: () => gam.badges?.finisher?.unlocked ?? false,
+      },
+      streak_monthly: {
+        title: '30-Day Streak Complete',
+        reward: 800,
+        isMet: () => gam.streakDays >= 30,
+        isAlreadyClaimed: () => gam.badges?.elite?.unlocked ?? false,
       },
     };
 
     const rewardDef = REWARDS[rewardId];
-    if (!rewardDef) return error(res, "Unknown reward ID", 400);
-    if (!rewardDef.isMet())
-      return error(res, "Reward threshold not yet reached", 400);
-    if (rewardDef.isAlreadyClaimed())
-      return error(res, "Reward already claimed", 400);
+    if (!rewardDef) return error(res, 'Unknown reward ID', 400);
+    if (!rewardDef.isMet()) return error(res, 'Reward threshold not yet reached', 400);
+    if (rewardDef.isAlreadyClaimed()) return error(res, 'Reward already claimed', 400);
 
     gam.coinsBalance = Math.round(gam.coinsBalance + rewardDef.reward);
-    gam.coinsEarnedToday = Math.round(
-      (gam.coinsEarnedToday || 0) + rewardDef.reward,
-    );
+    gam.coinsEarnedToday = Math.round((gam.coinsEarnedToday || 0) + rewardDef.reward);
     gam.lastCoinDate = today;
 
-    // For streak rewards, award badge too
-    if (rewardId === "streak_weekly" && !gam.badges.consistent.unlocked) {
+    // For streak/hydration rewards, award badge and set constraints
+    if (rewardId === 'hydration_daily') {
+      gam.lastWaterCoinDate = today;
+    }
+    if (rewardId === 'streak_weekly' && !gam.badges.consistent.unlocked) {
       gam.badges.consistent.unlocked = true;
       gam.badges.consistent.unlockedAt = new Date();
     }
-    if (rewardId === "streak_biweekly" && !gam.badges.finisher.unlocked) {
+    if (rewardId === 'streak_biweekly' && !gam.badges.finisher.unlocked) {
       gam.badges.finisher.unlocked = true;
       gam.badges.finisher.unlockedAt = new Date();
+    }
+    if (rewardId === 'streak_monthly' && !gam.badges.elite.unlocked) {
+      gam.badges.elite.unlocked = true;
+      gam.badges.elite.unlockedAt = new Date();
+    }
+
+    if (!gam.claimHistory) gam.claimHistory = [];
+    gam.claimHistory.push({
+      rewardId,
+      amount: rewardDef.reward,
+      source: rewardDef.title || `Claimed ${rewardId}`,
+      createdAt: new Date(),
+    });
+
+    if (gam.claimHistory.length > 50) {
+      gam.claimHistory.shift();
     }
 
     await gam.save();

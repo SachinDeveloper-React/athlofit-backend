@@ -22,6 +22,7 @@ const gamificationSchema = new mongoose.Schema(
     bestStreakDays: { type: Number, default: 0, min: 0 },
     lastActiveDate: { type: String, default: null }, // ISO "YYYY-MM-DD"
     lastCoinDate: { type: String, default: null },    // ISO "YYYY-MM-DD"
+    lastWaterCoinDate: { type: String, default: null }, // ISO "YYYY-MM-DD"
 
     // Track unlock dates for badge history
     badges: {
@@ -30,6 +31,16 @@ const gamificationSchema = new mongoose.Schema(
       finisher: { unlocked: { type: Boolean, default: false }, unlockedAt: Date },
       elite: { unlocked: { type: Boolean, default: false }, unlockedAt: Date },
     },
+
+    // Transactional log of claimed rewards (Water, Streaks, Daily Goals)
+    claimHistory: [
+      {
+        rewardId: String,
+        amount: Number,
+        source: String,
+        createdAt: { type: Date, default: Date.now },
+      },
+    ],
   },
   {
     timestamps: true,
