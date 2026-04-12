@@ -9,7 +9,7 @@ const generateAccessToken = (userId) => {
   return jwt.sign(
     { sub: userId, type: 'access' },
     process.env.JWT_SECRET,
-    { expiresIn: process.env.JWT_EXPIRES_IN || '1m' }
+    { expiresIn: process.env.JWT_EXPIRES_IN || '15m' }
   );
 };
 

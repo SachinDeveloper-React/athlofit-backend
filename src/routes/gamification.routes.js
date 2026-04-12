@@ -36,4 +36,20 @@ router.post('/coins/claim', claimReward);
 // GET /gamification/leaderboard
 router.get('/leaderboard', getLeaderboard);
 
+// Advanced Achievements API
+const {
+  createAchievement,
+  getAdvancedAchievements,
+  claimAdvancedAchievement,
+} = require('../controllers/gamification.controller');
+
+// POST /gamification/admin/achievements  — Admin route to create an achievement
+router.post('/admin/achievements', createAchievement);
+
+// GET /gamification/achievements  — Get all achievements and progress
+router.get('/achievements', getAdvancedAchievements);
+
+// POST /gamification/achievements/claim  — Claim a completed achievement
+router.post('/achievements/claim', claimAdvancedAchievement);
+
 module.exports = router;

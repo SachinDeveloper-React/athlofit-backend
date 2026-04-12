@@ -399,6 +399,184 @@ const claimReward = async (req, res, next) => {
   }
 };
 
+// ─── POST /gamification/achievements (Admin/Internal) ────────────────────────
+// Body: { key, title, description, reward, criteriaType, targetValue, icon }
+const Achievement = require('../models/Achievement.model');
+
+const createAchievement = async (req, res, next) => {
+  try {
+    const { key, title, description, reward, criteriaType, targetValue, icon } = req.body;
+    
+    let achievement = await Achievement.findOne({ key });
+    if (achievement) {
+      // Update existing
+      achievement.title = title;
+      achievement.description = description;
+      achievement.reward = reward;
+      achievement.criteriaType = criteriaType;
+      achievement.targetValue = targetValue;
+      if (icon) achievement.icon = icon;
+      await achievement.save();
+    } else {
+      achievement = await Achievement.create({
+        key, title, description, reward, criteriaType, targetValue, icon
+      });
+    }
+
+    return success(res, 'Achievement created/updated successfully', achievement);
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ─── GET /gamification/achievements ──────────────────────────────────────────
+// Returns a list of all advanced achievements and the user's progress for each.
+const getAdvancedAchievements = async (req, res, next) => {
+  try {
+    const userId = req.user._id;
+    const achievements = await Achievement.find();
+    
+    let gam = await Gamification.findOne({ user: userId });
+    if (!gam) gam = await Gamification.create({ user: userId });
+
+    // Pre-compute basic metrics for criteria checking
+    const activities = await HealthActivity.find({ user: userId });
+    
+    let totalSteps = 0;
+    let maxDailySteps = 0;
+    let totalWater = 0;
+    activities.forEach(a => {
+      totalSteps += a.steps;
+      if (a.steps > maxDailySteps) maxDailySteps = a.steps;
+      totalWater += a.hydration;
+    });
+
+    const ordersCount = await Order.countDocuments({ user: userId });
+
+    const results = achievements.map(ach => {
+      let progress = 0;
+      switch (ach.criteriaType) {
+        case 'STEPS_TOTAL':
+          progress = totalSteps;
+          break;
+        case 'STEPS_DAILY':
+          progress = maxDailySteps;
+          break;
+        case 'WATER_TOTAL':
+          progress = totalWater;
+          break;
+        case 'ORDERS_COUNT':
+          progress = ordersCount;
+          break;
+        default:
+          progress = 0;
+      }
+
+      // Check if previously claimed
+      const isClaimed = gam.claimedAchievements?.some(
+        c => c.achievementId.toString() === ach._id.toString()
+      ) ?? false;
+
+      const isClaimable = progress >= ach.targetValue && !isClaimed;
+
+      return {
+        id: ach._id,
+        key: ach.key,
+        title: ach.title,
+        description: ach.description,
+        reward: ach.reward,
+        icon: ach.icon || 'Award',
+        criteriaType: ach.criteriaType,
+        targetValue: ach.targetValue,
+        progress: Math.min(progress, ach.targetValue),
+        isClaimable,
+        isClaimed,
+      };
+    });
+
+    return success(res, 'Advanced achievements fetched', results);
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ─── POST /gamification/achievements/claim ─────────────────────────────────────
+// Body: { achievementId }
+const claimAdvancedAchievement = async (req, res, next) => {
+  try {
+    const userId = req.user._id;
+    const { achievementId } = req.body;
+
+    if (!achievementId) return error(res, 'achievementId is required', 400);
+
+    const achievement = await Achievement.findById(achievementId);
+    if (!achievement) return error(res, 'Achievement not found', 404);
+
+    let gam = await Gamification.findOne({ user: userId });
+    if (!gam) gam = await Gamification.create({ user: userId });
+
+    // Check if already claimed
+    const alreadyClaimed = gam.claimedAchievements?.some(
+      c => c.achievementId.toString() === achievement._id.toString()
+    );
+    if (alreadyClaimed) return error(res, 'Achievement already claimed', 400);
+
+    // Re-verify progress
+    let progress = 0;
+    if (achievement.criteriaType === 'STEPS_TOTAL' || achievement.criteriaType === 'STEPS_DAILY' || achievement.criteriaType === 'WATER_TOTAL') {
+      const activities = await HealthActivity.find({ user: userId });
+      if (achievement.criteriaType === 'STEPS_TOTAL') {
+        progress = activities.reduce((acc, curr) => acc + curr.steps, 0);
+      } else if (achievement.criteriaType === 'STEPS_DAILY') {
+        progress = Math.max(...activities.map(a => a.steps || 0), 0);
+      } else if (achievement.criteriaType === 'WATER_TOTAL') {
+        progress = activities.reduce((acc, curr) => acc + curr.hydration, 0);
+      }
+    } else if (achievement.criteriaType === 'ORDERS_COUNT') {
+      progress = await Order.countDocuments({ user: userId });
+    }
+
+    if (progress < achievement.targetValue) {
+      return error(res, 'Achievement criteria not met yet', 400);
+    }
+
+    // Award
+    gam.coinsBalance = Math.round(gam.coinsBalance + achievement.reward);
+    const today = new Date().toISOString().split('T')[0];
+    
+    // We do NOT add advanced achievements to the daily limit since they are one-time massive rewards
+    
+    // Log transaction
+    if (!gam.claimHistory) gam.claimHistory = [];
+    gam.claimHistory.push({
+      rewardId: `ach_${achievement.key}`,
+      amount: achievement.reward,
+      source: `Achievement: ${achievement.title}`,
+      createdAt: new Date(),
+    });
+
+    if (gam.claimHistory.length > 50) {
+      gam.claimHistory.shift();
+    }
+
+    // Mark as claimed
+    if (!gam.claimedAchievements) gam.claimedAchievements = [];
+    gam.claimedAchievements.push({
+      achievementId: achievement._id,
+      claimedAt: new Date(),
+    });
+
+    await gam.save();
+
+    return success(res, `Claimed \${achievement.reward} coins from achievement!`, {
+      newBalance: gam.coinsBalance,
+      achievementId: achievement._id,
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
 module.exports = {
   getGamification,
   getStreaks,
@@ -407,4 +585,7 @@ module.exports = {
   getLeaderboard,
   getCoinData,
   claimReward,
+  createAchievement,
+  getAdvancedAchievements,
+  claimAdvancedAchievement,
 };

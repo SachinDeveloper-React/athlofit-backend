@@ -20,7 +20,7 @@ const updateProfile = async (req, res, next) => {
   try {
     const allowed = [
       'name', 'phone', 'dob', 'gender', 'height',
-      'weight', 'bloodType', 'avatarUrl', 'dailyStepGoal',
+      'weight', 'bloodType', 'avatarUrl', 'dailyStepGoal', 'unitSystem',
     ];
 
     const updates = {};

@@ -4,6 +4,9 @@ const Gamification = require('../models/Gamification.model');
 const { generateAccessToken, saveRefreshToken, rotateRefreshToken, revokeAllUserTokens } = require('../utils/jwt');
 const { generateOtp, getOtpExpiry, sendOtpEmail } = require('../utils/otp');
 const { success, error } = require('../utils/response');
+const { OAuth2Client } = require('google-auth-library');
+
+const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
 
 // ─── POST /auth/user/signup ───────────────────────────────────────────────────
 const signup = async (req, res, next) => {
@@ -241,6 +244,76 @@ const resetPassword = async (req, res, next) => {
   }
 };
 
+// ─── POST /auth/google ────────────────────────────────────────────────────────
+const googleLogin = async (req, res, next) => {
+  try {
+    const { idToken } = req.body;
+    if (!idToken) return error(res, 'Google idToken is required', 400);
+
+    // Verify the idToken with Google
+    let payload;
+    try {
+      const ticket = await googleClient.verifyIdToken({
+        idToken,
+        audience: process.env.GOOGLE_CLIENT_ID,
+      });
+      payload = ticket.getPayload();
+    } catch (verifyErr) {
+      return error(res, 'Invalid Google token', 401);
+    }
+
+    const { sub: googleId, email, name, picture } = payload;
+    if (!email) return error(res, 'Could not retrieve email from Google account', 400);
+
+    // Find or create user
+    let user = await User.findOne({ $or: [{ googleId }, { email }] });
+
+    if (!user) {
+      // New user — create account
+      user = await User.create({
+        name: name || email.split('@')[0],
+        email,
+        googleId,
+        provider: 'google',
+        emailVerified: true,
+        avatarUrl: picture || null,
+      });
+
+      // Bootstrap gamification record
+      await Gamification.findOneAndUpdate(
+        { user: user._id },
+        { user: user._id },
+        { upsert: true, new: true, setDefaultsOnInsert: true }
+      );
+    } else if (!user.googleId) {
+      // Existing email user — link Google account
+      user.googleId = googleId;
+      user.provider = 'google';
+      user.emailVerified = true;
+      if (!user.avatarUrl && picture) user.avatarUrl = picture;
+      await user.save();
+    }
+
+    const accessToken = generateAccessToken(user._id.toString());
+    const refreshToken = await saveRefreshToken(
+      user._id,
+      req.ip,
+      req.headers['user-agent']
+    );
+
+    const userObj = user.toJSON();
+
+    return success(res, 'Google login successful', {
+      status: 'success',
+      accessToken,
+      refreshToken,
+      user: userObj,
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
 module.exports = {
   signup,
   verifySignupOtp,
@@ -250,4 +323,5 @@ module.exports = {
   forgotPassword,
   resendOtp,
   resetPassword,
+  googleLogin,
 };

@@ -12,6 +12,7 @@ const gamificationRoutes = require('./routes/gamification.routes');
 const configRoutes      = require('./routes/config.routes');
 const shopRoutes        = require('./routes/shop.routes');
 const nutritionRoutes   = require('./routes/nutrition.routes');
+const referralRoutes    = require('./routes/referral.routes');
 const { errorHandler, notFound } = require('./middleware/error.middleware');
 
 const app = express();
@@ -56,7 +57,20 @@ app.get('/', (req, res) => {
     message: 'Athlofit API is running 🏃',
     version: '1.0.0',
     environment: process.env.NODE_ENV,
+    isMaintenance: process.env.MAINTENANCE_MODE === 'true',
   });
+});
+
+// ─── Maintenance Mode Middleware ──────────────────────────────────────────────
+app.use((req, res, next) => {
+  if (process.env.MAINTENANCE_MODE === 'true') {
+    return res.status(503).json({
+      success: false,
+      message: 'Service is currently under maintenance. We will be back shortly!',
+      isMaintenance: true,
+    });
+  }
+  next();
 });
 
 // ─── Routes ───────────────────────────────────────────────────────────────────
@@ -67,6 +81,7 @@ app.use('/gamification',  gamificationRoutes);
 app.use('/config',        configRoutes);
 app.use('/shop',          shopRoutes);
 app.use('/nutrition',     nutritionRoutes);
+app.use('/referral',      referralRoutes);
 
 // ─── Error handling ───────────────────────────────────────────────────────────
 app.use(notFound);

@@ -10,6 +10,7 @@ const {
   forgotPassword,
   resendOtp,
   resetPassword,
+  googleLogin,
 } = require('../controllers/auth.controller');
 const {
   signupRules,
@@ -33,5 +34,8 @@ router.post('/reset-password', resetPasswordRules, validate, resetPassword);
 
 // Protected
 router.post('/logout', protect, logout);
+
+// Google OAuth
+router.post('/google', googleLogin);
 
 module.exports = router;

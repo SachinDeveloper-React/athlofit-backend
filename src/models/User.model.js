@@ -1,6 +1,11 @@
 // src/models/User.model.js
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
+const crypto = require('crypto');
+
+// ─── Helper: generate unique 8-char alphanumeric referral code ────────────────
+const generateReferralCode = () =>
+  crypto.randomBytes(4).toString('hex').toUpperCase();
 
 const userSchema = new mongoose.Schema(
   {
@@ -47,6 +52,16 @@ const userSchema = new mongoose.Schema(
     avatarUrl: { type: String, default: null },
     age: { type: Number, default: null },
 
+    // Unit system preference
+    unitSystem: { type: String, enum: ['metric', 'imperial'], default: 'metric' },
+
+    // Google OAuth
+    googleId: { type: String, default: null, sparse: true },
+
+    // Referral
+    referralCode: { type: String, unique: true, sparse: true },
+    referredBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+
     // Health goal
     dailyStepGoal: { type: Number, default: 10000 },
 
@@ -90,10 +105,16 @@ const userSchema = new mongoose.Schema(
   }
 );
 
-// ─── Pre-save hook: hash password ─────────────────────────────────────────────
+// ─── Pre-save hook: hash password + auto-generate referral code ──────────────
 userSchema.pre('save', async function (next) {
-  if (!this.isModified('password') || !this.password) return next();
-  this.password = await bcrypt.hash(this.password, 12);
+  // Hash password if modified
+  if (this.isModified('password') && this.password) {
+    this.password = await bcrypt.hash(this.password, 12);
+  }
+  // Auto-generate referral code on first save
+  if (!this.referralCode) {
+    this.referralCode = generateReferralCode();
+  }
   next();
 });
 

@@ -41,6 +41,14 @@ const gamificationSchema = new mongoose.Schema(
         createdAt: { type: Date, default: Date.now },
       },
     ],
+
+    // Track advanced achievements that the user has claimed
+    claimedAchievements: [
+      {
+        achievementId: { type: mongoose.Schema.Types.ObjectId, ref: 'Achievement' },
+        claimedAt: { type: Date, default: Date.now },
+      },
+    ],
   },
   {
     timestamps: true,
