@@ -151,6 +151,7 @@ const getTodayHealth = async (req, res, next) => {
 
 // ─── Internal: update streak ─────────────────────────────────────────────────
 async function _updateStreak(userId, date) {
+  const BadgeDefinition = require('../models/BadgeDefinition.model');
   const gam = await Gamification.findOne({ user: userId });
   if (!gam) return;
 
@@ -167,7 +168,9 @@ async function _updateStreak(userId, date) {
     if (gam.streakDays > gam.bestStreakDays) {
       gam.bestStreakDays = gam.streakDays;
     }
-    gam.awardBadges();
+    // Load active badge definitions and award any newly unlocked badges
+    const badgeDefs = await BadgeDefinition.find({ isActive: true }).sort({ order: 1 });
+    gam.awardBadges(badgeDefs);
     await gam.save();
   }
 }

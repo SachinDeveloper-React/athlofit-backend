@@ -1,13 +1,6 @@
 // src/models/Gamification.model.js
 const mongoose = require('mongoose');
 
-const BADGE_THRESHOLDS = {
-  starter: 1,
-  consistent: 7,
-  finisher: 15,
-  elite: 30,
-};
-
 const gamificationSchema = new mongoose.Schema(
   {
     user: {
@@ -24,12 +17,21 @@ const gamificationSchema = new mongoose.Schema(
     lastCoinDate: { type: String, default: null },    // ISO "YYYY-MM-DD"
     lastWaterCoinDate: { type: String, default: null }, // ISO "YYYY-MM-DD"
 
-    // Track unlock dates for badge history
+    // ─── Dynamic badges array (keys match BadgeDefinition.key) ──────────────
+    // Replaces the old fixed-key object { starter, consistent, finisher, elite }
+    badgeList: [
+      {
+        key: { type: String, required: true },
+        unlocked: { type: Boolean, default: false },
+        unlockedAt: { type: Date, default: null },
+      },
+    ],
+
+    // ─── Legacy field kept for one-time migration detection ─────────────────
+    // We detect if "badges" (old object) exists and migrate to badgeList once.
     badges: {
-      starter: { unlocked: { type: Boolean, default: false }, unlockedAt: Date },
-      consistent: { unlocked: { type: Boolean, default: false }, unlockedAt: Date },
-      finisher: { unlocked: { type: Boolean, default: false }, unlockedAt: Date },
-      elite: { unlocked: { type: Boolean, default: false }, unlockedAt: Date },
+      type: mongoose.Schema.Types.Mixed,
+      default: undefined,
     },
 
     // Transactional log of claimed rewards (Water, Streaks, Daily Goals)
@@ -61,54 +63,109 @@ const gamificationSchema = new mongoose.Schema(
   }
 );
 
-// ─── Virtual: compute streaks badge list (matches app type TrackerBadge[]) ────
-gamificationSchema.methods.getBadgeList = function () {
-  const badgeMeta = [
-    { key: 'starter', title: 'Starter', rule: '1 day' },
-    { key: 'consistent', title: 'Consistent', rule: '7 days' },
-    { key: 'finisher', title: 'Finisher', rule: '15 days' },
-    { key: 'elite', title: 'Elite', rule: '30 days' },
-  ];
+// ─── Migration helper ─────────────────────────────────────────────────────────
+// Detects old fixed-key badges object and migrates values into the new badgeList array.
+gamificationSchema.methods.migrateOldBadges = function () {
+  // Old structure had top-level badges.starter, badges.consistent, etc.
+  const OLD_KEYS = ['starter', 'consistent', 'finisher', 'elite'];
+  const oldBadges = this.badges;
+  if (!oldBadges || typeof oldBadges !== 'object') return;
 
-  return badgeMeta.map(b => ({
-    key: b.key,
-    title: b.title,
-    rule: b.rule,
-    unlocked: this.badges[b.key]?.unlocked ?? false,
-  }));
+  // Check if it has the old fixed-key shape
+  const hasOldShape = OLD_KEYS.some(k => oldBadges[k] !== undefined);
+  if (!hasOldShape) return;
+
+  // Copy unlock states to new badgeList
+  for (const key of OLD_KEYS) {
+    const existing = this.badgeList.find(b => b.key === key);
+    const oldEntry = oldBadges[key];
+    if (!oldEntry) continue;
+
+    if (existing) {
+      // Keep highest-trust value (old wins if unlocked)
+      if (oldEntry.unlocked && !existing.unlocked) {
+        existing.unlocked = true;
+        existing.unlockedAt = oldEntry.unlockedAt || new Date();
+      }
+    } else {
+      this.badgeList.push({
+        key,
+        unlocked: oldEntry.unlocked ?? false,
+        unlockedAt: oldEntry.unlockedAt ?? null,
+      });
+    }
+  }
+
+  // Nullify old field after migration
+  this.badges = undefined;
 };
 
-// ─── Method: compute next badge threshold ─────────────────────────────────────
-gamificationSchema.methods.getNextBadgeAt = function () {
-  const order = ['starter', 'consistent', 'finisher', 'elite'];
-  for (const key of order) {
-    if (!this.badges[key]?.unlocked) {
-      return BADGE_THRESHOLDS[key];
+// ─── Build badge list for API response ───────────────────────────────────────
+// badgeDefs: BadgeDefinition[] sorted by `order`
+gamificationSchema.methods.getBadgeList = function (badgeDefs) {
+  return badgeDefs.map(def => {
+    const entry = this.badgeList.find(b => b.key === def.key);
+    return {
+      key: def.key,
+      title: def.title,
+      rule: def.rule,
+      emoji: def.emoji,
+      color: def.color,
+      threshold: def.threshold,
+      coinReward: def.coinReward,
+      unlocked: entry?.unlocked ?? false,
+      unlockedAt: entry?.unlockedAt ?? null,
+    };
+  });
+};
+
+// ─── Next badge threshold ─────────────────────────────────────────────────────
+// badgeDefs: BadgeDefinition[] sorted by `order`
+gamificationSchema.methods.getNextBadgeAt = function (badgeDefs) {
+  for (const def of badgeDefs) {
+    const entry = this.badgeList.find(b => b.key === def.key);
+    if (!entry?.unlocked) {
+      return def.threshold;
     }
   }
   return null; // all unlocked
 };
 
-// ─── Method: check and award badges based on current streak ───────────────────
-gamificationSchema.methods.awardBadges = function () {
+// ─── Award badges based on current streakDays ─────────────────────────────────
+// badgeDefs: BadgeDefinition[] sorted by `order`
+gamificationSchema.methods.awardBadges = function (badgeDefs) {
   const streak = this.streakDays;
   const now = new Date();
 
-  if (streak >= 1 && !this.badges.starter.unlocked) {
-    this.badges.starter.unlocked = true;
-    this.badges.starter.unlockedAt = now;
+  for (const def of badgeDefs) {
+    if (streak < def.threshold) continue;
+
+    let entry = this.badgeList.find(b => b.key === def.key);
+    if (!entry) {
+      this.badgeList.push({ key: def.key, unlocked: false, unlockedAt: null });
+      entry = this.badgeList[this.badgeList.length - 1];
+    }
+
+    if (!entry.unlocked) {
+      entry.unlocked = true;
+      entry.unlockedAt = now;
+    }
   }
-  if (streak >= 7 && !this.badges.consistent.unlocked) {
-    this.badges.consistent.unlocked = true;
-    this.badges.consistent.unlockedAt = now;
-  }
-  if (streak >= 15 && !this.badges.finisher.unlocked) {
-    this.badges.finisher.unlocked = true;
-    this.badges.finisher.unlockedAt = now;
-  }
-  if (streak >= 30 && !this.badges.elite.unlocked) {
-    this.badges.elite.unlocked = true;
-    this.badges.elite.unlockedAt = now;
+};
+
+// ─── Check if a specific badge key is unlocked ───────────────────────────────
+gamificationSchema.methods.isBadgeUnlocked = function (key) {
+  return this.badgeList.find(b => b.key === key)?.unlocked ?? false;
+};
+
+// ─── Unlock a specific badge key ─────────────────────────────────────────────
+gamificationSchema.methods.unlockBadge = function (key) {
+  let entry = this.badgeList.find(b => b.key === key);
+  if (!entry) {
+    this.badgeList.push({ key, unlocked: true, unlockedAt: new Date() });
+  } else if (!entry.unlocked) {
+    entry.unlocked = true;
+    entry.unlockedAt = new Date();
   }
 };
 

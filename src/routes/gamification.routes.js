@@ -9,6 +9,13 @@ const {
   getLeaderboard,
   getCoinData,
   claimReward,
+  createAchievement,
+  getAdvancedAchievements,
+  claimAdvancedAchievement,
+  adminGetBadges,
+  adminCreateBadge,
+  adminUpdateBadge,
+  adminDeleteBadge,
 } = require('../controllers/gamification.controller');
 const { protect } = require('../middleware/auth.middleware');
 
@@ -18,7 +25,7 @@ router.use(protect);
 // GET /gamification/me  — GamificationState (balance, streak etc.)
 router.get('/me', getGamification);
 
-// GET /gamification/streaks  — StreaksResponseData
+// GET /gamification/streaks  — StreaksResponseData (with dynamic badge defs from DB)
 router.get('/streaks', getStreaks);
 
 // POST /gamification/sync  — sync local state to server
@@ -36,20 +43,29 @@ router.post('/coins/claim', claimReward);
 // GET /gamification/leaderboard
 router.get('/leaderboard', getLeaderboard);
 
-// Advanced Achievements API
-const {
-  createAchievement,
-  getAdvancedAchievements,
-  claimAdvancedAchievement,
-} = require('../controllers/gamification.controller');
+// ─── Advanced Achievements ────────────────────────────────────────────────────
 
-// POST /gamification/admin/achievements  — Admin route to create an achievement
+// POST /gamification/admin/achievements  — Admin: create/update achievement
 router.post('/admin/achievements', createAchievement);
 
-// GET /gamification/achievements  — Get all achievements and progress
+// GET /gamification/achievements  — Get all achievements and user progress
 router.get('/achievements', getAdvancedAchievements);
 
 // POST /gamification/achievements/claim  — Claim a completed achievement
 router.post('/achievements/claim', claimAdvancedAchievement);
+
+// ─── Admin: Badge Definitions CRUD ───────────────────────────────────────────
+
+// GET  /gamification/admin/badges        — list all badge definitions
+router.get('/admin/badges', adminGetBadges);
+
+// POST /gamification/admin/badges        — create a badge definition
+router.post('/admin/badges', adminCreateBadge);
+
+// PUT  /gamification/admin/badges/:id    — update a badge definition
+router.put('/admin/badges/:id', adminUpdateBadge);
+
+// DELETE /gamification/admin/badges/:id  — soft-delete (deactivate) a badge
+router.delete('/admin/badges/:id', adminDeleteBadge);
 
 module.exports = router;

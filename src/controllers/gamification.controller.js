@@ -1,19 +1,34 @@
 // src/controllers/gamification.controller.js
 const Gamification = require('../models/Gamification.model');
+const BadgeDefinition = require('../models/BadgeDefinition.model');
 const HealthActivity = require('../models/HealthActivity.model');
 const Order = require('../models/Order.model');
 const { success, error } = require('../utils/response');
-const { todayISO, buildDateRange } = require('../utils/date');
+const { todayISO } = require('../utils/date');
+
+// ─── Helper: load active badge defs + ensure user record is migrated ──────────
+const loadBadgeDefs = async () => {
+  return BadgeDefinition.find({ isActive: true }).sort({ order: 1 });
+};
+
+const ensureGamDoc = async (userId) => {
+  let gam = await Gamification.findOne({ user: userId });
+  if (!gam) {
+    gam = await Gamification.create({ user: userId });
+  }
+  return gam;
+};
+
+const migrateAndSave = async (gam) => {
+  // One-time migration from old badges object → new badgeList array
+  gam.migrateOldBadges();
+  await gam.save();
+};
 
 // ─── GET /gamification/me ─────────────────────────────────────────────────────
-// Returns: GamificationState (coinsBalance, streakDays, etc.)
 const getGamification = async (req, res, next) => {
   try {
-    let gam = await Gamification.findOne({ user: req.user._id });
-
-    if (!gam) {
-      gam = await Gamification.create({ user: req.user._id });
-    }
+    const gam = await ensureGamDoc(req.user._id);
 
     return success(res, 'Gamification data fetched', {
       coinsBalance: gam.coinsBalance,
@@ -29,20 +44,22 @@ const getGamification = async (req, res, next) => {
 };
 
 // ─── GET /gamification/streaks ────────────────────────────────────────────────
-// Returns: StreaksResponseData (streakDays, bestStreakDays, nextBadgeAt, badges[])
 const getStreaks = async (req, res, next) => {
   try {
-    let gam = await Gamification.findOne({ user: req.user._id });
+    const [gam, badgeDefs] = await Promise.all([
+      ensureGamDoc(req.user._id),
+      loadBadgeDefs(),
+    ]);
 
-    if (!gam) {
-      gam = await Gamification.create({ user: req.user._id });
-    }
+    // Auto-migrate if old schema detected
+    gam.migrateOldBadges();
+    await gam.save();
 
     const data = {
       streakDays: gam.streakDays,
       bestStreakDays: gam.bestStreakDays,
-      nextBadgeAt: gam.getNextBadgeAt(),
-      badges: gam.getBadgeList(),
+      nextBadgeAt: gam.getNextBadgeAt(badgeDefs),
+      badges: gam.getBadgeList(badgeDefs),
     };
 
     return success(res, 'Streaks fetched', data);
@@ -52,11 +69,9 @@ const getStreaks = async (req, res, next) => {
 };
 
 // ─── POST /gamification/sync ──────────────────────────────────────────────────
-// Body: { coinsEarnedToday, streakDays, ... }  — syncs local state to server
 const syncGamification = async (req, res, next) => {
   try {
     const {
-      coinsBalance,
       coinsEarnedToday,
       streakDays,
       bestStreakDays,
@@ -66,14 +81,13 @@ const syncGamification = async (req, res, next) => {
 
     const today = todayISO();
 
-    let gam = await Gamification.findOne({ user: req.user._id });
-    if (!gam) {
-      gam = await Gamification.create({ user: req.user._id });
-    }
+    const [gam, badgeDefs] = await Promise.all([
+      ensureGamDoc(req.user._id),
+      loadBadgeDefs(),
+    ]);
 
-    // IMPORTANT: NEVER accept `coinsBalance` from client sync!
-    // Coins should only be mutated via explicit earn/spend endpoints.
-    // if (coinsBalance !== undefined) gam.coinsBalance = coinsBalance; // REMOVED
+    gam.migrateOldBadges();
+
     if (streakDays !== undefined) gam.streakDays = streakDays;
     if (bestStreakDays !== undefined && bestStreakDays > gam.bestStreakDays) {
       gam.bestStreakDays = bestStreakDays;
@@ -85,7 +99,7 @@ const syncGamification = async (req, res, next) => {
     }
 
     // Re-check badges based on incoming streakDays
-    gam.awardBadges();
+    gam.awardBadges(badgeDefs);
 
     await gam.save();
 
@@ -96,7 +110,6 @@ const syncGamification = async (req, res, next) => {
 };
 
 // ─── POST /gamification/coins/earn ───────────────────────────────────────────
-// Earn coins for completing a goal (called by app when step goal met)
 const earnCoins = async (req, res, next) => {
   try {
     const { coinsToAdd, goalMet } = req.body;
@@ -106,24 +119,18 @@ const earnCoins = async (req, res, next) => {
     }
 
     const today = todayISO();
-    let gam = await Gamification.findOne({ user: req.user._id });
-    if (!gam) {
-      gam = await Gamification.create({ user: req.user._id });
-    }
+    const gam = await ensureGamDoc(req.user._id);
 
     // Reset daily coins if it's a new day
     if (gam.lastCoinDate !== today) {
       gam.coinsEarnedToday = 0;
     }
 
-    // Cap daily earning to prevent abuse (250 coins max per day from app)
     const MAX_DAILY_COINS = 250;
     const remainingAllowance = MAX_DAILY_COINS - (gam.coinsEarnedToday || 0);
-    // Big Company Rule: Prevent floating point currency issues by using Math.round
     const actualCoins = Math.round(Math.min(coinsToAdd, remainingAllowance));
 
     if (actualCoins > 0) {
-      // Ensure we are working with integers
       gam.coinsBalance = Math.round(gam.coinsBalance + actualCoins);
       gam.coinsEarnedToday = Math.round((gam.coinsEarnedToday || 0) + actualCoins);
       gam.lastCoinDate = today;
@@ -155,10 +162,13 @@ const earnCoins = async (req, res, next) => {
 // ─── GET /gamification/leaderboard ───────────────────────────────────────────
 const getLeaderboard = async (req, res, next) => {
   try {
-    const top = await Gamification.find()
-      .sort({ coinsBalance: -1 })
-      .limit(20)
-      .populate('user', 'name avatarUrl');
+    const [top, badgeDefs] = await Promise.all([
+      Gamification.find()
+        .sort({ coinsBalance: -1 })
+        .limit(20)
+        .populate('user', 'name avatarUrl'),
+      loadBadgeDefs(),
+    ]);
 
     const data = top.map((g, i) => ({
       rank: i + 1,
@@ -167,7 +177,7 @@ const getLeaderboard = async (req, res, next) => {
       avatarUrl: g.user.avatarUrl,
       coinsBalance: g.coinsBalance,
       streakDays: g.streakDays,
-      badgesCount: g.getBadgeList().filter(b => b.unlocked).length,
+      badgesCount: g.getBadgeList(badgeDefs).filter(b => b.unlocked).length,
     }));
 
     return success(res, 'Leaderboard fetched', data);
@@ -177,26 +187,24 @@ const getLeaderboard = async (req, res, next) => {
 };
 
 // ─── GET /gamification/coins/data ────────────────────────────────────────────
-// Returns: CoinData { balance, transactions[], claimable[] }
-// transactions = last 30 coin events derived from Gamification + Orders
-// claimable   = dynamic rewards based on today's HealthActivity progress
 const getCoinData = async (req, res, next) => {
   try {
     const userId = req.user._id;
     const today = todayISO();
 
-    let gam = await Gamification.findOne({ user: userId });
-    if (!gam) gam = await Gamification.create({ user: userId });
+    const [gam, badgeDefs] = await Promise.all([
+      ensureGamDoc(userId),
+      loadBadgeDefs(),
+    ]);
+
+    gam.migrateOldBadges();
 
     // ── Build transaction history ─────────────────────────────────────────────
-    // Recent orders as SPENT transactions
     const recentOrders = await Order.find({ user: userId })
       .sort({ createdAt: -1 })
       .limit(10)
       .select('totalCoins totalPrice createdAt _id paymentMethod');
 
-
-    // Last 30 days of health activity where goal was met = EARNED
     const thirtyDaysAgo = new Date();
     thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
     const thirtyAgoISO = thirtyDaysAgo.toISOString().split('T')[0];
@@ -211,7 +219,6 @@ const getCoinData = async (req, res, next) => {
       .select('date steps calories goalMet coinsEarned');
 
     const transactions = [
-      // Earned from passive step generation
       ...activities.map(a => ({
         id: `act_${a._id}`,
         type: 'EARNED',
@@ -219,7 +226,6 @@ const getCoinData = async (req, res, next) => {
         source: `Passive Step Coins — ${a.steps.toLocaleString()} steps`,
         createdAt: new Date(a.date).toISOString(),
       })),
-      // Spent on orders (only coin purchases)
       ...recentOrders
         .filter(o => o.totalCoins > 0 && o.paymentMethod === 'COIN_PURCHASE')
         .map(o => ({
@@ -229,7 +235,6 @@ const getCoinData = async (req, res, next) => {
           source: `Shop Purchase — Order #${o._id.toString().slice(-6).toUpperCase()}`,
           createdAt: o.createdAt.toISOString(),
         })),
-        // Hydration and Streak Claims
       ...(gam.claimHistory || []).map(c => ({
         id: `claim_${c._id}`,
         type: 'EARNED',
@@ -241,10 +246,20 @@ const getCoinData = async (req, res, next) => {
 
     // ── Build claimable rewards ───────────────────────────────────────────────
     const todayActivity = await HealthActivity.findOne({ user: userId, date: today });
-    const todaySteps     = todayActivity?.steps ?? 0;
-    const todayWater     = todayActivity?.hydration ?? 0;
-    const streakDays     = gam.streakDays ?? 0;
-    const dailyGoal      = req.user.dailyStepGoal || 10000;
+    const todaySteps = todayActivity?.steps ?? 0;
+    const todayWater = todayActivity?.hydration ?? 0;
+    const streakDays = gam.streakDays ?? 0;
+    const dailyGoal = req.user.dailyStepGoal || 10000;
+
+    // Dynamic streak badge rewards from DB
+    const streakClaimable = badgeDefs.map(def => ({
+      id: `streak_${def.key}`,
+      title: `Complete ${def.threshold}-Day Streak (${def.title})`,
+      threshold: def.threshold,
+      reward: def.coinReward,
+      currentValue: streakDays,
+      isClaimed: gam.isBadgeUnlocked(def.key),
+    }));
 
     const claimable = [
       {
@@ -263,31 +278,10 @@ const getCoinData = async (req, res, next) => {
         currentValue: todayWater,
         isClaimed: gam.lastWaterCoinDate === today,
       },
-      {
-        id: 'streak_weekly',
-        title: 'Complete 7-Day Streak',
-        threshold: 7,
-        reward: 200,
-        currentValue: streakDays,
-        isClaimed: gam.badges?.consistent?.unlocked ?? false,
-      },
-      {
-        id: 'streak_biweekly',
-        title: 'Complete 15-Day Streak',
-        threshold: 15,
-        reward: 400,
-        currentValue: streakDays,
-        isClaimed: gam.badges?.finisher?.unlocked ?? false,
-      },
-      {
-        id: 'streak_monthly',
-        title: 'Complete 30-Day Streak',
-        threshold: 30,
-        reward: 800,
-        currentValue: streakDays,
-        isClaimed: gam.badges?.elite?.unlocked ?? false,
-      },
+      ...streakClaimable,
     ];
+
+    await gam.save();
 
     return success(res, 'Coin data fetched', {
       balance: gam.coinsBalance,
@@ -300,7 +294,6 @@ const getCoinData = async (req, res, next) => {
 };
 
 // ─── POST /gamification/coins/claim ──────────────────────────────────────────
-// Body: { rewardId }  — awards coins if reward threshold is met and not yet claimed
 const claimReward = async (req, res, next) => {
   try {
     const userId = req.user._id;
@@ -309,46 +302,47 @@ const claimReward = async (req, res, next) => {
 
     if (!rewardId) return error(res, 'rewardId is required', 400);
 
-    let gam = await Gamification.findOne({ user: userId });
-    if (!gam) gam = await Gamification.create({ user: userId });
+    const [gam, badgeDefs] = await Promise.all([
+      ensureGamDoc(userId),
+      loadBadgeDefs(),
+    ]);
+
+    gam.migrateOldBadges();
 
     const todayActivity = await HealthActivity.findOne({ user: userId, date: today });
     const todaySteps = todayActivity?.steps ?? 0;
     const todayWater = todayActivity?.hydration ?? 0;
-    const dailyGoal  = req.user.dailyStepGoal || 10000;
+    const dailyGoal = req.user.dailyStepGoal || 10000;
 
+    // Build dynamic reward map: static + streak-per-badge-def
     const REWARDS = {
       steps_daily: {
         title: `Walk ${dailyGoal.toLocaleString()} Steps`,
         reward: 50,
         isMet: () => todaySteps >= dailyGoal,
         isAlreadyClaimed: () => gam.lastCoinDate === today,
+        onClaim: () => { gam.lastCoinDate = today; },
       },
       hydration_daily: {
         title: 'Daily Water Goal Completed',
         reward: 20,
         isMet: () => todayWater >= 2000,
         isAlreadyClaimed: () => gam.lastWaterCoinDate === today,
-      },
-      streak_weekly: {
-        title: '7-Day Streak Complete',
-        reward: 200,
-        isMet: () => gam.streakDays >= 7,
-        isAlreadyClaimed: () => gam.badges?.consistent?.unlocked ?? false,
-      },
-      streak_biweekly: {
-        title: '15-Day Streak Complete',
-        reward: 400,
-        isMet: () => gam.streakDays >= 15,
-        isAlreadyClaimed: () => gam.badges?.finisher?.unlocked ?? false,
-      },
-      streak_monthly: {
-        title: '30-Day Streak Complete',
-        reward: 800,
-        isMet: () => gam.streakDays >= 30,
-        isAlreadyClaimed: () => gam.badges?.elite?.unlocked ?? false,
+        onClaim: () => { gam.lastWaterCoinDate = today; },
       },
     };
+
+    // Add dynamic streak badge rewards from DB
+    for (const def of badgeDefs) {
+      const id = `streak_${def.key}`;
+      REWARDS[id] = {
+        title: `${def.threshold}-Day Streak (${def.title})`,
+        reward: def.coinReward,
+        isMet: () => gam.streakDays >= def.threshold,
+        isAlreadyClaimed: () => gam.isBadgeUnlocked(def.key),
+        onClaim: () => { gam.unlockBadge(def.key); },
+      };
+    }
 
     const rewardDef = REWARDS[rewardId];
     if (!rewardDef) return error(res, 'Unknown reward ID', 400);
@@ -357,24 +351,9 @@ const claimReward = async (req, res, next) => {
 
     gam.coinsBalance = Math.round(gam.coinsBalance + rewardDef.reward);
     gam.coinsEarnedToday = Math.round((gam.coinsEarnedToday || 0) + rewardDef.reward);
-    gam.lastCoinDate = today;
 
-    // For streak/hydration rewards, award badge and set constraints
-    if (rewardId === 'hydration_daily') {
-      gam.lastWaterCoinDate = today;
-    }
-    if (rewardId === 'streak_weekly' && !gam.badges.consistent.unlocked) {
-      gam.badges.consistent.unlocked = true;
-      gam.badges.consistent.unlockedAt = new Date();
-    }
-    if (rewardId === 'streak_biweekly' && !gam.badges.finisher.unlocked) {
-      gam.badges.finisher.unlocked = true;
-      gam.badges.finisher.unlockedAt = new Date();
-    }
-    if (rewardId === 'streak_monthly' && !gam.badges.elite.unlocked) {
-      gam.badges.elite.unlocked = true;
-      gam.badges.elite.unlockedAt = new Date();
-    }
+    // Run badge-specific side effects
+    rewardDef.onClaim();
 
     if (!gam.claimHistory) gam.claimHistory = [];
     gam.claimHistory.push({
@@ -399,17 +378,15 @@ const claimReward = async (req, res, next) => {
   }
 };
 
-// ─── POST /gamification/achievements (Admin/Internal) ────────────────────────
-// Body: { key, title, description, reward, criteriaType, targetValue, icon }
+// ─── Advanced Achievements ────────────────────────────────────────────────────
 const Achievement = require('../models/Achievement.model');
 
 const createAchievement = async (req, res, next) => {
   try {
     const { key, title, description, reward, criteriaType, targetValue, icon } = req.body;
-    
+
     let achievement = await Achievement.findOne({ key });
     if (achievement) {
-      // Update existing
       achievement.title = title;
       achievement.description = description;
       achievement.reward = reward;
@@ -419,7 +396,7 @@ const createAchievement = async (req, res, next) => {
       await achievement.save();
     } else {
       achievement = await Achievement.create({
-        key, title, description, reward, criteriaType, targetValue, icon
+        key, title, description, reward, criteriaType, targetValue, icon,
       });
     }
 
@@ -429,19 +406,15 @@ const createAchievement = async (req, res, next) => {
   }
 };
 
-// ─── GET /gamification/achievements ──────────────────────────────────────────
-// Returns a list of all advanced achievements and the user's progress for each.
 const getAdvancedAchievements = async (req, res, next) => {
   try {
     const userId = req.user._id;
     const achievements = await Achievement.find();
-    
-    let gam = await Gamification.findOne({ user: userId });
-    if (!gam) gam = await Gamification.create({ user: userId });
 
-    // Pre-compute basic metrics for criteria checking
+    const gam = await ensureGamDoc(userId);
+
     const activities = await HealthActivity.find({ user: userId });
-    
+
     let totalSteps = 0;
     let maxDailySteps = 0;
     let totalWater = 0;
@@ -456,23 +429,13 @@ const getAdvancedAchievements = async (req, res, next) => {
     const results = achievements.map(ach => {
       let progress = 0;
       switch (ach.criteriaType) {
-        case 'STEPS_TOTAL':
-          progress = totalSteps;
-          break;
-        case 'STEPS_DAILY':
-          progress = maxDailySteps;
-          break;
-        case 'WATER_TOTAL':
-          progress = totalWater;
-          break;
-        case 'ORDERS_COUNT':
-          progress = ordersCount;
-          break;
-        default:
-          progress = 0;
+        case 'STEPS_TOTAL': progress = totalSteps; break;
+        case 'STEPS_DAILY': progress = maxDailySteps; break;
+        case 'WATER_TOTAL': progress = totalWater; break;
+        case 'ORDERS_COUNT': progress = ordersCount; break;
+        default: progress = 0;
       }
 
-      // Check if previously claimed
       const isClaimed = gam.claimedAchievements?.some(
         c => c.achievementId.toString() === ach._id.toString()
       ) ?? false;
@@ -500,8 +463,6 @@ const getAdvancedAchievements = async (req, res, next) => {
   }
 };
 
-// ─── POST /gamification/achievements/claim ─────────────────────────────────────
-// Body: { achievementId }
 const claimAdvancedAchievement = async (req, res, next) => {
   try {
     const userId = req.user._id;
@@ -512,18 +473,15 @@ const claimAdvancedAchievement = async (req, res, next) => {
     const achievement = await Achievement.findById(achievementId);
     if (!achievement) return error(res, 'Achievement not found', 404);
 
-    let gam = await Gamification.findOne({ user: userId });
-    if (!gam) gam = await Gamification.create({ user: userId });
+    const gam = await ensureGamDoc(userId);
 
-    // Check if already claimed
     const alreadyClaimed = gam.claimedAchievements?.some(
       c => c.achievementId.toString() === achievement._id.toString()
     );
     if (alreadyClaimed) return error(res, 'Achievement already claimed', 400);
 
-    // Re-verify progress
     let progress = 0;
-    if (achievement.criteriaType === 'STEPS_TOTAL' || achievement.criteriaType === 'STEPS_DAILY' || achievement.criteriaType === 'WATER_TOTAL') {
+    if (['STEPS_TOTAL', 'STEPS_DAILY', 'WATER_TOTAL'].includes(achievement.criteriaType)) {
       const activities = await HealthActivity.find({ user: userId });
       if (achievement.criteriaType === 'STEPS_TOTAL') {
         progress = activities.reduce((acc, curr) => acc + curr.steps, 0);
@@ -540,13 +498,8 @@ const claimAdvancedAchievement = async (req, res, next) => {
       return error(res, 'Achievement criteria not met yet', 400);
     }
 
-    // Award
     gam.coinsBalance = Math.round(gam.coinsBalance + achievement.reward);
-    const today = new Date().toISOString().split('T')[0];
-    
-    // We do NOT add advanced achievements to the daily limit since they are one-time massive rewards
-    
-    // Log transaction
+
     if (!gam.claimHistory) gam.claimHistory = [];
     gam.claimHistory.push({
       rewardId: `ach_${achievement.key}`,
@@ -559,7 +512,6 @@ const claimAdvancedAchievement = async (req, res, next) => {
       gam.claimHistory.shift();
     }
 
-    // Mark as claimed
     if (!gam.claimedAchievements) gam.claimedAchievements = [];
     gam.claimedAchievements.push({
       achievementId: achievement._id,
@@ -568,10 +520,89 @@ const claimAdvancedAchievement = async (req, res, next) => {
 
     await gam.save();
 
-    return success(res, `Claimed \${achievement.reward} coins from achievement!`, {
+    return success(res, `Claimed ${achievement.reward} coins from achievement!`, {
       newBalance: gam.coinsBalance,
       achievementId: achievement._id,
     });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ─── Admin: Badge Definitions CRUD ───────────────────────────────────────────
+
+// GET /gamification/admin/badges
+const adminGetBadges = async (req, res, next) => {
+  try {
+    const badges = await BadgeDefinition.find().sort({ order: 1 });
+    return success(res, 'Badge definitions fetched', badges);
+  } catch (err) {
+    next(err);
+  }
+};
+
+// POST /gamification/admin/badges
+const adminCreateBadge = async (req, res, next) => {
+  try {
+    const { key, title, rule, emoji, color, threshold, coinReward, order, isActive } = req.body;
+
+    if (!key || !title || !rule || !emoji || !color || threshold == null || coinReward == null) {
+      return error(res, 'Missing required badge fields', 400);
+    }
+
+    const existing = await BadgeDefinition.findOne({ key });
+    if (existing) {
+      return error(res, `Badge with key "${key}" already exists`, 409);
+    }
+
+    const badge = await BadgeDefinition.create({
+      key, title, rule, emoji, color, threshold, coinReward,
+      order: order ?? 0,
+      isActive: isActive !== undefined ? isActive : true,
+    });
+
+    return success(res, 'Badge definition created', badge, 201);
+  } catch (err) {
+    next(err);
+  }
+};
+
+// PUT /gamification/admin/badges/:id
+const adminUpdateBadge = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const updates = req.body;
+
+    // Prevent key changes to avoid breaking existing user badge records
+    delete updates.key;
+
+    const badge = await BadgeDefinition.findByIdAndUpdate(
+      id,
+      { $set: updates },
+      { new: true, runValidators: true }
+    );
+
+    if (!badge) return error(res, 'Badge definition not found', 404);
+
+    return success(res, 'Badge definition updated', badge);
+  } catch (err) {
+    next(err);
+  }
+};
+
+// DELETE /gamification/admin/badges/:id  (soft delete — sets isActive: false)
+const adminDeleteBadge = async (req, res, next) => {
+  try {
+    const { id } = req.params;
+    const badge = await BadgeDefinition.findByIdAndUpdate(
+      id,
+      { $set: { isActive: false } },
+      { new: true }
+    );
+
+    if (!badge) return error(res, 'Badge definition not found', 404);
+
+    return success(res, 'Badge definition deactivated', badge);
   } catch (err) {
     next(err);
   }
@@ -588,4 +619,8 @@ module.exports = {
   createAchievement,
   getAdvancedAchievements,
   claimAdvancedAchievement,
+  adminGetBadges,
+  adminCreateBadge,
+  adminUpdateBadge,
+  adminDeleteBadge,
 };
