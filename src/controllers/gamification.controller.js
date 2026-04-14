@@ -3,8 +3,16 @@ const Gamification = require('../models/Gamification.model');
 const BadgeDefinition = require('../models/BadgeDefinition.model');
 const HealthActivity = require('../models/HealthActivity.model');
 const Order = require('../models/Order.model');
+const AppConfig = require('../models/AppConfig.model');
 const { success, error } = require('../utils/response');
 const { todayISO } = require('../utils/date');
+
+// ─── Helper: load live config (falls back to defaults if not seeded) ──────────
+async function getLiveConfig() {
+  let cfg = await AppConfig.findOne({ key: 'global' });
+  if (!cfg) cfg = await AppConfig.create({ key: 'global' });
+  return cfg;
+}
 
 // ─── Helper: load active badge defs + ensure user record is migrated ──────────
 const loadBadgeDefs = async () => {
@@ -119,14 +127,14 @@ const earnCoins = async (req, res, next) => {
     }
 
     const today = todayISO();
-    const gam = await ensureGamDoc(req.user._id);
+    const [gam, cfg] = await Promise.all([ensureGamDoc(req.user._id), getLiveConfig()]);
+    const MAX_DAILY_COINS = cfg.coin.maxDailyRewards;
 
     // Reset daily coins if it's a new day
     if (gam.lastCoinDate !== today) {
       gam.coinsEarnedToday = 0;
     }
 
-    const MAX_DAILY_COINS = 250;
     const remainingAllowance = MAX_DAILY_COINS - (gam.coinsEarnedToday || 0);
     const actualCoins = Math.round(Math.min(coinsToAdd, remainingAllowance));
 
@@ -192,9 +200,10 @@ const getCoinData = async (req, res, next) => {
     const userId = req.user._id;
     const today = todayISO();
 
-    const [gam, badgeDefs] = await Promise.all([
+    const [gam, badgeDefs, cfg] = await Promise.all([
       ensureGamDoc(userId),
       loadBadgeDefs(),
+      getLiveConfig(),
     ]);
 
     gam.migrateOldBadges();
@@ -266,15 +275,15 @@ const getCoinData = async (req, res, next) => {
         id: 'steps_daily',
         title: `Walk ${dailyGoal.toLocaleString()} Steps`,
         threshold: dailyGoal,
-        reward: 50,
+        reward: cfg.rewards.stepGoalCoins,
         currentValue: todaySteps,
         isClaimed: todaySteps >= dailyGoal && gam.lastCoinDate === today,
       },
       {
         id: 'hydration_daily',
-        title: 'Daily Water Goal (2000ml)',
-        threshold: 2000,
-        reward: 20,
+        title: `Daily Water Goal (${cfg.rewards.hydrationGoalMl}ml)`,
+        threshold: cfg.rewards.hydrationGoalMl,
+        reward: cfg.rewards.hydrationGoalCoins,
         currentValue: todayWater,
         isClaimed: gam.lastWaterCoinDate === today,
       },
@@ -302,9 +311,10 @@ const claimReward = async (req, res, next) => {
 
     if (!rewardId) return error(res, 'rewardId is required', 400);
 
-    const [gam, badgeDefs] = await Promise.all([
+    const [gam, badgeDefs, cfg] = await Promise.all([
       ensureGamDoc(userId),
       loadBadgeDefs(),
+      getLiveConfig(),
     ]);
 
     gam.migrateOldBadges();
@@ -314,19 +324,19 @@ const claimReward = async (req, res, next) => {
     const todayWater = todayActivity?.hydration ?? 0;
     const dailyGoal = req.user.dailyStepGoal || 10000;
 
-    // Build dynamic reward map: static + streak-per-badge-def
+    // Build dynamic reward map from DB config
     const REWARDS = {
       steps_daily: {
         title: `Walk ${dailyGoal.toLocaleString()} Steps`,
-        reward: 50,
+        reward: cfg.rewards.stepGoalCoins,
         isMet: () => todaySteps >= dailyGoal,
         isAlreadyClaimed: () => gam.lastCoinDate === today,
         onClaim: () => { gam.lastCoinDate = today; },
       },
       hydration_daily: {
-        title: 'Daily Water Goal Completed',
-        reward: 20,
-        isMet: () => todayWater >= 2000,
+        title: `Daily Water Goal (${cfg.rewards.hydrationGoalMl}ml)`,
+        reward: cfg.rewards.hydrationGoalCoins,
+        isMet: () => todayWater >= cfg.rewards.hydrationGoalMl,
         isAlreadyClaimed: () => gam.lastWaterCoinDate === today,
         onClaim: () => { gam.lastWaterCoinDate = today; },
       },

@@ -2,7 +2,14 @@
 const User = require('../models/User.model');
 const Referral = require('../models/Referral.model');
 const Gamification = require('../models/Gamification.model');
+const AppConfig = require('../models/AppConfig.model');
 const { success, error } = require('../utils/response');
+
+async function getLiveConfig() {
+  let cfg = await AppConfig.findOne({ key: 'global' });
+  if (!cfg) cfg = await AppConfig.create({ key: 'global' });
+  return cfg;
+}
 
 // ─── GET /referral/me ─────────────────────────────────────────────────────────
 // Returns current user's referral code and stats
@@ -11,6 +18,10 @@ const getReferralStats = async (req, res, next) => {
     const userId = req.user._id;
 
     // Get referral records where this user is the referrer
+    const cfg = await getLiveConfig();
+    const REFERRER_BONUS = cfg.coin.referrerBonus;
+    const REFEREE_BONUS  = cfg.coin.refereeBonus;
+
     const referrals = await Referral.find({ referrer: userId })
       .populate('referee', 'name avatarUrl createdAt')
       .sort({ createdAt: -1 });
@@ -24,8 +35,8 @@ const getReferralStats = async (req, res, next) => {
       referralCode: req.user.referralCode,
       totalReferred,
       bonusCoinsEarned,
-      referrerBonus: 100,  // coins awarded to referrer per successful referral
-      refereeBonus: 50,    // coins awarded to referee for using a code
+      referrerBonus: REFERRER_BONUS,
+      refereeBonus:  REFEREE_BONUS,
       referrals: referrals.map(r => ({
         id: r._id,
         name: r.referee?.name || 'Unknown',
@@ -70,51 +81,56 @@ const applyReferralCode = async (req, res, next) => {
       return error(res, 'You cannot use your own referral code', 400);
     }
 
-    // 4. Create referral record
+    // 4. Load live bonus amounts from DB config
+    const cfg = await getLiveConfig();
+    const REFERRER_BONUS = cfg.coin.referrerBonus;
+    const REFEREE_BONUS  = cfg.coin.refereeBonus;
+
+    // 5. Create referral record
     const referral = await Referral.create({
       referrer: referrer._id,
       referee: refereeId,
       referralCode: code,
     });
 
-    // 5. Award coins to referrer
+    // 6. Award coins to referrer
     let referrerGam = await Gamification.findOne({ user: referrer._id });
     if (!referrerGam) {
       referrerGam = await Gamification.create({ user: referrer._id });
     }
-    referrerGam.coinsBalance = Math.round(referrerGam.coinsBalance + 100);
+    referrerGam.coinsBalance = Math.round(referrerGam.coinsBalance + REFERRER_BONUS);
     referrerGam.claimHistory.push({
       rewardId: `referral_${referral._id}`,
-      amount: 100,
+      amount: REFERRER_BONUS,
       source: `Referral Bonus — ${req.user.name} joined`,
       createdAt: new Date(),
     });
     if (referrerGam.claimHistory.length > 50) referrerGam.claimHistory.shift();
     await referrerGam.save();
 
-    // 6. Award coins to referee (current user)
+    // 7. Award coins to referee (current user)
     let refereeGam = await Gamification.findOne({ user: refereeId });
     if (!refereeGam) {
       refereeGam = await Gamification.create({ user: refereeId });
     }
-    refereeGam.coinsBalance = Math.round(refereeGam.coinsBalance + 50);
+    refereeGam.coinsBalance = Math.round(refereeGam.coinsBalance + REFEREE_BONUS);
     refereeGam.claimHistory.push({
       rewardId: `referral_welcome_${referral._id}`,
-      amount: 50,
+      amount: REFEREE_BONUS,
       source: `Welcome Bonus — Used referral code`,
       createdAt: new Date(),
     });
     if (refereeGam.claimHistory.length > 50) refereeGam.claimHistory.shift();
     await refereeGam.save();
 
-    // 7. Mark bonuses as awarded
+    // 8. Mark bonuses as awarded
     referral.referrerBonusAwarded = true;
     referral.refereeBonusAwarded = true;
     await referral.save();
 
-    return success(res, 'Referral code applied! You earned 50 bonus coins 🎉', {
+    return success(res, `Referral code applied! You earned ${REFEREE_BONUS} bonus coins 🎉`, {
       refereeNewBalance: refereeGam.coinsBalance,
-      refereeBonus: 50,
+      refereeBonus: REFEREE_BONUS,
       referrerName: referrer.name,
     });
   } catch (err) {
