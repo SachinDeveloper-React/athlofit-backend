@@ -17,7 +17,14 @@ const getReferralStats = async (req, res, next) => {
   try {
     const userId = req.user._id;
 
-    // Get referral records where this user is the referrer
+    // Ensure user has a referral code — generate one if missing (legacy accounts)
+    let referralCode = req.user.referralCode;
+    if (!referralCode) {
+      const crypto = require('crypto');
+      referralCode = crypto.randomBytes(4).toString('hex').toUpperCase();
+      await User.findByIdAndUpdate(userId, { referralCode });
+    }
+
     const cfg = await getLiveConfig();
     const REFERRER_BONUS = cfg.coin.referrerBonus;
     const REFEREE_BONUS  = cfg.coin.refereeBonus;
@@ -32,7 +39,7 @@ const getReferralStats = async (req, res, next) => {
       .reduce((acc, r) => acc + r.referrerBonus, 0);
 
     return success(res, 'Referral stats fetched', {
-      referralCode: req.user.referralCode,
+      referralCode,
       totalReferred,
       bonusCoinsEarned,
       referrerBonus: REFERRER_BONUS,
@@ -43,6 +50,7 @@ const getReferralStats = async (req, res, next) => {
         avatarUrl: r.referee?.avatarUrl || null,
         joinedAt: r.createdAt,
         bonusAwarded: r.referrerBonusAwarded,
+        referrerBonus: r.referrerBonus,
       })),
     });
   } catch (err) {
@@ -86,11 +94,13 @@ const applyReferralCode = async (req, res, next) => {
     const REFERRER_BONUS = cfg.coin.referrerBonus;
     const REFEREE_BONUS  = cfg.coin.refereeBonus;
 
-    // 5. Create referral record
+    // 5. Create referral record — store live bonus amounts so history is accurate
     const referral = await Referral.create({
       referrer: referrer._id,
       referee: refereeId,
       referralCode: code,
+      referrerBonus: REFERRER_BONUS,
+      refereeBonus:  REFEREE_BONUS,
     });
 
     // 6. Award coins to referrer

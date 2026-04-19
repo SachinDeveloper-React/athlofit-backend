@@ -14,8 +14,8 @@ const appConfigSchema = new mongoose.Schema(
       maxDailyRewards: { type: Number, default: 250 },  // max claimable coins/day
       coinsPerStepKm:  { type: Number, default: 1 },
       purchaseEnabled: { type: Boolean, default: true },
-      referrerBonus:   { type: Number, default: 100 },  // coins to referrer
-      refereeBonus:    { type: Number, default: 50 },   // coins to new user
+      referrerBonus:   { type: Number, default: 200 },  // coins to referrer
+      refereeBonus:    { type: Number, default: 100 },   // coins to new user
     },
 
     steps: {
@@ -35,6 +35,54 @@ const appConfigSchema = new mongoose.Schema(
       healthAnalyticsEnabled:   { type: Boolean, default: true },
       referralEnabled:          { type: Boolean, default: true },
       leaderboardEnabled:       { type: Boolean, default: true },
+    },
+
+    nutrition: {
+      dietPreferences: {
+        type: [
+          {
+            value: { type: String, required: true },
+            label: { type: String, required: true },
+            emoji: { type: String, default: '' },
+          },
+        ],
+        default: [
+          { value: 'veg',     label: 'Vegetarian', emoji: '🥦' },
+          { value: 'non-veg', label: 'Non-Veg',    emoji: '🍗' },
+          { value: 'vegan',   label: 'Vegan',       emoji: '🌱' },
+        ],
+      },
+      dietaryGoals: {
+        type: [
+          {
+            value: { type: String, required: true },
+            label: { type: String, required: true },
+            emoji: { type: String, default: '' },
+          },
+        ],
+        default: [
+          { value: 'weight_loss', label: 'Weight Loss', emoji: '🔥' },
+          { value: 'muscle_gain', label: 'Muscle Gain', emoji: '💪' },
+          { value: 'maintenance', label: 'Maintenance', emoji: '⚖️' },
+          { value: 'endurance',   label: 'Endurance',   emoji: '🏃' },
+        ],
+      },
+      catalogFilters: {
+        type: [
+          {
+            id:    { type: String, required: true },
+            label: { type: String, required: true },
+            emoji: { type: String, default: '' },
+          },
+        ],
+        default: [
+          { id: 'all',        label: 'All',        emoji: '🍽️' },
+          { id: 'veg',        label: 'Veg',        emoji: '🥦' },
+          { id: 'non-veg',    label: 'Non-Veg',    emoji: '🍗' },
+          { id: 'vegan',      label: 'Vegan',       emoji: '🌱' },
+          { id: 'favourites', label: 'Favourites', emoji: '❤️' },
+        ],
+      },
     },
 
     maintenance: {

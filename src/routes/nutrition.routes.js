@@ -4,6 +4,7 @@
 const express = require('express');
 const router  = express.Router();
 const {
+  getNutritionOptions,
   getDailySummary,
   logMeal,
   deleteMeal,
@@ -18,6 +19,10 @@ const { protect } = require('../middleware/auth.middleware');
 
 // All routes require authentication
 router.use(protect);
+
+// ─── Options (diet prefs + goals from AppConfig) ──────────────────────────────
+// GET /nutrition/options
+router.get('/options', getNutritionOptions);
 
 // ─── Daily Summary ────────────────────────────────────────────────────────────
 // GET  /nutrition/summary?date=YYYY-MM-DD

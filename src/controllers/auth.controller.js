@@ -6,8 +6,6 @@ const { generateOtp, getOtpExpiry, sendOtpEmail } = require('../utils/otp');
 const { success, error } = require('../utils/response');
 const { OAuth2Client } = require('google-auth-library');
 
-const googleClient = new OAuth2Client(process.env.GOOGLE_CLIENT_ID);
-
 // ─── POST /auth/user/signup ───────────────────────────────────────────────────
 const signup = async (req, res, next) => {
   try {
@@ -247,36 +245,66 @@ const resetPassword = async (req, res, next) => {
 // ─── POST /auth/google ────────────────────────────────────────────────────────
 const googleLogin = async (req, res, next) => {
   try {
-    const { idToken } = req.body;
+    const { idToken, givenName, familyName, scopes, serverAuthCode, photo } = req.body;
     if (!idToken) return error(res, 'Google idToken is required', 400);
 
-    // Verify the idToken with Google
+    // Verify idToken — accept both web and Android client IDs as valid audience
+    const validAudiences = [
+      process.env.GOOGLE_WEB_CLIENT_ID,
+      process.env.GOOGLE_ANDROID_CLIENT_ID,
+    ].filter(Boolean);
+
     let payload;
     try {
-      const ticket = await googleClient.verifyIdToken({
-        idToken,
-        audience: process.env.GOOGLE_CLIENT_ID,
-      });
-      payload = ticket.getPayload();
+      // Try web client ID first, then Android client ID
+      let lastErr;
+      for (const audience of validAudiences) {
+        try {
+          const client = new OAuth2Client(audience);
+          const ticket = await client.verifyIdToken({ idToken, audience });
+          payload = ticket.getPayload();
+          break;
+        } catch (e) {
+          lastErr = e;
+        }
+      }
+      if (!payload) throw lastErr;
     } catch (verifyErr) {
       return error(res, 'Invalid Google token', 401);
     }
 
-    const { sub: googleId, email, name, picture } = payload;
+    const {
+      sub: googleId,
+      email,
+      name,
+      picture,
+      given_name,
+      family_name,
+    } = payload;
+
     if (!email) return error(res, 'Could not retrieve email from Google account', 400);
+
+    // Prefer frontend-provided values (higher resolution photo, etc.)
+    const avatarUrl   = photo || picture || null;
+    const displayName = name || `${givenName || ''} ${familyName || ''}`.trim() || email.split('@')[0];
+    const firstName   = givenName  || given_name  || null;
+    const lastName    = familyName || family_name || null;
 
     // Find or create user
     let user = await User.findOne({ $or: [{ googleId }, { email }] });
-
+    
     if (!user) {
-      // New user — create account
+      // ── New user — create account ──────────────────────────────────────────
       user = await User.create({
-        name: name || email.split('@')[0],
+        name: displayName,
         email,
         googleId,
         provider: 'google',
         emailVerified: true,
-        avatarUrl: picture || null,
+        avatarUrl,
+        givenName:  firstName,
+        familyName: lastName,
+        googleScopes: scopes ?? [],
       });
 
       // Bootstrap gamification record
@@ -285,29 +313,37 @@ const googleLogin = async (req, res, next) => {
         { user: user._id },
         { upsert: true, new: true, setDefaultsOnInsert: true }
       );
-    } else if (!user.googleId) {
-      // Existing email user — link Google account
-      user.googleId = googleId;
-      user.provider = 'google';
-      user.emailVerified = true;
-      if (!user.avatarUrl && picture) user.avatarUrl = picture;
-      await user.save();
+    } else {
+      // ── Returning user — always refresh profile data from Google ───────────
+      const updates = {
+        googleId,
+        provider:      'google',
+        emailVerified: true,
+        avatarUrl,                          // always overwrite with latest Google photo
+        givenName:     firstName,
+        familyName:    lastName,
+        googleScopes:  scopes ?? [],
+      };
+
+      // Only update name if user doesn't already have one set
+      if (!user.name && displayName) updates.name = displayName;
+
+      // findByIdAndUpdate with { new: true } returns the updated document
+      user = await User.findByIdAndUpdate(
+        user._id,
+        { $set: updates },
+        { new: true }
+      );
     }
 
-    const accessToken = generateAccessToken(user._id.toString());
-    const refreshToken = await saveRefreshToken(
-      user._id,
-      req.ip,
-      req.headers['user-agent']
-    );
-
-    const userObj = user.toJSON();
+    const accessToken  = generateAccessToken(user._id.toString());
+    const refreshToken = await saveRefreshToken(user._id, req.ip, req.headers['user-agent']);
 
     return success(res, 'Google login successful', {
       status: 'success',
       accessToken,
       refreshToken,
-      user: userObj,
+      user: user.toJSON(),
     });
   } catch (err) {
     next(err);

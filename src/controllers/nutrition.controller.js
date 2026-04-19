@@ -14,6 +14,7 @@
 const MealLog            = require('../models/MealLog.model');
 const Food               = require('../models/Food.model');
 const NutritionPref      = require('../models/NutritionPreference.model');
+const AppConfig          = require('../models/AppConfig.model');
 const { success, error } = require('../utils/response');
 
 // ─── Helper: today ISO ────────────────────────────────────────────────────────
@@ -359,9 +360,34 @@ const getFavourites = async (req, res, next) => {
   }
 };
 
+// ═══════════════════════════════════════════════════════════════════════════════
+//  NUTRITION OPTIONS  (diet preferences + dietary goals from AppConfig)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+/**
+ * GET /nutrition/options
+ * Returns the configurable diet preference chips and dietary goal chips.
+ * Admins can update these via PATCH /config/app (nutrition.dietPreferences / nutrition.dietaryGoals).
+ */
+const getNutritionOptions = async (req, res, next) => {
+  try {
+    let cfg = await AppConfig.findOne({ key: 'global' });
+    if (!cfg) cfg = await AppConfig.create({ key: 'global' });
+
+    return success(res, 'Nutrition options fetched', {
+      dietPreferences: cfg.nutrition.dietPreferences,
+      dietaryGoals:    cfg.nutrition.dietaryGoals,
+      catalogFilters:  cfg.nutrition.catalogFilters,
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
 // ─── Exports ──────────────────────────────────────────────────────────────────
 
 module.exports = {
+  getNutritionOptions,
   getDailySummary,
   logMeal,
   deleteMeal,

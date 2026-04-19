@@ -57,6 +57,9 @@ const userSchema = new mongoose.Schema(
 
     // Google OAuth
     googleId: { type: String, default: null, sparse: true },
+    googleScopes: { type: [String], default: [] },      // granted OAuth scopes
+    givenName:  { type: String, default: null },
+    familyName: { type: String, default: null },
 
     // Referral
     referralCode: { type: String, unique: true, sparse: true },

@@ -19,9 +19,9 @@ const referralSchema = new mongoose.Schema(
       required: true,
     },
     referrerBonusAwarded: { type: Boolean, default: false },
-    referrerBonus: { type: Number, default: 100 },
+    referrerBonus: { type: Number, default: 200 },
     refereeBonusAwarded: { type: Boolean, default: false },
-    refereeBonus: { type: Number, default: 50 },
+    refereeBonus: { type: Number, default: 100 },
   },
   {
     timestamps: true,

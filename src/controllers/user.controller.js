@@ -5,6 +5,7 @@ const Gamification = require('../models/Gamification.model');
 const HealthActivity = require('../models/HealthActivity.model');
 const { success, error } = require('../utils/response');
 const { todayISO } = require('../utils/date');
+const { uploadBuffer } = require('../utils/cloudinary');
 
 // ─── GET /user/profile ────────────────────────────────────────────────────────
 const getProfile = async (req, res, next) => {
@@ -243,7 +244,32 @@ const getNotifications = async (req, res, next) => {
   }
 };
 
-module.exports = { getProfile, updateProfile, completeProfile, updateStepGoal, getNotifications };
+// ─── POST /user/upload-avatar ─────────────────────────────────────────────────
+// Accepts multipart/form-data with field "avatar" (single image).
+// Uploads to Cloudinary, saves URL to user, returns updated user.
+const uploadAvatar = async (req, res, next) => {
+  try {
+    if (!req.file) return error(res, 'No image file provided', 400);
+
+    const avatarUrl = await uploadBuffer(
+      req.file.buffer,
+      'athlofit/avatars',
+      `user_${req.user._id}`,   // deterministic public_id — overwrites previous avatar
+    );
+
+    const user = await User.findByIdAndUpdate(
+      req.user._id,
+      { $set: { avatarUrl } },
+      { new: true },
+    );
+
+    return success(res, 'Avatar uploaded', { avatarUrl, user });
+  } catch (err) {
+    next(err);
+  }
+};
+
+module.exports = { getProfile, updateProfile, completeProfile, updateStepGoal, getNotifications, uploadAvatar };
 
 // ─── GET /user/addresses ───────────────────────────────────────────────────────
 const getAddresses = async (req, res, next) => {
@@ -351,7 +377,7 @@ const deleteAddress = async (req, res, next) => {
 
 module.exports = {
   getProfile, updateProfile, completeProfile, updateStepGoal, getNotifications,
-  getAddresses, addAddress, updateAddress, deleteAddress,
+  getAddresses, addAddress, updateAddress, deleteAddress, uploadAvatar,
 };
 
 

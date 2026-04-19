@@ -1,6 +1,7 @@
 // src/routes/user.routes.js
 const express = require('express');
 const router = express.Router();
+const multer = require('multer');
 const {
   getProfile,
   updateProfile,
@@ -11,6 +12,7 @@ const {
   addAddress,
   updateAddress,
   deleteAddress,
+  uploadAvatar,
 } = require('../controllers/user.controller');
 const {
   getAnalyticsDashboard,
@@ -19,6 +21,16 @@ const {
 const { protect } = require('../middleware/auth.middleware');
 const { body } = require('express-validator');
 const { validate } = require('../middleware/validate.middleware');
+
+// multer — memory storage, 5 MB limit, images only
+const avatarUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 5 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    if (file.mimetype.startsWith('image/')) cb(null, true);
+    else cb(new Error('Only image files are allowed'));
+  },
+});
 
 const completeProfileRules = [
   body('phone').notEmpty().withMessage('Phone is required'),
@@ -37,8 +49,10 @@ router.patch('/profile', updateProfile);
 router.post('/complete-profile', completeProfileRules, validate, completeProfile);
 router.patch('/step-goal', updateStepGoal);
 
+// ─── Avatar upload ────────────────────────────────────────────────────────────
+router.post('/upload-avatar', avatarUpload.single('avatar'), uploadAvatar);
+
 // ─── Analytics — aliased here so frontend's `user/analytics?period=X` works ──
-// The same controllers are also mounted at /health/analytics for backward compat
 router.get('/analytics', getAnalyticsDashboard);
 router.post('/analytics/sync', syncAnalyticsDashboard);
 
