@@ -32,7 +32,7 @@ const limiter = rateLimit({
   legacyHeaders: false,
   message: { success: false, message: 'Too many requests, please try again later.' },
 });
-app.use(limiter);
+// app.use(limiter);
 
 // Auth endpoints get tighter limiting
 const authLimiter = rateLimit({

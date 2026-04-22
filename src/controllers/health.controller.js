@@ -94,37 +94,63 @@ const syncHealthData = async (req, res, next) => {
       await _updateStreak(req.user._id, today);
     }
 
-    // Securely calculate passive "sweatcoin-style" coins from DB config
-    const Gamification = require('../models/Gamification.model');
+    // ── Auto-award step goal coins ────────────────────────────────────────────
+    // If goal is met today and coins haven't been awarded yet, credit them now.
     const AppConfig    = require('../models/AppConfig.model');
-
     let cfg = await AppConfig.findOne({ key: 'global' });
     if (!cfg) cfg = await AppConfig.create({ key: 'global' });
-
-    const dailyEarnLimit = cfg.coin.dailyEarnLimit;   // e.g. 10
-    const coinsPerStepKm = cfg.coin.coinsPerStepKm;   // e.g. 1
-    // Approximate: 1 km ≈ 1300 steps
-    const stepsPerKm = 1300;
-    const kmWalked = (steps ?? 0) / stepsPerKm;
-    const coinsEarnedToday = Math.round(Math.min(dailyEarnLimit, Math.max(0, kmWalked * coinsPerStepKm * 0.95)));
 
     let gam = await Gamification.findOne({ user: req.user._id });
     if (!gam) gam = await Gamification.create({ user: req.user._id });
 
+    // Reset daily coins counter if it's a new day
     if (gam.lastCoinDate !== today) {
       gam.coinsEarnedToday = 0;
     }
 
-    const currentEarned = gam.coinsEarnedToday || 0;
-    if (coinsEarnedToday > currentEarned) {
-      const actualAdded = coinsEarnedToday - currentEarned;
-      gam.coinsEarnedToday = coinsEarnedToday;
-      gam.coinsBalance = Math.round(gam.coinsBalance + actualAdded);
+    let goalCoinsAwarded = false;
+
+    if (isGoalMet && gam.lastCoinDate !== today) {
+      // Award step goal coins automatically
+      const stepGoalCoins = cfg.rewards.stepGoalCoins ?? 50;
+      gam.coinsBalance = Math.round(gam.coinsBalance + stepGoalCoins);
+      gam.coinsEarnedToday = Math.round((gam.coinsEarnedToday || 0) + stepGoalCoins);
       gam.lastCoinDate = today;
+
+      if (!gam.claimHistory) gam.claimHistory = [];
+      gam.claimHistory.push({
+        rewardId: 'steps_daily_auto',
+        amount: stepGoalCoins,
+        source: 'Daily Step Goal — Auto Reward',
+        createdAt: new Date(),
+      });
+      if (gam.claimHistory.length > 50) gam.claimHistory.shift();
+
+      goalCoinsAwarded = true;
       await gam.save();
+    } else {
+      // Passive sweatcoin-style coins from distance walked
+      const dailyEarnLimit = cfg.coin.dailyEarnLimit;
+      const coinsPerStepKm = cfg.coin.coinsPerStepKm;
+      const stepsPerKm = 1300;
+      const kmWalked = (steps ?? 0) / stepsPerKm;
+      const coinsEarnedToday = Math.round(Math.min(dailyEarnLimit, Math.max(0, kmWalked * coinsPerStepKm * 0.95)));
+
+      const currentEarned = gam.coinsEarnedToday || 0;
+      if (coinsEarnedToday > currentEarned) {
+        const actualAdded = coinsEarnedToday - currentEarned;
+        gam.coinsEarnedToday = coinsEarnedToday;
+        gam.coinsBalance = Math.round(gam.coinsBalance + actualAdded);
+        gam.lastCoinDate = today;
+        await gam.save();
+      }
     }
 
-    return success(res, 'Health data synced');
+    return success(res, 'Health data synced', {
+      goalCoinsAwarded,
+      coinsBalance: gam.coinsBalance,
+      stepGoalCoins: goalCoinsAwarded ? (cfg.rewards.stepGoalCoins ?? 50) : 0,
+    });
   } catch (err) {
     next(err);
   }

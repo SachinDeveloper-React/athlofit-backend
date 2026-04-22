@@ -148,7 +148,47 @@ const addReview = async (req, res, next) => {
   }
 };
 
-// ─── GET /shop/search ─────────────────────────────────────────────────────────
+// ─── GET /shop/products/:id/reviews ──────────────────────────────────────────
+// Query: ?page=1&limit=10
+const getProductReviews = async (req, res, next) => {
+  try {
+    const { page = 1, limit = 10 } = req.query;
+    const pageNum  = Math.max(1, parseInt(page, 10));
+    const limitNum = Math.min(50, parseInt(limit, 10));
+    const skip     = (pageNum - 1) * limitNum;
+
+    const product = await Product.findById(req.params.id)
+      .select('reviews rating reviewCount')
+      .populate('reviews.user', 'name avatarUrl');
+
+    if (!product) return error(res, 'Product not found', 404);
+
+    const total    = product.reviews.length;
+    const sorted   = [...product.reviews].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+    const paginated = sorted.slice(skip, skip + limitNum);
+
+    // Rating breakdown (1–5 star counts)
+    const breakdown = [1, 2, 3, 4, 5].reduce((acc, star) => {
+      acc[star] = product.reviews.filter(r => r.rating === star).length;
+      return acc;
+    }, {});
+
+    return success(res, 'Reviews fetched', {
+      reviews: paginated,
+      rating: product.rating,
+      reviewCount: product.reviewCount,
+      breakdown,
+      pagination: {
+        page: pageNum,
+        limit: limitNum,
+        total,
+        hasMore: skip + limitNum < total,
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+};
 const searchProducts = async (req, res, next) => {
   try {
     const { q, limit = 10 } = req.query;
@@ -343,6 +383,7 @@ module.exports = {
   getProducts,
   getFeaturedProducts,
   getProductById,
+  getProductReviews,
   addReview,
   searchProducts,
   buyWithCoins,

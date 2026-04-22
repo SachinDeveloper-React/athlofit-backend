@@ -6,6 +6,7 @@ const {
   getProducts,
   getFeaturedProducts,
   getProductById,
+  getProductReviews,
   addReview,
   searchProducts,
   buyWithCoins,
@@ -19,6 +20,7 @@ router.get('/categories', getCategories);
 router.get('/products', getProducts);
 router.get('/products/featured', getFeaturedProducts);
 router.get('/products/:id', getProductById);
+router.get('/products/:id/reviews', getProductReviews);
 router.get('/search', searchProducts);
 
 // Protected routes
