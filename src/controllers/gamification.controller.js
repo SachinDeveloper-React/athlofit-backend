@@ -6,6 +6,8 @@ const Order = require('../models/Order.model');
 const AppConfig = require('../models/AppConfig.model');
 const { success, error } = require('../utils/response');
 const { todayISO } = require('../utils/date');
+const { sendPushToUser } = require('../utils/pushNotification');
+const { createNotification } = require('../utils/createNotification');
 
 // ─── Helper: load live config (falls back to defaults if not seeded) ──────────
 async function getLiveConfig() {
@@ -379,6 +381,14 @@ const claimReward = async (req, res, next) => {
 
     await gam.save();
 
+    // ── Persist + push: reward claimed ───────────────────────────────────
+    createNotification(userId, {
+      type:    'COIN',
+      title:   '🪙 Reward Claimed!',
+      message: `You claimed ${rewardDef.reward} coins for "${rewardDef.title}"!`,
+      data:    { screen: 'Tracker' },
+    });
+
     return success(res, `Claimed ${rewardDef.reward} coins!`, {
       newBalance: gam.coinsBalance,
       rewardId,
@@ -529,6 +539,14 @@ const claimAdvancedAchievement = async (req, res, next) => {
     });
 
     await gam.save();
+
+    // ── Persist + push: achievement claimed ──────────────────────────────
+    createNotification(userId, {
+      type:    'GOAL',
+      title:   '🏆 Achievement Unlocked!',
+      message: `You claimed "${achievement.title}" and earned ${achievement.reward} coins!`,
+      data:    { screen: 'Achievements' },
+    });
 
     return success(res, `Claimed ${achievement.reward} coins from achievement!`, {
       newBalance: gam.coinsBalance,

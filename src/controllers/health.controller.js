@@ -4,6 +4,9 @@ const Gamification   = require('../models/Gamification.model');
 const User           = require('../models/User.model');
 const { success, error } = require('../utils/response');
 const { buildDateRange, toDayLabel, todayISO, isConsecutiveDay } = require('../utils/date');
+const { syncChallengeProgress } = require('./challenge.controller');
+const { sendPushToUser } = require('../utils/pushNotification');
+const { createNotification } = require('../utils/createNotification');
 
 // ─── GET /health/weekly-steps?from=YYYY-MM-DD&to=YYYY-MM-DD ──────────────────
 const getWeeklySteps = async (req, res, next) => {
@@ -128,6 +131,14 @@ const syncHealthData = async (req, res, next) => {
 
       goalCoinsAwarded = true;
       await gam.save();
+
+      // ── Persist + push: step goal reached ──────────────────────────────
+      createNotification(req.user._id, {
+        type:    'GOAL',
+        title:   '🎯 Daily Step Goal Reached!',
+        message: `You hit your ${dailyGoal.toLocaleString()} step goal and earned ${cfg.rewards.stepGoalCoins ?? 50} coins!`,
+        data:    { screen: 'Steps' },
+      });
     } else {
       // Passive sweatcoin-style coins from distance walked
       const dailyEarnLimit = cfg.coin.dailyEarnLimit;
@@ -146,10 +157,14 @@ const syncHealthData = async (req, res, next) => {
       }
     }
 
+    // Await challenge sync so we can include newly completed challenges in the response
+    const { newlyCompleted } = await syncChallengeProgress(req.user._id).catch(() => ({ newlyCompleted: [] }));
+
     return success(res, 'Health data synced', {
       goalCoinsAwarded,
       coinsBalance: gam.coinsBalance,
       stepGoalCoins: goalCoinsAwarded ? (cfg.rewards.stepGoalCoins ?? 50) : 0,
+      newlyCompleted,   // array of { title, emoji, coinReward }
     });
   } catch (err) {
     next(err);
@@ -206,8 +221,22 @@ async function _updateStreak(userId, date) {
     }
     // Load active badge definitions and award any newly unlocked badges
     const badgeDefs = await BadgeDefinition.find({ isActive: true }).sort({ order: 1 });
+    const prevUnlocked = new Set((gam.badgeList || []).filter(b => b.unlockedAt).map(b => b.key));
     gam.awardBadges(badgeDefs);
     await gam.save();
+
+    // Push for any badge newly unlocked this sync
+    for (const def of badgeDefs) {
+      const badge = (gam.badgeList || []).find(b => b.key === def.key);
+      if (badge?.unlockedAt && !prevUnlocked.has(def.key)) {
+        createNotification(userId, {
+          type:    'GOAL',
+          title:   `${def.emoji} Badge Unlocked: ${def.title}!`,
+          message: `You hit a ${def.threshold}-day streak and earned ${def.coinReward} coins!`,
+          data:    { screen: 'Achievements' },
+        });
+      }
+    }
   }
 }
 

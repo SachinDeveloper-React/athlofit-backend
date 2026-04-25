@@ -15,6 +15,11 @@ const {
   toggleFavourite,
   getFavourites,
 } = require('../controllers/nutrition.controller');
+const {
+  logSearchQuery,
+  logSearchClick,
+  getSearchHistory,
+} = require('../controllers/searchLog.controller');
 const { protect } = require('../middleware/auth.middleware');
 
 // All routes require authentication
@@ -51,5 +56,13 @@ router.get('/favourites', getFavourites);
 router.get('/foods',                getFoods);
 router.get('/foods/:id',            getFoodById);
 router.post('/foods/:id/favourite', toggleFavourite);
+
+// ─── Search Logging ───────────────────────────────────────────────────────────
+// POST /nutrition/search/log-query   → log a search query event
+// POST /nutrition/search/log-click   → log a result-click event
+// GET  /nutrition/search/history     → get current user's recent queries
+router.post('/search/log-query', logSearchQuery);
+router.post('/search/log-click', logSearchClick);
+router.get('/search/history',    getSearchHistory);
 
 module.exports = router;

@@ -5,6 +5,8 @@ const Order = require('../models/Order.model');
 const Gamification = require('../models/Gamification.model');
 const { success, error } = require('../utils/response');
 const User = require('../models/User.model');
+const { sendPushToUser } = require('../utils/pushNotification');
+const { createNotification } = require('../utils/createNotification');
 
 // Conversion Rate: 10 Coins = 1 INR
 const COIN_CONVERSION_RATE = 10;
@@ -282,6 +284,14 @@ const buyWithCoins = async (req, res, next) => {
       shippingAddress: shippingAddress || {},
     });
 
+    // ── Persist + push: order confirmed ──────────────────────────────────
+    createNotification(req.user._id, {
+      type:    'PRODUCT',
+      title:   '🛍️ Order Confirmed!',
+      message: `Your order #${order._id.toString().slice(-6).toUpperCase()} has been placed successfully.`,
+      data:    { screen: 'OrderHistory' },
+    });
+
     return success(res, 'Purchase successful using coins!', {
       order,
       remainingCoins: gamification.coinsBalance,
@@ -367,6 +377,17 @@ const cancelOrder = async (req, res, next) => {
         });
       }
     }
+
+    // ── Persist + push: order cancelled ──────────────────────────────────
+    const shortId = order._id.toString().slice(-6).toUpperCase();
+    createNotification(req.user._id, {
+      type:    'PRODUCT',
+      title:   '❌ Order Cancelled',
+      message: refundedCoins > 0
+        ? `Order #${shortId} cancelled. ${refundedCoins} coins have been refunded.`
+        : `Your order #${shortId} has been cancelled.`,
+      data:    { screen: 'OrderHistory' },
+    });
 
     return success(res, 'Order cancelled successfully', {
       orderId: order._id,

@@ -8,11 +8,16 @@ const {
   completeProfile,
   updateStepGoal,
   getNotifications,
+  markNotificationRead,
+  markAllNotificationsRead,
+  deleteNotification,
+  saveIncomingNotification,
   getAddresses,
   addAddress,
   updateAddress,
   deleteAddress,
   uploadAvatar,
+  updateFcmToken,
 } = require('../controllers/user.controller');
 const {
   getAnalyticsDashboard,
@@ -57,7 +62,14 @@ router.get('/analytics', getAnalyticsDashboard);
 router.post('/analytics/sync', syncAnalyticsDashboard);
 
 // ─── In-app notifications ────────────────────────────────────────────────────
-router.get('/notifications', getNotifications);
+router.get('/notifications',                    getNotifications);
+router.post('/notifications',                   saveIncomingNotification);
+router.patch('/notifications/read-all',         markAllNotificationsRead);
+router.patch('/notifications/:id/read',         markNotificationRead);
+router.delete('/notifications/:id',             deleteNotification);
+
+// ─── FCM token ───────────────────────────────────────────────────────────────
+router.patch('/fcm-token', updateFcmToken);
 
 // ─── Delivery addresses ───────────────────────────────────────────────────────
 router.get('/addresses', getAddresses);

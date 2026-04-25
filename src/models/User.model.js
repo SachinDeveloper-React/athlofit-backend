@@ -91,6 +91,12 @@ const userSchema = new mongoose.Schema(
 
     // Token versioning (for invalidation)
     tokenVersion: { type: Number, default: 0 },
+
+    // FCM push notification token
+    fcmToken: { type: String, default: null },
+    notificationsEnabled: { type: Boolean, default: true },
+    // Device platform — set when FCM token is registered
+    platform: { type: String, enum: ['ios', 'android', null], default: null },
   },
   {
     timestamps: true,

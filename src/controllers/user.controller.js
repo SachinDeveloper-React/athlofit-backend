@@ -3,6 +3,7 @@ const User = require('../models/User.model');
 const Order = require('../models/Order.model');
 const Gamification = require('../models/Gamification.model');
 const HealthActivity = require('../models/HealthActivity.model');
+const Notification = require('../models/Notification.model');
 const { success, error } = require('../utils/response');
 const { todayISO } = require('../utils/date');
 const { uploadBuffer } = require('../utils/cloudinary');
@@ -105,140 +106,59 @@ const updateStepGoal = async (req, res, next) => {
 };
 
 // ─── GET /user/notifications ──────────────────────────────────────────────────
-// Synthesizes real in-app notifications from Orders, Gamification, and HealthActivity.
 const getNotifications = async (req, res, next) => {
   try {
     const userId = req.user._id;
-    const today = todayISO();
-    const notifications = [];
+    const limit  = Math.min(100, parseInt(req.query.limit || '50', 10));
+    const skip   = parseInt(req.query.skip || '0', 10);
 
-    // ── 1. Recent orders (NEW / SHIPPED / DELIVERED) ────────────────────────
-    const recentOrders = await Order.find({ user: userId })
+    const notifications = await Notification.find({ user: userId })
       .sort({ createdAt: -1 })
-      .limit(5);
+      .skip(skip)
+      .limit(limit);
 
-    for (const order of recentOrders) {
-      const shortId = order._id.toString().slice(-6).toUpperCase();
-      let title = '', message = '';
-      if (order.status === 'PAID') {
-        title = 'ORDER CONFIRMED';
-        message = `YOUR ORDER #${shortId} HAS BEEN CONFIRMED. WE'RE PREPARING YOUR ITEMS.`;
-      } else if (order.status === 'SHIPPED') {
-        title = 'ORDER SHIPPED';
-        message = `YOUR ORDER #${shortId} IS ON THE WAY! EXPECT DELIVERY SOON.`;
-      } else if (order.status === 'DELIVERED') {
-        title = 'ORDER DELIVERED';
-        message = `YOUR ORDER #${shortId} HAS BEEN DELIVERED. ENJOY YOUR PURCHASE!`;
-      } else if (order.status === 'PENDING') {
-        title = 'ORDER PLACED';
-        message = `YOUR ORDER #${shortId} IS BEING PROCESSED. PAYMENT PENDING.`;
-      }
+    const unreadCount = await Notification.countDocuments({ user: userId, read: false });
 
-      if (title) {
-        notifications.push({
-          id: `order_${order._id}`,
-          type: 'PRODUCT',
-          title,
-          message,
-          createdAt: new Date(order.createdAt).getTime(),
-          read: false,
-        });
-      }
-    }
+    return success(res, 'Notifications fetched', {
+      notifications: notifications.map(n => n.toJSON()),
+      unreadCount,
+    });
+  } catch (err) {
+    next(err);
+  }
+};
 
-    // ── 2. Gamification badge unlocks ────────────────────────────────────────
-    const gam = await Gamification.findOne({ user: userId });
-    if (gam) {
-      const badgeEvents = [
-        { key: 'starter',    title: 'GOAL ACHIEVED!',          msg: 'CONGRATS! YOU HIT YOUR FIRST STEP STREAK BADGE — STARTER. KEEP IT GOING!',           icon: 'GOAL' },
-        { key: 'consistent', title: '7-DAY STREAK UNLOCKED!',  msg: 'YOU\'VE MAINTAINED A 7-DAY STREAK! THE "CONSISTENT" BADGE IS NOW YOURS.',              icon: 'GOAL' },
-        { key: 'finisher',   title: '15-DAY STREAK UNLOCKED!', msg: 'INCREDIBLE! 15 CONSECUTIVE DAYS OF ACTIVITY. THE "FINISHER" BADGE HAS BEEN AWARDED.', icon: 'GOAL' },
-        { key: 'elite',      title: '30-DAY ELITE BADGE!',     msg: 'YOU\'RE ELITE! A 30-DAY STREAK EARNED YOU THE TOP BADGE. AMAZING DEDICATION!',         icon: 'GOAL' },
-      ];
+// ─── PATCH /user/notifications/:id/read ──────────────────────────────────────
+const markNotificationRead = async (req, res, next) => {
+  try {
+    const notif = await Notification.findOneAndUpdate(
+      { _id: req.params.id, user: req.user._id },
+      { $set: { read: true } },
+      { new: true },
+    );
+    if (!notif) return error(res, 'Notification not found', 404);
+    return success(res, 'Marked as read', notif.toJSON());
+  } catch (err) {
+    next(err);
+  }
+};
 
-      for (const b of badgeEvents) {
-        if (gam.badges?.[b.key]?.unlocked && gam.badges[b.key].unlockedAt) {
-          notifications.push({
-            id: `badge_${b.key}`,
-            type: b.icon,
-            title: b.title,
-            message: b.msg,
-            createdAt: new Date(gam.badges[b.key].unlockedAt).getTime(),
-            read: false,
-          });
-        }
-      }
+// ─── PATCH /user/notifications/read-all ──────────────────────────────────────
+const markAllNotificationsRead = async (req, res, next) => {
+  try {
+    await Notification.updateMany({ user: req.user._id, read: false }, { $set: { read: true } });
+    return success(res, 'All notifications marked as read');
+  } catch (err) {
+    next(err);
+  }
+};
 
-      // Streak warning: if streak is active but no activity today, remind the user
-      if (gam.streakDays > 0 && gam.lastActiveDate && gam.lastActiveDate !== today) {
-        notifications.push({
-          id: 'streak_reminder',
-          type: 'GOAL',
-          title: 'KEEP YOUR STREAK ALIVE!',
-          message: `YOU HAVE A ${gam.streakDays}-DAY STREAK! LOG ACTIVITY TODAY TO KEEP IT GOING.`,
-          createdAt: Date.now() - 2 * 60 * 60 * 1000,
-          read: false,
-        });
-      }
-    }
-
-    // ── 3. Today's health activity ────────────────────────────────────────────
-    const todayActivity = await HealthActivity.findOne({ user: userId, date: today });
-    const dailyGoal = req.user.dailyStepGoal || 10000;
-
-    if (todayActivity) {
-      // Step goal achieved
-      if (todayActivity.goalMet) {
-        notifications.push({
-          id: 'steps_goal_today',
-          type: 'GOAL',
-          title: 'GOAL ACHIEVED!',
-          message: `YOU SMASHED YOUR DAILY STEP GOAL OF ${dailyGoal.toLocaleString()} STEPS! KEEP IT UP.`,
-          createdAt: Date.now() - 1 * 60 * 60 * 1000,
-          read: false,
-        });
-      }
-
-      // Hydration reminder if below 1000ml by midday
-      const currentHour = new Date().getHours();
-      if (currentHour >= 12 && (todayActivity.hydration || 0) < 1000) {
-        notifications.push({
-          id: 'hydration_reminder',
-          type: 'HYDRATION',
-          title: 'HYDRATION REMINDER',
-          message: `YOU'VE ONLY HAD ${todayActivity.hydration || 0}ML TODAY. TIME TO DRINK MORE WATER!`,
-          createdAt: Date.now() - 30 * 60 * 1000,
-          read: false,
-        });
-      }
-
-      // Elevated heart rate warning
-      if ((todayActivity.heartRateMax || 0) > 120) {
-        notifications.push({
-          id: 'heart_rate_high',
-          type: 'HEART',
-          title: 'ELEVATED HEART RATE DETECTED',
-          message: `YOUR HEART RATE PEAKED AT ${todayActivity.heartRateMax} BPM TODAY. STAY HYDRATED AND REST IF NEEDED.`,
-          createdAt: Date.now() - 3 * 60 * 60 * 1000,
-          read: false,
-        });
-      }
-    } else {
-      // No activity today — generic nudge
-      notifications.push({
-        id: 'activity_nudge',
-        type: 'GOAL',
-        title: 'START MOVING!',
-        message: `NO STEPS LOGGED YET TODAY. OPEN THE TRACKER TO RECORD YOUR DAILY ACTIVITY AND EARN COINS.`,
-        createdAt: Date.now() - 4 * 60 * 60 * 1000,
-        read: false,
-      });
-    }
-
-    // ── Sort by newest first ──────────────────────────────────────────────────
-    notifications.sort((a, b) => b.createdAt - a.createdAt);
-
-    return success(res, 'Notifications fetched', notifications);
+// ─── DELETE /user/notifications/:id ──────────────────────────────────────────
+const deleteNotification = async (req, res, next) => {
+  try {
+    const notif = await Notification.findOneAndDelete({ _id: req.params.id, user: req.user._id });
+    if (!notif) return error(res, 'Notification not found', 404);
+    return success(res, 'Notification deleted');
   } catch (err) {
     next(err);
   }
@@ -268,8 +188,6 @@ const uploadAvatar = async (req, res, next) => {
     next(err);
   }
 };
-
-module.exports = { getProfile, updateProfile, completeProfile, updateStepGoal, getNotifications, uploadAvatar };
 
 // ─── GET /user/addresses ───────────────────────────────────────────────────────
 const getAddresses = async (req, res, next) => {
@@ -375,9 +293,50 @@ const deleteAddress = async (req, res, next) => {
   }
 };
 
+// ─── POST /user/notifications ─────────────────────────────────────────────────
+// Called by the app when an FCM message arrives in foreground/background
+// so it gets persisted to the DB (push was already shown by Notifee).
+const saveIncomingNotification = async (req, res, next) => {
+  try {
+    const { type, title, message, data } = req.body;
+    if (!title || !message) return error(res, 'title and message are required', 400);
+
+    const Notification = require('../models/Notification.model');
+    const notif = await Notification.create({
+      user:    req.user._id,
+      type:    type || 'GOAL',
+      title,
+      message,
+      data:    data || {},
+    });
+
+    return success(res, 'Notification saved', notif.toJSON(), 201);
+  } catch (err) {
+    next(err);
+  }
+};
+const updateFcmToken = async (req, res, next) => {
+  try {
+    const { fcmToken, notificationsEnabled, platform } = req.body;
+
+    const updates = {};
+    if (fcmToken !== undefined) updates.fcmToken = fcmToken || null;
+    if (notificationsEnabled !== undefined) updates.notificationsEnabled = notificationsEnabled;
+    if (platform !== undefined) updates.platform = platform || null;
+
+    await User.findByIdAndUpdate(req.user._id, { $set: updates });
+    return success(res, 'FCM token updated');
+  } catch (err) {
+    next(err);
+  }
+};
+
 module.exports = {
-  getProfile, updateProfile, completeProfile, updateStepGoal, getNotifications,
+  getProfile, updateProfile, completeProfile, updateStepGoal,
+  getNotifications, markNotificationRead, markAllNotificationsRead,
+  deleteNotification, saveIncomingNotification,
   getAddresses, addAddress, updateAddress, deleteAddress, uploadAvatar,
+  updateFcmToken,
 };
 
 

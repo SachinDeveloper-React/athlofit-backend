@@ -15,7 +15,15 @@ const MealLog            = require('../models/MealLog.model');
 const Food               = require('../models/Food.model');
 const NutritionPref      = require('../models/NutritionPreference.model');
 const AppConfig          = require('../models/AppConfig.model');
+const FoodSynonym        = require('../models/FoodSynonym.model');
 const { success, error } = require('../utils/response');
+
+// ─── Helper: resolve a search term via synonym map ────────────────────────────
+async function resolveSearchTerm(raw) {
+  const term = raw.trim().toLowerCase();
+  const synonym = await FoodSynonym.findOne({ aliases: term });
+  return synonym ? synonym.canonical : raw.trim();
+}
 
 // ─── Helper: today ISO ────────────────────────────────────────────────────────
 
@@ -136,6 +144,10 @@ const logMeal = async (req, res, next) => {
       foodRef:  foodRef  ?? null,
     });
 
+    // Sync challenge progress after logging a meal (fire-and-forget)
+    const { syncChallengeProgress } = require('./challenge.controller');
+    syncChallengeProgress(userId).catch(() => {});
+
     return success(res, 'Meal logged successfully', log.toJSON(), 201);
   } catch (err) {
     next(err);
@@ -249,7 +261,8 @@ const getFoods = async (req, res, next) => {
     if (dietType && dietType !== 'all')    filter.dietType = dietType;
     if (category && category !== 'all')    filter.category = category;
     if (search && search.trim().length >= 2) {
-      filter.$text = { $search: search.trim() };
+      const resolved = await resolveSearchTerm(search);
+      filter.$text = { $search: resolved };
     }
 
     const [foods, total] = await Promise.all([
