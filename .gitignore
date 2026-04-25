@@ -3,4 +3,4 @@ node_modules/
 *.log
 dist/
 .DS_Store
-config/serviceAccountKey.json
+echo "src/config/serviceAccountKey.json" >> .gitignore
