@@ -11,7 +11,11 @@ const notificationSchema = new mongoose.Schema(
     },
     type: {
       type: String,
+<<<<<<< HEAD
       enum: ['GOAL', 'HYDRATION', 'PRODUCT', 'SECURITY', 'HEART', 'CHALLENGE', 'COIN', 'SYSTEM'],
+=======
+      enum: ['GOAL', 'HYDRATION', 'PRODUCT', 'SECURITY', 'HEART', 'CHALLENGE', 'COIN'],
+>>>>>>> e02c9e2d962e5d748a3eaae3e93426247296ac5f
       required: true,
     },
     title:   { type: String, required: true },

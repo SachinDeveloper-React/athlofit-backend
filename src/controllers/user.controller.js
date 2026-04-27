@@ -7,7 +7,10 @@ const Notification = require('../models/Notification.model');
 const { success, error } = require('../utils/response');
 const { todayISO } = require('../utils/date');
 const { uploadBuffer } = require('../utils/cloudinary');
+<<<<<<< HEAD
 const { createNotification } = require('../utils/createNotification');
+=======
+>>>>>>> e02c9e2d962e5d748a3eaae3e93426247296ac5f
 
 // ─── GET /user/profile ────────────────────────────────────────────────────────
 const getProfile = async (req, res, next) => {
@@ -332,6 +335,7 @@ const updateFcmToken = async (req, res, next) => {
   }
 };
 
+<<<<<<< HEAD
 // ─── POST /user/request-deletion ──────────────────────────────────────────────
 // User requests account deletion. Sets status to 'pending' and schedules deletion
 // for 30 days from now (grace period for cancellation).
@@ -447,13 +451,18 @@ const getDeletionStatus = async (req, res, next) => {
   }
 };
 
+=======
+>>>>>>> e02c9e2d962e5d748a3eaae3e93426247296ac5f
 module.exports = {
   getProfile, updateProfile, completeProfile, updateStepGoal,
   getNotifications, markNotificationRead, markAllNotificationsRead,
   deleteNotification, saveIncomingNotification,
   getAddresses, addAddress, updateAddress, deleteAddress, uploadAvatar,
   updateFcmToken,
+<<<<<<< HEAD
   requestAccountDeletion, cancelAccountDeletion, getDeletionStatus,
+=======
+>>>>>>> e02c9e2d962e5d748a3eaae3e93426247296ac5f
 };
 
 

@@ -2,7 +2,11 @@ node_modules/
 .env
 *.log
 dist/
+<<<<<<< HEAD
 .DS_Store
 
 # Firebase service account — never commit this
 src/config/serviceAccountKey.json
+=======
+.DS_Store
+>>>>>>> e02c9e2d962e5d748a3eaae3e93426247296ac5f

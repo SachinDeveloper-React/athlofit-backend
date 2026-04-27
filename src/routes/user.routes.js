@@ -18,9 +18,12 @@ const {
   deleteAddress,
   uploadAvatar,
   updateFcmToken,
+<<<<<<< HEAD
   requestAccountDeletion,
   cancelAccountDeletion,
   getDeletionStatus,
+=======
+>>>>>>> e02c9e2d962e5d748a3eaae3e93426247296ac5f
 } = require('../controllers/user.controller');
 const {
   getAnalyticsDashboard,
@@ -80,10 +83,13 @@ router.post('/addresses', addAddress);
 router.patch('/addresses/:addressId', updateAddress);
 router.delete('/addresses/:addressId', deleteAddress);
 
+<<<<<<< HEAD
 // ─── Account deletion ─────────────────────────────────────────────────────────
 router.post('/request-deletion', requestAccountDeletion);
 router.post('/cancel-deletion', cancelAccountDeletion);
 router.get('/deletion-status', getDeletionStatus);
 
+=======
+>>>>>>> e02c9e2d962e5d748a3eaae3e93426247296ac5f
 module.exports = router;
 
