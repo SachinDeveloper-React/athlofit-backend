@@ -1,0 +1,8 @@
+node_modules/
+.env
+*.log
+dist/
+.DS_Store
+
+# Firebase service account — never commit this
+src/config/serviceAccountKey.json

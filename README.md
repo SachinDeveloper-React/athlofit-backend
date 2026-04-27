@@ -57,12 +57,39 @@ npm install
 # 2. Copy env file and fill in values
 cp .env.example .env
 
-# 3. Start development server
+# 3. Seed the database with sample data
+npm run seed:complete
+
+# 4. Start development server
 npm run dev
 
-# 4. Start production server
+# 5. Start production server
 npm start
 ```
+
+## Database Seeding
+
+Seed your database with sample data for development and testing:
+
+```bash
+# Seed everything (recommended for first-time setup)
+npm run seed:complete
+
+# Or seed individual components
+npm run seed:all          # Core data (users, health, notifications)
+npm run seed:nutrition    # Food catalog (40+ items)
+npm run seed:challenges   # Daily & weekly challenges
+npm run seed:shop         # Products & categories
+npm run seed:badges       # Badge definitions
+npm run seed:synonyms     # Multilingual food synonyms
+```
+
+**Test Credentials:**
+- User: `john@example.com` / `Password123!`
+- User: `jane@example.com` / `Password123!`
+- Admin: `admin@athlofit.com` / `Admin123!`
+
+📖 See [SEEDING_GUIDE.md](./SEEDING_GUIDE.md) for detailed documentation.
 
 ## Environment Variables
 
