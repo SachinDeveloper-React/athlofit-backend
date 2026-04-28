@@ -1,21 +1,18 @@
 // src/controllers/user.controller.js
-const User = require('../models/User.model');
-const Order = require('../models/Order.model');
-const Gamification = require('../models/Gamification.model');
-const HealthActivity = require('../models/HealthActivity.model');
-const Notification = require('../models/Notification.model');
-const { success, error } = require('../utils/response');
-const { todayISO } = require('../utils/date');
-const { uploadBuffer } = require('../utils/cloudinary');
-<<<<<<< HEAD
-const { createNotification } = require('../utils/createNotification');
-=======
->>>>>>> e02c9e2d962e5d748a3eaae3e93426247296ac5f
+const User = require("../models/User.model");
+const Order = require("../models/Order.model");
+const Gamification = require("../models/Gamification.model");
+const HealthActivity = require("../models/HealthActivity.model");
+const Notification = require("../models/Notification.model");
+const { success, error } = require("../utils/response");
+const { todayISO } = require("../utils/date");
+const { uploadBuffer } = require("../utils/cloudinary");
+const { createNotification } = require("../utils/createNotification");
 
 // ─── GET /user/profile ────────────────────────────────────────────────────────
 const getProfile = async (req, res, next) => {
   try {
-    return success(res, 'Profile fetched', req.user);
+    return success(res, "Profile fetched", req.user);
   } catch (err) {
     next(err);
   }
@@ -25,12 +22,20 @@ const getProfile = async (req, res, next) => {
 const updateProfile = async (req, res, next) => {
   try {
     const allowed = [
-      'name', 'phone', 'dob', 'gender', 'height',
-      'weight', 'bloodType', 'avatarUrl', 'dailyStepGoal', 'unitSystem',
+      "name",
+      "phone",
+      "dob",
+      "gender",
+      "height",
+      "weight",
+      "bloodType",
+      "avatarUrl",
+      "dailyStepGoal",
+      "unitSystem",
     ];
 
     const updates = {};
-    allowed.forEach(key => {
+    allowed.forEach((key) => {
       if (req.body[key] !== undefined) updates[key] = req.body[key];
     });
 
@@ -43,10 +48,10 @@ const updateProfile = async (req, res, next) => {
     const user = await User.findByIdAndUpdate(
       req.user._id,
       { $set: updates },
-      { new: true, runValidators: true }
+      { new: true, runValidators: true },
     );
 
-    return success(res, 'Profile updated', user);
+    return success(res, "Profile updated", user);
   } catch (err) {
     next(err);
   }
@@ -55,7 +60,8 @@ const updateProfile = async (req, res, next) => {
 // ─── POST /user/complete-profile ──────────────────────────────────────────────
 const completeProfile = async (req, res, next) => {
   try {
-    const { phone, dob, gender, height, weight, bloodType, avatarUrl } = req.body;
+    const { phone, dob, gender, height, weight, bloodType, avatarUrl } =
+      req.body;
 
     const birthYear = new Date(dob).getFullYear();
     const age = new Date().getFullYear() - birthYear;
@@ -75,12 +81,12 @@ const completeProfile = async (req, res, next) => {
           isProfileCompleted: true,
         },
       },
-      { new: true, runValidators: true }
+      { new: true, runValidators: true },
     );
 
-    return success(res, 'Profile completed', {
-      status: 'success',
-      message: 'Profile completed',
+    return success(res, "Profile completed", {
+      status: "success",
+      message: "Profile completed",
       user,
     });
   } catch (err) {
@@ -94,16 +100,16 @@ const updateStepGoal = async (req, res, next) => {
     const { dailyStepGoal } = req.body;
 
     if (!dailyStepGoal || dailyStepGoal < 100) {
-      return error(res, 'Step goal must be at least 100', 400);
+      return error(res, "Step goal must be at least 100", 400);
     }
 
     const user = await User.findByIdAndUpdate(
       req.user._id,
       { $set: { dailyStepGoal } },
-      { new: true }
+      { new: true },
     );
 
-    return success(res, 'Step goal updated', user);
+    return success(res, "Step goal updated", user);
   } catch (err) {
     next(err);
   }
@@ -113,18 +119,21 @@ const updateStepGoal = async (req, res, next) => {
 const getNotifications = async (req, res, next) => {
   try {
     const userId = req.user._id;
-    const limit  = Math.min(100, parseInt(req.query.limit || '50', 10));
-    const skip   = parseInt(req.query.skip || '0', 10);
+    const limit = Math.min(100, parseInt(req.query.limit || "50", 10));
+    const skip = parseInt(req.query.skip || "0", 10);
 
     const notifications = await Notification.find({ user: userId })
       .sort({ createdAt: -1 })
       .skip(skip)
       .limit(limit);
 
-    const unreadCount = await Notification.countDocuments({ user: userId, read: false });
+    const unreadCount = await Notification.countDocuments({
+      user: userId,
+      read: false,
+    });
 
-    return success(res, 'Notifications fetched', {
-      notifications: notifications.map(n => n.toJSON()),
+    return success(res, "Notifications fetched", {
+      notifications: notifications.map((n) => n.toJSON()),
       unreadCount,
     });
   } catch (err) {
@@ -140,8 +149,8 @@ const markNotificationRead = async (req, res, next) => {
       { $set: { read: true } },
       { new: true },
     );
-    if (!notif) return error(res, 'Notification not found', 404);
-    return success(res, 'Marked as read', notif.toJSON());
+    if (!notif) return error(res, "Notification not found", 404);
+    return success(res, "Marked as read", notif.toJSON());
   } catch (err) {
     next(err);
   }
@@ -150,8 +159,11 @@ const markNotificationRead = async (req, res, next) => {
 // ─── PATCH /user/notifications/read-all ──────────────────────────────────────
 const markAllNotificationsRead = async (req, res, next) => {
   try {
-    await Notification.updateMany({ user: req.user._id, read: false }, { $set: { read: true } });
-    return success(res, 'All notifications marked as read');
+    await Notification.updateMany(
+      { user: req.user._id, read: false },
+      { $set: { read: true } },
+    );
+    return success(res, "All notifications marked as read");
   } catch (err) {
     next(err);
   }
@@ -160,9 +172,12 @@ const markAllNotificationsRead = async (req, res, next) => {
 // ─── DELETE /user/notifications/:id ──────────────────────────────────────────
 const deleteNotification = async (req, res, next) => {
   try {
-    const notif = await Notification.findOneAndDelete({ _id: req.params.id, user: req.user._id });
-    if (!notif) return error(res, 'Notification not found', 404);
-    return success(res, 'Notification deleted');
+    const notif = await Notification.findOneAndDelete({
+      _id: req.params.id,
+      user: req.user._id,
+    });
+    if (!notif) return error(res, "Notification not found", 404);
+    return success(res, "Notification deleted");
   } catch (err) {
     next(err);
   }
@@ -173,12 +188,12 @@ const deleteNotification = async (req, res, next) => {
 // Uploads to Cloudinary, saves URL to user, returns updated user.
 const uploadAvatar = async (req, res, next) => {
   try {
-    if (!req.file) return error(res, 'No image file provided', 400);
+    if (!req.file) return error(res, "No image file provided", 400);
 
     const avatarUrl = await uploadBuffer(
       req.file.buffer,
-      'athlofit/avatars',
-      `user_${req.user._id}`,   // deterministic public_id — overwrites previous avatar
+      "athlofit/avatars",
+      `user_${req.user._id}`, // deterministic public_id — overwrites previous avatar
     );
 
     const user = await User.findByIdAndUpdate(
@@ -187,7 +202,7 @@ const uploadAvatar = async (req, res, next) => {
       { new: true },
     );
 
-    return success(res, 'Avatar uploaded', { avatarUrl, user });
+    return success(res, "Avatar uploaded", { avatarUrl, user });
   } catch (err) {
     next(err);
   }
@@ -196,8 +211,8 @@ const uploadAvatar = async (req, res, next) => {
 // ─── GET /user/addresses ───────────────────────────────────────────────────────
 const getAddresses = async (req, res, next) => {
   try {
-    const user = await User.findById(req.user._id).select('savedAddresses');
-    return success(res, 'Addresses fetched', user.savedAddresses || []);
+    const user = await User.findById(req.user._id).select("savedAddresses");
+    return success(res, "Addresses fetched", user.savedAddresses || []);
   } catch (err) {
     next(err);
   }
@@ -206,36 +221,49 @@ const getAddresses = async (req, res, next) => {
 // ─── POST /user/addresses ──────────────────────────────────────────────────────
 const addAddress = async (req, res, next) => {
   try {
-    const { label, fullName, phone, street, city, state, zipCode, country, isDefault } = req.body;
+    const {
+      label,
+      fullName,
+      phone,
+      street,
+      city,
+      state,
+      zipCode,
+      country,
+      isDefault,
+    } = req.body;
 
     if (!street || !city || !state || !zipCode) {
-      return error(res, 'Street, city, state and zipCode are required', 400);
+      return error(res, "Street, city, state and zipCode are required", 400);
     }
 
     const user = await User.findById(req.user._id);
 
     // If new address is default, clear existing default
     if (isDefault) {
-      user.savedAddresses.forEach(a => { a.isDefault = false; });
+      user.savedAddresses.forEach((a) => {
+        a.isDefault = false;
+      });
     }
 
     // If this is the first address, force it as default
-    const forceDefault = user.savedAddresses.length === 0 ? true : (isDefault || false);
+    const forceDefault =
+      user.savedAddresses.length === 0 ? true : isDefault || false;
 
     user.savedAddresses.push({
-      label: label || 'Home',
-      fullName: fullName || req.user.name || '',
-      phone: phone || req.user.phone || '',
+      label: label || "Home",
+      fullName: fullName || req.user.name || "",
+      phone: phone || req.user.phone || "",
       street,
       city,
       state,
       zipCode,
-      country: country || 'India',
+      country: country || "India",
       isDefault: forceDefault,
     });
 
     await user.save();
-    return success(res, 'Address added', user.savedAddresses);
+    return success(res, "Address added", user.savedAddresses);
   } catch (err) {
     next(err);
   }
@@ -245,29 +273,41 @@ const addAddress = async (req, res, next) => {
 const updateAddress = async (req, res, next) => {
   try {
     const { addressId } = req.params;
-    const { label, fullName, phone, street, city, state, zipCode, country, isDefault } = req.body;
+    const {
+      label,
+      fullName,
+      phone,
+      street,
+      city,
+      state,
+      zipCode,
+      country,
+      isDefault,
+    } = req.body;
 
     const user = await User.findById(req.user._id);
     const addr = user.savedAddresses.id(addressId);
 
-    if (!addr) return error(res, 'Address not found', 404);
+    if (!addr) return error(res, "Address not found", 404);
 
-    if (label    !== undefined) addr.label    = label;
+    if (label !== undefined) addr.label = label;
     if (fullName !== undefined) addr.fullName = fullName;
-    if (phone    !== undefined) addr.phone    = phone;
-    if (street   !== undefined) addr.street   = street;
-    if (city     !== undefined) addr.city     = city;
-    if (state    !== undefined) addr.state    = state;
-    if (zipCode  !== undefined) addr.zipCode  = zipCode;
-    if (country  !== undefined) addr.country  = country;
+    if (phone !== undefined) addr.phone = phone;
+    if (street !== undefined) addr.street = street;
+    if (city !== undefined) addr.city = city;
+    if (state !== undefined) addr.state = state;
+    if (zipCode !== undefined) addr.zipCode = zipCode;
+    if (country !== undefined) addr.country = country;
 
     if (isDefault) {
-      user.savedAddresses.forEach(a => { a.isDefault = false; });
+      user.savedAddresses.forEach((a) => {
+        a.isDefault = false;
+      });
       addr.isDefault = true;
     }
 
     await user.save();
-    return success(res, 'Address updated', user.savedAddresses);
+    return success(res, "Address updated", user.savedAddresses);
   } catch (err) {
     next(err);
   }
@@ -279,8 +319,10 @@ const deleteAddress = async (req, res, next) => {
     const { addressId } = req.params;
     const user = await User.findById(req.user._id);
 
-    const idx = user.savedAddresses.findIndex(a => a._id.toString() === addressId);
-    if (idx === -1) return error(res, 'Address not found', 404);
+    const idx = user.savedAddresses.findIndex(
+      (a) => a._id.toString() === addressId,
+    );
+    if (idx === -1) return error(res, "Address not found", 404);
 
     const wasDefault = user.savedAddresses[idx].isDefault;
     user.savedAddresses.splice(idx, 1);
@@ -291,7 +333,7 @@ const deleteAddress = async (req, res, next) => {
     }
 
     await user.save();
-    return success(res, 'Address deleted', user.savedAddresses);
+    return success(res, "Address deleted", user.savedAddresses);
   } catch (err) {
     next(err);
   }
@@ -303,18 +345,19 @@ const deleteAddress = async (req, res, next) => {
 const saveIncomingNotification = async (req, res, next) => {
   try {
     const { type, title, message, data } = req.body;
-    if (!title || !message) return error(res, 'title and message are required', 400);
+    if (!title || !message)
+      return error(res, "title and message are required", 400);
 
-    const Notification = require('../models/Notification.model');
+    const Notification = require("../models/Notification.model");
     const notif = await Notification.create({
-      user:    req.user._id,
-      type:    type || 'GOAL',
+      user: req.user._id,
+      type: type || "GOAL",
       title,
       message,
-      data:    data || {},
+      data: data || {},
     });
 
-    return success(res, 'Notification saved', notif.toJSON(), 201);
+    return success(res, "Notification saved", notif.toJSON(), 201);
   } catch (err) {
     next(err);
   }
@@ -325,17 +368,17 @@ const updateFcmToken = async (req, res, next) => {
 
     const updates = {};
     if (fcmToken !== undefined) updates.fcmToken = fcmToken || null;
-    if (notificationsEnabled !== undefined) updates.notificationsEnabled = notificationsEnabled;
+    if (notificationsEnabled !== undefined)
+      updates.notificationsEnabled = notificationsEnabled;
     if (platform !== undefined) updates.platform = platform || null;
 
     await User.findByIdAndUpdate(req.user._id, { $set: updates });
-    return success(res, 'FCM token updated');
+    return success(res, "FCM token updated");
   } catch (err) {
     next(err);
   }
 };
 
-<<<<<<< HEAD
 // ─── POST /user/request-deletion ──────────────────────────────────────────────
 // User requests account deletion. Sets status to 'pending' and schedules deletion
 // for 30 days from now (grace period for cancellation).
@@ -345,8 +388,12 @@ const requestAccountDeletion = async (req, res, next) => {
     const user = await User.findById(req.user._id);
 
     // Check if there's already an active deletion request
-    if (user.deletionRequest && (user.deletionRequest.status === 'pending' || user.deletionRequest.status === 'in_progress')) {
-      return error(res, 'Account deletion request already exists', 400);
+    if (
+      user.deletionRequest &&
+      (user.deletionRequest.status === "pending" ||
+        user.deletionRequest.status === "in_progress")
+    ) {
+      return error(res, "Account deletion request already exists", 400);
     }
 
     // Set deletion request with 30-day grace period
@@ -354,7 +401,7 @@ const requestAccountDeletion = async (req, res, next) => {
     scheduledDate.setDate(scheduledDate.getDate() + 30);
 
     user.deletionRequest = {
-      status: 'pending',
+      status: "pending",
       requestedAt: new Date(),
       scheduledDeletionDate: scheduledDate,
       reason: reason || null,
@@ -372,7 +419,7 @@ const requestAccountDeletion = async (req, res, next) => {
     //   data: { screen: 'SettingsScreen' },
     // });
 
-    return success(res, 'Account deletion requested', {
+    return success(res, "Account deletion requested", {
       status: user.deletionRequest.status,
       scheduledDeletionDate: user.deletionRequest.scheduledDeletionDate,
       requestedAt: user.deletionRequest.requestedAt,
@@ -388,12 +435,16 @@ const cancelAccountDeletion = async (req, res, next) => {
   try {
     const user = await User.findById(req.user._id);
 
-    if (!user.deletionRequest || (user.deletionRequest.status !== 'pending' && user.deletionRequest.status !== 'in_progress')) {
-      return error(res, 'No active deletion request found', 400);
+    if (
+      !user.deletionRequest ||
+      (user.deletionRequest.status !== "pending" &&
+        user.deletionRequest.status !== "in_progress")
+    ) {
+      return error(res, "No active deletion request found", 400);
     }
 
     user.deletionRequest = {
-      status: 'cancelled',
+      status: "cancelled",
       requestedAt: user.deletionRequest.requestedAt,
       scheduledDeletionDate: null,
       reason: user.deletionRequest.reason,
@@ -405,13 +456,14 @@ const cancelAccountDeletion = async (req, res, next) => {
 
     // Send notification about cancellation
     await createNotification(user._id, {
-      type: 'SYSTEM',
-      title: '✅ Deletion Request Cancelled',
-      message: 'Your account deletion request has been cancelled. Your account is safe.',
-      data: { screen: 'SettingsScreen' },
+      type: "SYSTEM",
+      title: "✅ Deletion Request Cancelled",
+      message:
+        "Your account deletion request has been cancelled. Your account is safe.",
+      data: { screen: "SettingsScreen" },
     });
 
-    return success(res, 'Account deletion cancelled', {
+    return success(res, "Account deletion cancelled", {
       status: user.deletionRequest.status,
       cancelledAt: user.deletionRequest.cancelledAt,
     });
@@ -424,12 +476,12 @@ const cancelAccountDeletion = async (req, res, next) => {
 // Get current account deletion status
 const getDeletionStatus = async (req, res, next) => {
   try {
-    const user = await User.findById(req.user._id).select('deletionRequest');
-    
+    const user = await User.findById(req.user._id).select("deletionRequest");
+
     // If deletionRequest doesn't exist, return default 'none' status
     if (!user.deletionRequest) {
-      return success(res, 'Deletion status fetched', {
-        status: 'none',
+      return success(res, "Deletion status fetched", {
+        status: "none",
         requestedAt: null,
         scheduledDeletionDate: null,
         reason: null,
@@ -437,9 +489,9 @@ const getDeletionStatus = async (req, res, next) => {
         completedAt: null,
       });
     }
-    
-    return success(res, 'Deletion status fetched', {
-      status: user.deletionRequest.status || 'none',
+
+    return success(res, "Deletion status fetched", {
+      status: user.deletionRequest.status || "none",
       requestedAt: user.deletionRequest.requestedAt || null,
       scheduledDeletionDate: user.deletionRequest.scheduledDeletionDate || null,
       reason: user.deletionRequest.reason || null,
@@ -451,18 +503,23 @@ const getDeletionStatus = async (req, res, next) => {
   }
 };
 
-=======
->>>>>>> e02c9e2d962e5d748a3eaae3e93426247296ac5f
 module.exports = {
-  getProfile, updateProfile, completeProfile, updateStepGoal,
-  getNotifications, markNotificationRead, markAllNotificationsRead,
-  deleteNotification, saveIncomingNotification,
-  getAddresses, addAddress, updateAddress, deleteAddress, uploadAvatar,
+  getProfile,
+  updateProfile,
+  completeProfile,
+  updateStepGoal,
+  getNotifications,
+  markNotificationRead,
+  markAllNotificationsRead,
+  deleteNotification,
+  saveIncomingNotification,
+  getAddresses,
+  addAddress,
+  updateAddress,
+  deleteAddress,
+  uploadAvatar,
   updateFcmToken,
-<<<<<<< HEAD
-  requestAccountDeletion, cancelAccountDeletion, getDeletionStatus,
-=======
->>>>>>> e02c9e2d962e5d748a3eaae3e93426247296ac5f
+  requestAccountDeletion,
+  cancelAccountDeletion,
+  getDeletionStatus,
 };
-
-

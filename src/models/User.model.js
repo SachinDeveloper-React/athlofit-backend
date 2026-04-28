@@ -1,42 +1,42 @@
 // src/models/User.model.js
-const mongoose = require('mongoose');
-const bcrypt = require('bcryptjs');
-const crypto = require('crypto');
+const mongoose = require("mongoose");
+const bcrypt = require("bcryptjs");
+const crypto = require("crypto");
 
 // ─── Helper: generate unique 8-char alphanumeric referral code ────────────────
 const generateReferralCode = () =>
-  crypto.randomBytes(4).toString('hex').toUpperCase();
+  crypto.randomBytes(4).toString("hex").toUpperCase();
 
 const userSchema = new mongoose.Schema(
   {
     name: {
       type: String,
-      required: [true, 'Name is required'],
+      required: [true, "Name is required"],
       trim: true,
-      maxlength: [100, 'Name cannot exceed 100 characters'],
+      maxlength: [100, "Name cannot exceed 100 characters"],
     },
     email: {
       type: String,
-      required: [true, 'Email is required'],
+      required: [true, "Email is required"],
       unique: true,
       lowercase: true,
       trim: true,
-      match: [/^\S+@\S+\.\S+$/, 'Please provide a valid email'],
+      match: [/^\S+@\S+\.\S+$/, "Please provide a valid email"],
     },
     password: {
       type: String,
-      minlength: [8, 'Password must be at least 8 characters'],
+      minlength: [8, "Password must be at least 8 characters"],
       select: false,
     },
     provider: {
       type: String,
-      enum: ['email', 'google', 'apple'],
-      default: 'email',
+      enum: ["email", "google", "apple"],
+      default: "email",
     },
     role: {
       type: String,
-      enum: ['user', 'admin'],
-      default: 'user',
+      enum: ["user", "admin"],
+      default: "user",
     },
     emailVerified: { type: Boolean, default: false },
     phoneVerified: { type: Boolean, default: false },
@@ -44,26 +44,34 @@ const userSchema = new mongoose.Schema(
 
     // Profile fields
     phone: { type: String, default: null },
-    dob: { type: String, default: null },        // ISO date "YYYY-MM-DD"
-    gender: { type: String, enum: ['M', 'F', 'O', null], default: null },
-    height: { type: Number, default: null },     // cm
-    weight: { type: Number, default: null },     // kg
+    dob: { type: String, default: null }, // ISO date "YYYY-MM-DD"
+    gender: { type: String, enum: ["M", "F", "O", null], default: null },
+    height: { type: Number, default: null }, // cm
+    weight: { type: Number, default: null }, // kg
     bloodType: { type: String, default: null },
     avatarUrl: { type: String, default: null },
     age: { type: Number, default: null },
 
     // Unit system preference
-    unitSystem: { type: String, enum: ['metric', 'imperial'], default: 'metric' },
+    unitSystem: {
+      type: String,
+      enum: ["metric", "imperial"],
+      default: "metric",
+    },
 
     // Google OAuth
     googleId: { type: String, default: null, sparse: true },
-    googleScopes: { type: [String], default: [] },      // granted OAuth scopes
-    givenName:  { type: String, default: null },
+    googleScopes: { type: [String], default: [] }, // granted OAuth scopes
+    givenName: { type: String, default: null },
     familyName: { type: String, default: null },
 
     // Referral
     referralCode: { type: String, unique: true, sparse: true },
-    referredBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+    referredBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+      default: null,
+    },
 
     // Health goal
     dailyStepGoal: { type: Number, default: 10000 },
@@ -72,14 +80,14 @@ const userSchema = new mongoose.Schema(
     savedAddresses: [
       {
         _id: { type: mongoose.Schema.Types.ObjectId, auto: true },
-        label: { type: String, default: 'Home' },   // "Home", "Work", "Other"
-        fullName: { type: String, default: '' },
-        phone: { type: String, default: '' },
-        street: { type: String, default: '' },
-        city: { type: String, default: '' },
-        state: { type: String, default: '' },
-        zipCode: { type: String, default: '' },
-        country: { type: String, default: 'India' },
+        label: { type: String, default: "Home" }, // "Home", "Work", "Other"
+        fullName: { type: String, default: "" },
+        phone: { type: String, default: "" },
+        street: { type: String, default: "" },
+        city: { type: String, default: "" },
+        state: { type: String, default: "" },
+        zipCode: { type: String, default: "" },
+        country: { type: String, default: "India" },
         isDefault: { type: Boolean, default: false },
       },
     ],
@@ -87,7 +95,12 @@ const userSchema = new mongoose.Schema(
     // OTP fields
     otp: { type: String, select: false },
     otpExpires: { type: Date, select: false },
-    otpFlow: { type: String, enum: ['signup', 'forgot_password', null], select: false, default: null },
+    otpFlow: {
+      type: String,
+      enum: ["signup", "forgot_password", null],
+      select: false,
+      default: null,
+    },
 
     // Token versioning (for invalidation)
     tokenVersion: { type: Number, default: 0 },
@@ -96,16 +109,14 @@ const userSchema = new mongoose.Schema(
     fcmToken: { type: String, default: null },
     notificationsEnabled: { type: Boolean, default: true },
     // Device platform — set when FCM token is registered
-    platform: { type: String, enum: ['ios', 'android', null], default: null },
-<<<<<<< HEAD
-
+    platform: { type: String, enum: ["ios", "android", null], default: null },
     // Account deletion request
     deletionRequest: {
       type: {
-        status: { 
-          type: String, 
-          enum: ['none', 'pending', 'in_progress', 'completed', 'cancelled'], 
-          default: 'none' 
+        status: {
+          type: String,
+          enum: ["none", "pending", "in_progress", "completed", "cancelled"],
+          default: "none",
         },
         requestedAt: { type: Date, default: null },
         scheduledDeletionDate: { type: Date, default: null }, // 30 days from request
@@ -114,7 +125,7 @@ const userSchema = new mongoose.Schema(
         completedAt: { type: Date, default: null },
       },
       default: () => ({
-        status: 'none',
+        status: "none",
         requestedAt: null,
         scheduledDeletionDate: null,
         reason: null,
@@ -122,8 +133,6 @@ const userSchema = new mongoose.Schema(
         completedAt: null,
       }),
     },
-=======
->>>>>>> e02c9e2d962e5d748a3eaae3e93426247296ac5f
   },
   {
     timestamps: true,
@@ -138,13 +147,13 @@ const userSchema = new mongoose.Schema(
         return ret;
       },
     },
-  }
+  },
 );
 
 // ─── Pre-save hook: hash password + auto-generate referral code ──────────────
-userSchema.pre('save', async function (next) {
+userSchema.pre("save", async function (next) {
   // Hash password if modified
-  if (this.isModified('password') && this.password) {
+  if (this.isModified("password") && this.password) {
     this.password = await bcrypt.hash(this.password, 12);
   }
   // Auto-generate referral code on first save
@@ -159,4 +168,4 @@ userSchema.methods.comparePassword = async function (candidate) {
   return bcrypt.compare(candidate, this.password);
 };
 
-module.exports = mongoose.model('User', userSchema);
+module.exports = mongoose.model("User", userSchema);
