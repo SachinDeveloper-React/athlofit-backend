@@ -10,6 +10,8 @@ const {
   addReview,
   searchProducts,
   buyWithCoins,
+  validateCoupon,
+  getAvailableCoupons,
   getOrders,
   cancelOrder,
 } = require('../controllers/shop.controller');
@@ -26,6 +28,8 @@ router.get('/search', searchProducts);
 // Protected routes
 router.post('/products/:id/review', protect, addReview);
 router.post('/cart/buy-with-coins', protect, buyWithCoins);
+router.get('/coupons', protect, getAvailableCoupons);
+router.post('/coupons/validate', protect, validateCoupon);
 router.get('/orders', protect, getOrders);
 router.patch('/orders/:orderId/cancel', protect, cancelOrder);
 

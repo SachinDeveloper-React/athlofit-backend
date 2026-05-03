@@ -7,6 +7,9 @@ const {
   getTodayHealth,
   getAnalyticsDashboard,
   syncAnalyticsDashboard,
+  getCalendarActivity,
+  getPeriodStats,
+  getDayDetail,
   saveBmi,
   getBmiHistory,
 } = require('../controllers/health.controller');
@@ -20,6 +23,15 @@ router.get('/analytics', getAnalyticsDashboard);
 
 // POST /health/analytics/sync
 router.post('/analytics/sync', syncAnalyticsDashboard);
+
+// GET /health/calendar?year=YYYY&month=MM
+router.get('/calendar', getCalendarActivity);
+
+// GET /health/period-stats
+router.get('/period-stats', getPeriodStats);
+
+// GET /health/day-detail?date=YYYY-MM-DD
+router.get('/day-detail', getDayDetail);
 
 // GET /health/weekly-steps?from=YYYY-MM-DD&to=YYYY-MM-DD
 router.get('/weekly-steps', getWeeklySteps);

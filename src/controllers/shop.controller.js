@@ -219,8 +219,7 @@ const searchProducts = async (req, res, next) => {
 // ─── POST /shop/cart/buy-with-coins ──────────────────────────────────────────
 const buyWithCoins = async (req, res, next) => {
   try {
-    const { items, shippingAddress } = req.body;
-    // items: [{ productId, quantity }]
+    const { items, shippingAddress, couponCode } = req.body;
     
     if (!items || items.length === 0) {
       return error(res, 'Cart is empty', 400);
@@ -260,8 +259,38 @@ const buyWithCoins = async (req, res, next) => {
       });
     }
 
-    if (gamification.coinsBalance < totalCoinCost) {
-      return error(res, `Insufficient coins. Need ${totalCoinCost} but you have ${gamification.coinsBalance}.`, 400);
+    // ── Apply coupon if provided ──────────────────────────────────────────────
+    let couponDiscount = 0;
+    let appliedCoupon = null;
+    if (couponCode) {
+      const Coupon = require('../models/Coupon.model');
+      const coupon = await Coupon.findOne({ code: couponCode.toUpperCase().trim(), isActive: true });
+
+      if (!coupon) return error(res, 'Invalid or expired coupon code', 400);
+
+      const now = new Date();
+      if (coupon.validUntil && coupon.validUntil < now) return error(res, 'Coupon has expired', 400);
+      if (coupon.validFrom > now) return error(res, 'Coupon is not yet active', 400);
+      if (coupon.usageLimit !== null && coupon.usageCount >= coupon.usageLimit) return error(res, 'Coupon usage limit reached', 400);
+      if (totalCoinCost < coupon.minCartCoins) return error(res, `Minimum cart value of ${coupon.minCartCoins} coins required`, 400);
+
+      const userUseCount = coupon.usedBy.filter(id => id.toString() === req.user._id.toString()).length;
+      if (userUseCount >= coupon.perUserLimit) return error(res, 'You have already used this coupon', 400);
+
+      if (coupon.discountType === 'percentage') {
+        couponDiscount = Math.round(totalCoinCost * (coupon.discountValue / 100));
+        if (coupon.maxDiscountCoins !== null) couponDiscount = Math.min(couponDiscount, coupon.maxDiscountCoins);
+      } else {
+        couponDiscount = Math.min(coupon.discountValue, totalCoinCost);
+      }
+
+      appliedCoupon = coupon;
+    }
+
+    const finalCoinCost = Math.max(0, totalCoinCost - couponDiscount);
+
+    if (gamification.coinsBalance < finalCoinCost) {
+      return error(res, `Insufficient coins. Need ${finalCoinCost} but you have ${gamification.coinsBalance}.`, 400);
     }
 
     // Deduct stock
@@ -270,15 +299,24 @@ const buyWithCoins = async (req, res, next) => {
     }
 
     // Deduct coins
-    gamification.coinsBalance -= totalCoinCost;
+    gamification.coinsBalance -= finalCoinCost;
     await gamification.save();
+
+    // Mark coupon as used
+    if (appliedCoupon) {
+      appliedCoupon.usageCount += 1;
+      appliedCoupon.usedBy.push(req.user._id);
+      await appliedCoupon.save();
+    }
 
     // Create Order
     const order = await Order.create({
       user: req.user._id,
       items: orderItems,
       totalPrice: totalStandardPrice,
-      totalCoins: totalCoinCost,
+      totalCoins: finalCoinCost,
+      couponCode: appliedCoupon?.code || null,
+      couponDiscount,
       paymentMethod: 'COIN_PURCHASE',
       status: 'PAID',
       shippingAddress: shippingAddress || {},
@@ -295,6 +333,7 @@ const buyWithCoins = async (req, res, next) => {
     return success(res, 'Purchase successful using coins!', {
       order,
       remainingCoins: gamification.coinsBalance,
+      couponDiscount,
     });
   } catch (err) {
     next(err);
@@ -399,6 +438,89 @@ const cancelOrder = async (req, res, next) => {
   }
 };
 
+// ─── POST /shop/coupons/validate ─────────────────────────────────────────────
+// Validates a coupon code against the current cart total (in coins).
+// Returns discount amount without applying it — used for preview in CartScreen.
+const validateCoupon = async (req, res, next) => {
+  try {
+    const { code, cartTotalCoins } = req.body;
+
+    if (!code) return error(res, 'Coupon code is required', 400);
+
+    const Coupon = require('../models/Coupon.model');
+    const coupon = await Coupon.findOne({ code: code.toUpperCase().trim(), isActive: true });
+
+    if (!coupon) return error(res, 'Invalid coupon code', 400);
+
+    const now = new Date();
+    if (coupon.validUntil && coupon.validUntil < now) return error(res, 'Coupon has expired', 400);
+    if (coupon.validFrom > now) return error(res, 'Coupon is not yet active', 400);
+    if (coupon.usageLimit !== null && coupon.usageCount >= coupon.usageLimit) return error(res, 'Coupon usage limit reached', 400);
+
+    const cartTotal = Number(cartTotalCoins) || 0;
+    if (cartTotal < coupon.minCartCoins) {
+      return error(res, `Minimum cart value of ${coupon.minCartCoins} coins required for this coupon`, 400);
+    }
+
+    const userUseCount = coupon.usedBy.filter(id => id.toString() === req.user._id.toString()).length;
+    if (userUseCount >= coupon.perUserLimit) return error(res, 'You have already used this coupon', 400);
+
+    let discountCoins = 0;
+    if (coupon.discountType === 'percentage') {
+      discountCoins = Math.round(cartTotal * (coupon.discountValue / 100));
+      if (coupon.maxDiscountCoins !== null) discountCoins = Math.min(discountCoins, coupon.maxDiscountCoins);
+    } else {
+      discountCoins = Math.min(coupon.discountValue, cartTotal);
+    }
+
+    return success(res, `Coupon applied! You save ${discountCoins} coins.`, {
+      code: coupon.code,
+      description: coupon.description,
+      discountType: coupon.discountType,
+      discountValue: coupon.discountValue,
+      discountCoins,
+      finalTotal: Math.max(0, cartTotal - discountCoins),
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ─── GET /shop/coupons ────────────────────────────────────────────────────────
+// Returns all active coupons available to the current user.
+// Excludes coupons the user has already exhausted their per-user limit on.
+const getAvailableCoupons = async (req, res, next) => {
+  try {
+    const Coupon = require('../models/Coupon.model');
+    const now = new Date();
+
+    const coupons = await Coupon.find({
+      isActive: true,
+      $or: [{ validUntil: null }, { validUntil: { $gt: now } }],
+      validFrom: { $lte: now },
+      $or: [{ usageLimit: null }, { $expr: { $lt: ['$usageCount', '$usageLimit'] } }],
+    }).select('-usedBy').lean();
+
+    // Filter out coupons the user has already used up their per-user limit
+    const userId = req.user._id.toString();
+    const available = await Promise.all(
+      coupons.map(async c => {
+        const fullCoupon = await Coupon.findById(c._id).select('usedBy perUserLimit');
+        const userUseCount = fullCoupon.usedBy.filter(id => id.toString() === userId).length;
+        if (userUseCount >= fullCoupon.perUserLimit) return null;
+        return {
+          ...c,
+          alreadyUsed: false,
+        };
+      })
+    );
+
+    return success(res, 'Coupons fetched', available.filter(Boolean));
+  } catch (err) {
+    next(err);
+  }
+};
+
 module.exports = {
   getCategories,
   getProducts,
@@ -408,6 +530,8 @@ module.exports = {
   addReview,
   searchProducts,
   buyWithCoins,
+  validateCoupon,
+  getAvailableCoupons,
   getOrders,
   cancelOrder,
 };

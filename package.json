@@ -7,17 +7,6 @@
     "start": "node src/server.js",
     "dev": "nodemon src/server.js",
     "seed": "node src/seed.js",
-<<<<<<< HEAD
-    "seed:all": "node src/seedAll.js",
-    "seed:nutrition": "node src/seedNutrition.js",
-    "seed:challenges": "node src/seedChallenges.js",
-    "seed:shop": "node src/seedShop.js",
-    "seed:badges": "node src/seedBadges.js",
-    "seed:synonyms": "node src/seedSynonyms.js",
-    "seed:complete": "node src/seedComplete.js",
-    "seed:verify": "node src/verifySeedSetup.js",
-=======
->>>>>>> e02c9e2d962e5d748a3eaae3e93426247296ac5f
     "lint": "eslint src/**/*.js"
   },
   "dependencies": {

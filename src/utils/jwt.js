@@ -19,7 +19,13 @@ const generateRefreshTokenString = () => uuidv4();
 
 const saveRefreshToken = async (userId, ip, userAgent) => {
   const token = generateRefreshTokenString();
-  const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // 30 days
+
+  // 90 days — long enough that active users never see a forced re-login,
+  // short enough to limit the damage window of a compromised token.
+  // Refresh token rotation (each use issues a new token) provides the
+  // real security here, not expiry alone.
+  const REFRESH_TOKEN_TTL_MS = 90 * 24 * 60 * 60 * 1000; // 90 days
+  const expiresAt = new Date(Date.now() + REFRESH_TOKEN_TTL_MS);
 
   await RefreshToken.create({ token, user: userId, expiresAt, ip, userAgent });
 
