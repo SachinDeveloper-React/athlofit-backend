@@ -564,6 +564,233 @@ const getBmiHistory = async (req, res, next) => {
   }
 };
 
+// ─── GET /health/calendar?year=YYYY&month=MM ─────────────────────────────────
+// Returns per-day step data for a given month, plus completed-days count.
+// Used by the Calendar Indicator on the Analytics screen.
+const getCalendarActivity = async (req, res, next) => {
+  try {
+    const userId = req.user._id;
+    const dailyGoal = req.user.dailyStepGoal || 10000;
+
+    const now = new Date();
+    const year  = parseInt(req.query.year  || String(now.getFullYear()), 10);
+    const month = parseInt(req.query.month || String(now.getMonth() + 1), 10); // 1-based
+
+    if (month < 1 || month > 12) return error(res, 'month must be 1–12', 400);
+
+    // Build YYYY-MM-DD range for the requested month
+    const from = `${year}-${String(month).padStart(2, '0')}-01`;
+    const lastDay = new Date(year, month, 0).getDate(); // day 0 of next month = last day of this month
+    const to   = `${year}-${String(month).padStart(2, '0')}-${String(lastDay).padStart(2, '0')}`;
+
+    const records = await HealthActivity.find({
+      user: userId,
+      date: { $gte: from, $lte: to },
+    }).select('date steps goalMet').lean();
+
+    // Build a map for O(1) lookup
+    const recordMap = {};
+    records.forEach(r => { recordMap[r.date] = { steps: r.steps || 0, goalMet: r.goalMet || false }; });
+
+    // Build full month array (all days, even those with no data)
+    const days = [];
+    for (let d = 1; d <= lastDay; d++) {
+      const dateStr = `${year}-${String(month).padStart(2, '0')}-${String(d).padStart(2, '0')}`;
+      const rec = recordMap[dateStr];
+      const steps = rec?.steps ?? 0;
+      const goalMet = rec?.goalMet ?? false;
+      // Intensity: 0 = no data, 1 = low (<25%), 2 = medium (<50%), 3 = high (<100%), 4 = goal met
+      let intensity = 0;
+      if (steps > 0) {
+        const pct = steps / dailyGoal;
+        if (goalMet || pct >= 1)      intensity = 4;
+        else if (pct >= 0.75)         intensity = 3;
+        else if (pct >= 0.5)          intensity = 2;
+        else                          intensity = 1;
+      }
+      days.push({ date: dateStr, steps, goalMet, intensity });
+    }
+
+    // Count days where goal was met
+    const completedDays = days.filter(d => d.goalMet).length;
+    // Count days with any activity
+    const activeDays = days.filter(d => d.steps > 0).length;
+
+    // Build list of months from user's account creation to now
+    const user = await User.findById(userId).select('createdAt').lean();
+    const accountCreatedAt = user?.createdAt ? new Date(user.createdAt) : new Date();
+    const months = [];
+    const cursor = new Date(accountCreatedAt.getFullYear(), accountCreatedAt.getMonth(), 1);
+    const endMonth = new Date(now.getFullYear(), now.getMonth(), 1);
+    while (cursor <= endMonth) {
+      months.push({
+        year:  cursor.getFullYear(),
+        month: cursor.getMonth() + 1, // 1-based
+        label: cursor.toLocaleString('en-US', { month: 'long', year: 'numeric' }),
+      });
+      cursor.setMonth(cursor.getMonth() + 1);
+    }
+
+    return success(res, 'Calendar activity fetched', {
+      year,
+      month,
+      dailyGoal,
+      completedDays,
+      activeDays,
+      totalDays: lastDay,
+      days,
+      availableMonths: months,
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ─── GET /health/period-stats ─────────────────────────────────────────────────
+// Returns step totals + change vs prior equivalent period for 7 / 14 / 30 days.
+// Used by the Period Stats card on the Analytics screen.
+const getPeriodStats = async (req, res, next) => {
+  try {
+    const userId    = req.user._id;
+    const now       = new Date();
+    const toISO     = (d) => d.toISOString().slice(0, 10);
+    const todayStr  = toISO(now);
+
+    // Build date string N days ago
+    const daysAgo = (n) => {
+      const d = new Date(now);
+      d.setDate(now.getDate() - n);
+      return toISO(d);
+    };
+
+    // Fetch the last 60 days in one query — covers all three periods + their priors
+    const from60 = daysAgo(59); // 60 days inclusive
+    const records = await HealthActivity.find({
+      user: userId,
+      date: { $gte: from60, $lte: todayStr },
+    }).select('date steps').lean();
+
+    // Build O(1) lookup: date → steps
+    const stepMap = {};
+    records.forEach(r => { stepMap[r.date] = r.steps || 0; });
+
+    const sumRange = (startDaysAgo, endDaysAgo) => {
+      let total = 0;
+      for (let i = endDaysAgo; i >= startDaysAgo; i--) {
+        total += stepMap[daysAgo(i)] ?? 0;
+      }
+      return total;
+    };
+
+    // ── 7-day period ──────────────────────────────────────────────────────────
+    const steps7     = sumRange(0, 6);   // last 7 days  (today = daysAgo(0))
+    const steps7prev = sumRange(7, 13);  // prior 7 days
+    const change7    = steps7 - steps7prev;
+
+    // ── 14-day period ─────────────────────────────────────────────────────────
+    const steps14     = sumRange(0, 13);
+    const steps14prev = sumRange(14, 27);
+    const change14    = steps14 - steps14prev;
+
+    // ── 30-day period ─────────────────────────────────────────────────────────
+    const steps30     = sumRange(0, 29);
+    const steps30prev = sumRange(30, 59);
+    const change30    = steps30 - steps30prev;
+
+    return success(res, 'Period stats fetched', {
+      periods: [
+        {
+          label:      '7 Days',
+          days:       7,
+          totalSteps: steps7,
+          change:     change7,
+          prevTotal:  steps7prev,
+        },
+        {
+          label:      '14 Days',
+          days:       14,
+          totalSteps: steps14,
+          change:     change14,
+          prevTotal:  steps14prev,
+        },
+        {
+          label:      '30 Days',
+          days:       30,
+          totalSteps: steps30,
+          change:     change30,
+          prevTotal:  steps30prev,
+        },
+      ],
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ─── GET /health/day-detail?date=YYYY-MM-DD ──────────────────────────────────
+// Returns full health snapshot for a single day — used by StepDetailScreen.
+const getDayDetail = async (req, res, next) => {
+  try {
+    const userId    = req.user._id;
+    const dailyGoal = req.user.dailyStepGoal || 10000;
+    const date      = req.query.date || todayISO();
+
+    // Validate date format
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+      return error(res, 'date must be YYYY-MM-DD', 400);
+    }
+
+    const record = await HealthActivity.findOne({ user: userId, date }).lean();
+
+    const steps          = record?.steps          ?? 0;
+    const calories       = record?.calories       ?? 0;
+    const distance       = record?.distance       ?? 0;
+    const activeMinutes  = record?.activeMinutes  ?? 0;
+    const heartRate      = record?.heartRate      ?? 0;
+    const heartRateMin   = record?.heartRateMin   ?? 0;
+    const heartRateMax   = record?.heartRateMax   ?? 0;
+    const hydration      = record?.hydration      ?? 0;
+    const sleepHours     = record?.sleepHours     ?? 0;
+    const bloodGlucose   = record?.bloodGlucose   ?? 0;
+    const weight         = record?.weight         ?? 0;
+    const goalMet        = record?.goalMet        ?? false;
+
+    const progressPct = dailyGoal > 0 ? Math.min(100, Math.round((steps / dailyGoal) * 100)) : 0;
+
+    // Derive intensity level (same logic as calendar)
+    let intensity = 0;
+    if (steps > 0) {
+      const pct = steps / dailyGoal;
+      if (goalMet || pct >= 1)  intensity = 4;
+      else if (pct >= 0.75)     intensity = 3;
+      else if (pct >= 0.5)      intensity = 2;
+      else                      intensity = 1;
+    }
+
+    return success(res, 'Day detail fetched', {
+      date,
+      dailyGoal,
+      steps,
+      calories,
+      distance,
+      activeMinutes,
+      heartRate,
+      heartRateMin,
+      heartRateMax,
+      hydration,
+      sleepHours,
+      bloodGlucose,
+      weight,
+      goalMet,
+      progressPct,
+      intensity,
+      hasData: !!record,
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
 module.exports = {
   getWeeklySteps,
   syncHealthData,
@@ -571,6 +798,9 @@ module.exports = {
   getTodayHealth,
   getAnalyticsDashboard,
   syncAnalyticsDashboard,
+  getCalendarActivity,
+  getPeriodStats,
+  getDayDetail,
   saveBmi,
   getBmiHistory,
 };
