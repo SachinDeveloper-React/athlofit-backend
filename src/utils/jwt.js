@@ -1,16 +1,14 @@
 // src/utils/jwt.js
-const jwt = require('jsonwebtoken');
-const { v4: uuidv4 } = require('uuid');
-const RefreshToken = require('../models/RefreshToken.model');
+const jwt = require("jsonwebtoken");
+const { v4: uuidv4 } = require("uuid");
+const RefreshToken = require("../models/RefreshToken.model");
 
 // ─── Generate tokens ──────────────────────────────────────────────────────────
 
 const generateAccessToken = (userId) => {
-  return jwt.sign(
-    { sub: userId, type: 'access' },
-    process.env.JWT_SECRET,
-    { expiresIn: process.env.JWT_EXPIRES_IN || '15m' }
-  );
+  return jwt.sign({ sub: userId, type: "access" }, process.env.JWT_SECRET, {
+    expiresIn: process.env.JWT_EXPIRES_IN || "15m",
+  });
 };
 
 const generateRefreshTokenString = () => uuidv4();
@@ -19,7 +17,8 @@ const generateRefreshTokenString = () => uuidv4();
 
 const saveRefreshToken = async (userId, ip, userAgent) => {
   const token = generateRefreshTokenString();
-  const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000); // 30 days
+  const REFRESH_TOKEN_TTL_MS = 90 * 24 * 60 * 60 * 1000; // 90 days
+  const expiresAt = new Date(Date.now() + REFRESH_TOKEN_TTL_MS);
 
   await RefreshToken.create({ token, user: userId, expiresAt, ip, userAgent });
 
@@ -35,7 +34,10 @@ const verifyAccessToken = (token) => {
 // ─── Rotate refresh token ─────────────────────────────────────────────────────
 
 const rotateRefreshToken = async (oldToken, ip, userAgent) => {
-  const stored = await RefreshToken.findOne({ token: oldToken, revoked: false });
+  const stored = await RefreshToken.findOne({
+    token: oldToken,
+    revoked: false,
+  });
 
   if (!stored || stored.expiresAt < new Date()) {
     if (stored) {
