@@ -10,6 +10,9 @@ const refreshTokenSchema = new mongoose.Schema(
       required: true,
     },
     expiresAt: { type: Date, required: true },
+    // Absolute expiry — carried forward during rotation so the session
+    // has a hard deadline regardless of how many times the token is rotated.
+    absoluteExpiresAt: { type: Date, required: true },
     revoked: { type: Boolean, default: false },
     ip: { type: String },
     userAgent: { type: String },

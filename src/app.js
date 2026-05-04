@@ -27,21 +27,21 @@ app.use(cors({
 }));
 
 // ─── Rate limiting ────────────────────────────────────────────────────────────
-const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 min
-  max: 100,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { success: false, message: 'Too many requests, please try again later.' },
-});
+// const limiter = rateLimit({
+//   windowMs: 15 * 60 * 1000, // 15 min
+//   max: 100,
+//   standardHeaders: true,
+//   legacyHeaders: false,
+//   message: { success: false, message: 'Too many requests, please try again later.' },
+// });
 // app.use(limiter);
 
 // Auth endpoints get tighter limiting
-const authLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  max: 20,
-  message: { success: false, message: 'Too many auth requests, please try again later.' },
-});
+// const authLimiter = rateLimit({
+//   windowMs: 15 * 60 * 1000,
+//   max: 20,
+//   message: { success: false, message: 'Too many auth requests, please try again later.' },
+// });
 
 // ─── Body parsing ─────────────────────────────────────────────────────────────
 app.use(express.json({ limit: '10kb' }));
@@ -76,7 +76,8 @@ app.use((req, res, next) => {
 });
 
 // ─── Routes ───────────────────────────────────────────────────────────────────
-app.use('/auth',          authLimiter, authRoutes);
+// app.use('/auth',          authLimiter, authRoutes);
+app.use('/auth',          authRoutes);
 app.use('/user',          userRoutes);
 app.use('/health',        healthRoutes);
 app.use('/gamification',  gamificationRoutes);
