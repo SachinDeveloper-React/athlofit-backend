@@ -27,6 +27,7 @@ const healthActivitySchema = new mongoose.Schema(
     bloodGlucose: { type: Number, default: 0 }, // mmol/L
     weight: { type: Number, default: 0 },        // kg
     goalMet: { type: Boolean, default: false },
+    goalSnapshot: { type: Number, default: 0 }, // goal that was active on this day
   },
   {
     timestamps: true,

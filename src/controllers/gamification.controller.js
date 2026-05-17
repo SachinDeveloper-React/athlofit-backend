@@ -98,7 +98,13 @@ const syncGamification = async (req, res, next) => {
 
     gam.migrateOldBadges();
 
-    if (streakDays !== undefined) gam.streakDays = streakDays;
+    // streakDays: only accept the client value if it's strictly higher than
+    // what the server already recorded. _updateStreak (called during health/sync)
+    // is the authoritative writer; we must not let a stale client value
+    // overwrite a server-incremented streak.
+    if (streakDays !== undefined && streakDays > gam.streakDays) {
+      gam.streakDays = streakDays;
+    }
     if (bestStreakDays !== undefined && bestStreakDays > gam.bestStreakDays) {
       gam.bestStreakDays = bestStreakDays;
     }

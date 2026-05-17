@@ -6,14 +6,19 @@
 const todayISO = () => new Date().toISOString().slice(0, 10);
 
 /**
- * Returns whether two ISO date strings are consecutive days
+ * Returns whether two ISO date strings are consecutive days.
+ * Uses date-part arithmetic only (no time/timezone math) to avoid
+ * DST-related float precision issues with diffMs / 86400000.
  */
 const isConsecutiveDay = (prevDate, currDate) => {
   if (!prevDate) return false;
-  const prev = new Date(prevDate);
-  const curr = new Date(currDate);
-  const diffMs = curr.getTime() - prev.getTime();
-  const diffDays = diffMs / (1000 * 60 * 60 * 24);
+  // Parse as local-midnight by splitting the string — avoids UTC-offset shifts
+  const [py, pm, pd] = prevDate.split('-').map(Number);
+  const [cy, cm, cd] = currDate.split('-').map(Number);
+  const prev = new Date(py, pm - 1, pd);
+  const curr = new Date(cy, cm - 1, cd);
+  const diffMs   = curr.getTime() - prev.getTime();
+  const diffDays = Math.round(diffMs / (1000 * 60 * 60 * 24));
   return diffDays === 1;
 };
 
