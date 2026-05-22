@@ -17,6 +17,11 @@ const getWeeklySteps = async (req, res, next) => {
       return error(res, 'from and to query params are required', 400);
     }
 
+    const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+    if (!ISO_DATE_RE.test(from) || !ISO_DATE_RE.test(to)) {
+      return error(res, 'from and to must be valid ISO date strings (YYYY-MM-DD)', 400);
+    }
+
     // Build expected date range (fills gaps with 0)
     const dates = buildDateRange(from, to);
 
@@ -134,12 +139,12 @@ const syncHealthData = async (req, res, next) => {
 
     let goalCoinsAwarded = false;
 
-    if (isGoalMet && gam.lastCoinDate !== today) {
+    if (isGoalMet && gam.stepGoalCoinDate !== today) {
       // Award step goal coins automatically
       const stepGoalCoins = cfg.rewards.stepGoalCoins ?? 50;
       gam.coinsBalance = Math.round(gam.coinsBalance + stepGoalCoins);
       gam.coinsEarnedToday = Math.round((gam.coinsEarnedToday || 0) + stepGoalCoins);
-      gam.lastCoinDate = today;
+      gam.stepGoalCoinDate = today;
 
       if (!gam.claimHistory) gam.claimHistory = [];
       gam.claimHistory.push({
@@ -160,8 +165,10 @@ const syncHealthData = async (req, res, next) => {
         message: `You hit your ${dailyGoal.toLocaleString()} step goal and earned ${cfg.rewards.stepGoalCoins ?? 50} coins!`,
         data:    { screen: 'Steps' },
       });
-    } else {
-      // Passive sweatcoin-style coins from distance walked
+    } else if (!isGoalMet) {
+      // Passive sweatcoin-style coins from distance walked.
+      // Only award when the goal has NOT been met — once the goal is met
+      // (and coins claimed), we stop adding passive coins to avoid double-counting.
       const dailyEarnLimit = cfg.coin.dailyEarnLimit;
       const coinsPerStepKm = cfg.coin.coinsPerStepKm;
       const stepsPerKm = 1300;
@@ -230,33 +237,54 @@ async function _updateStreak(userId, date) {
   const wasConsecutive = isConsecutiveDay(gam.lastActiveDate, date);
   const isSameDay = gam.lastActiveDate === date;
 
+  let dirty = false;
+
   if (!isSameDay) {
-    if (wasConsecutive) {
+    if (!gam.lastActiveDate) {
+      // First-ever sync or lastActiveDate was cleared — preserve existing streak
+      // rather than resetting it. Only set lastActiveDate going forward.
+      gam.lastActiveDate = date;
+      dirty = true;
+      if (gam.streakDays === 0) {
+        gam.streakDays = 1;
+        dirty = true;
+      }
+    } else if (wasConsecutive) {
       gam.streakDays += 1;
+      gam.lastActiveDate = date;
+      dirty = true;
     } else {
-      gam.streakDays = 1; // reset
+      // Known gap — genuine streak break
+      gam.streakDays = 1;
+      gam.lastActiveDate = date;
+      dirty = true;
     }
-    gam.lastActiveDate = date;
+
     if (gam.streakDays > gam.bestStreakDays) {
       gam.bestStreakDays = gam.streakDays;
+      dirty = true;
     }
     // Load active badge definitions and award any newly unlocked badges
     const badgeDefs = await BadgeDefinition.find({ isActive: true }).sort({ order: 1 });
     const prevUnlocked = new Set((gam.badgeList || []).filter(b => b.unlockedAt).map(b => b.key));
     gam.awardBadges(badgeDefs);
-    await gam.save();
+    // Check if awardBadges changed anything
+    const newlyUnlocked = badgeDefs.filter(def => {
+      const badge = (gam.badgeList || []).find(b => b.key === def.key);
+      return badge?.unlockedAt && !prevUnlocked.has(def.key);
+    });
+    if (newlyUnlocked.length > 0) dirty = true;
+
+    if (dirty) await gam.save();
 
     // Push for any badge newly unlocked this sync
-    for (const def of badgeDefs) {
-      const badge = (gam.badgeList || []).find(b => b.key === def.key);
-      if (badge?.unlockedAt && !prevUnlocked.has(def.key)) {
-        createNotification(userId, {
-          type:    'GOAL',
-          title:   `${def.emoji} Badge Unlocked: ${def.title}!`,
-          message: `You hit a ${def.threshold}-day streak and earned ${def.coinReward} coins!`,
-          data:    { screen: 'Achievements' },
-        });
-      }
+    for (const def of newlyUnlocked) {
+      createNotification(userId, {
+        type:    'GOAL',
+        title:   `${def.emoji} Badge Unlocked: ${def.title}!`,
+        message: `You hit a ${def.threshold}-day streak and earned ${def.coinReward} coins!`,
+        data:    { screen: 'Achievements' },
+      });
     }
   }
 }
@@ -447,12 +475,14 @@ const getAnalyticsDashboard = async (req, res, next) => {
         time:     weeks.map(w => sum(w.map(d => pick(d, 'activeMinutes')))),
       };
     } else {
-      // Year: group by quarter (3 months each)
+      // Year: group by quarter using RELATIVE index within the 12-month window.
+      // BUG-019: Using absolute getMonth() breaks for windows spanning two calendar
+      // years (e.g. May 2024–Apr 2025). Use position in currentDates array instead.
       const monthGroups = [[], [], [], []]; // Q1, Q2, Q3, Q4
-      currentDates.forEach(d => {
-        const month = new Date(d).getMonth(); // 0-11
-        const q = Math.floor(month / 3);     // 0-3
-        monthGroups[q].push(d);
+      currentDates.forEach((d, relativeIndex) => {
+        const q = Math.floor(relativeIndex / Math.ceil(currentDates.length / 4));
+        const safeQ = Math.min(q, 3); // clamp to 0-3
+        monthGroups[safeQ].push(d);
       });
       chartDataSets = {
         steps:    monthGroups.map(g => sum(g.map(d => pick(d, 'steps')))),
@@ -544,7 +574,7 @@ const saveBmi = async (req, res, next) => {
       user:     userId,
       date:     todayISO(),
       weight:   parseFloat(weight.toFixed(1)),
-      height:   parseFloat(height.toFixed(2)),
+      height:   parseFloat((height * 100).toFixed(1)), // BUG-020: store in cm (same unit as User.height)
       bmi,
       category,
     });

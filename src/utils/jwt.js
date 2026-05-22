@@ -7,7 +7,7 @@ const RefreshToken = require("../models/RefreshToken.model");
 
 const generateAccessToken = (userId) => {
   return jwt.sign({ sub: userId, type: "access" }, process.env.JWT_SECRET, {
-    expiresIn: process.env.JWT_EXPIRES_IN || "30d",
+    expiresIn: process.env.JWT_EXPIRES_IN || "15m",
   });
 };
 
@@ -59,18 +59,26 @@ const verifyAccessToken = (token) => {
 // ─── Rotate refresh token ─────────────────────────────────────────────────────
 
 const rotateRefreshToken = async (oldToken, ip, userAgent) => {
-  const stored = await RefreshToken.findOne({
-    token: oldToken,
-    revoked: false,
-  });
+  // Query without revoked filter so we can distinguish reuse attacks from
+  // simply-expired tokens (BUG-008).
+  const stored = await RefreshToken.findOne({ token: oldToken });
 
   const now = new Date();
 
-  if (!stored || stored.expiresAt < now) {
-    if (stored) {
-      // Revoke all tokens for this user (token reuse detected or expired)
-      await RefreshToken.updateMany({ user: stored.user }, { revoked: true });
-    }
+  // Case 1: Token not found at all — already rotated/deleted, cannot identify user
+  if (!stored) {
+    return null;
+  }
+
+  // Case 2: Token found but already revoked — reuse attack detected, revoke all sessions
+  if (stored.revoked) {
+    await RefreshToken.updateMany({ user: stored.user }, { revoked: true });
+    return null;
+  }
+
+  // Case 3: Token found, not revoked, but rolling window has expired — just return null,
+  // do NOT revoke all sessions (this is normal expiry, not an attack)
+  if (stored.expiresAt < now) {
     return null;
   }
 
@@ -81,7 +89,7 @@ const rotateRefreshToken = async (oldToken, ip, userAgent) => {
     return null;
   }
 
-  // Revoke old token
+  // Valid token — revoke old token and issue new one
   stored.revoked = true;
   await stored.save();
 

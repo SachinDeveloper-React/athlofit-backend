@@ -17,7 +17,7 @@ const {
   adminUpdateBadge,
   adminDeleteBadge,
 } = require('../controllers/gamification.controller');
-const { protect } = require('../middleware/auth.middleware');
+const { protect, adminOnly } = require('../middleware/auth.middleware');
 
 // All routes require auth
 router.use(protect);
@@ -46,7 +46,7 @@ router.get('/leaderboard', getLeaderboard);
 // ─── Advanced Achievements ────────────────────────────────────────────────────
 
 // POST /gamification/admin/achievements  — Admin: create/update achievement
-router.post('/admin/achievements', createAchievement);
+router.post('/admin/achievements', adminOnly, createAchievement);
 
 // GET /gamification/achievements  — Get all achievements and user progress
 router.get('/achievements', getAdvancedAchievements);
@@ -57,15 +57,15 @@ router.post('/achievements/claim', claimAdvancedAchievement);
 // ─── Admin: Badge Definitions CRUD ───────────────────────────────────────────
 
 // GET  /gamification/admin/badges        — list all badge definitions
-router.get('/admin/badges', adminGetBadges);
+router.get('/admin/badges', adminOnly, adminGetBadges);
 
 // POST /gamification/admin/badges        — create a badge definition
-router.post('/admin/badges', adminCreateBadge);
+router.post('/admin/badges', adminOnly, adminCreateBadge);
 
 // PUT  /gamification/admin/badges/:id    — update a badge definition
-router.put('/admin/badges/:id', adminUpdateBadge);
+router.put('/admin/badges/:id', adminOnly, adminUpdateBadge);
 
 // DELETE /gamification/admin/badges/:id  — soft-delete (deactivate) a badge
-router.delete('/admin/badges/:id', adminDeleteBadge);
+router.delete('/admin/badges/:id', adminOnly, adminDeleteBadge);
 
 module.exports = router;

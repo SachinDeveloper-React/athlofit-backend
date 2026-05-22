@@ -45,7 +45,7 @@ const userSchema = new mongoose.Schema(
     // Profile fields
     phone: { type: String, default: null },
     dob: { type: String, default: null }, // ISO date "YYYY-MM-DD"
-    gender: { type: String, enum: ["M", "F", "O", null], default: null },
+    gender: { type: String, enum: ["M", "F", "O"], default: null }, // BUG-037: null removed from enum
     height: { type: Number, default: null }, // cm
     weight: { type: Number, default: null }, // kg
     bloodType: { type: String, default: null },
@@ -165,6 +165,8 @@ userSchema.pre("save", async function (next) {
 
 // ─── Method: compare password ─────────────────────────────────────────────────
 userSchema.methods.comparePassword = async function (candidate) {
+  // BUG-038: OAuth users have no password — guard against bcrypt TypeError
+  if (!this.password) return false;
   return bcrypt.compare(candidate, this.password);
 };
 

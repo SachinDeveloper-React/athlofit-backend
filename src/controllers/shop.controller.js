@@ -1,4 +1,5 @@
 // src/controllers/shop.controller.js
+const mongoose = require('mongoose');
 const Product = require('../models/Product.model');
 const Category = require('../models/Category.model');
 const Order = require('../models/Order.model');
@@ -7,6 +8,9 @@ const { success, error } = require('../utils/response');
 const User = require('../models/User.model');
 const { sendPushToUser } = require('../utils/pushNotification');
 const { createNotification } = require('../utils/createNotification');
+
+// BUG-032: Escape regex special characters to prevent ReDoS
+const escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
 // Conversion Rate: 10 Coins = 1 INR
 const COIN_CONVERSION_RATE = 10;
@@ -38,12 +42,13 @@ const getProducts = async (req, res, next) => {
       if (cat) filter.category = cat._id;
     }
 
-    // Search filter
+    // Search filter — BUG-032: escape user input before using in $regex
     if (search) {
+      const safeSearch = escapeRegex(search);
       filter.$or = [
-        { name: { $regex: search, $options: 'i' } },
-        { description: { $regex: search, $options: 'i' } },
-        { tags: { $in: [new RegExp(search, 'i')] } },
+        { name: { $regex: safeSearch, $options: 'i' } },
+        { description: { $regex: safeSearch, $options: 'i' } },
+        { tags: { $in: [new RegExp(safeSearch, 'i')] } },
       ];
     }
 
@@ -202,8 +207,8 @@ const searchProducts = async (req, res, next) => {
     const products = await Product.find({
       isActive: true,
       $or: [
-        { name: { $regex: q, $options: 'i' } },
-        { tags: { $in: [new RegExp(q, 'i')] } },
+        { name: { $regex: escapeRegex(q), $options: 'i' } },  // BUG-032
+        { tags: { $in: [new RegExp(escapeRegex(q), 'i')] } },
       ],
     })
       .populate('category', 'name slug color icon')
@@ -293,34 +298,48 @@ const buyWithCoins = async (req, res, next) => {
       return error(res, `Insufficient coins. Need ${finalCoinCost} but you have ${gamification.coinsBalance}.`, 400);
     }
 
-    // Deduct stock
-    for (const item of items) {
-      await Product.findByIdAndUpdate(item.productId, { $inc: { stock: -item.quantity } });
+    // BUG-029: Wrap stock decrement, coin deduction, and order creation in a
+    // MongoDB transaction so any failure rolls back all changes atomically.
+    const session = await mongoose.startSession();
+    session.startTransaction();
+    let order;
+    try {
+      // Deduct stock
+      for (const item of items) {
+        await Product.findByIdAndUpdate(item.productId, { $inc: { stock: -item.quantity } }, { session });
+      }
+
+      // BUG-030: Use Math.round to prevent floating-point drift in coin balance
+      gamification.coinsBalance = Math.round(gamification.coinsBalance - finalCoinCost);
+      await gamification.save({ session });
+
+      // Mark coupon as used
+      if (appliedCoupon) {
+        appliedCoupon.usageCount += 1;
+        appliedCoupon.usedBy.push(req.user._id);
+        await appliedCoupon.save({ session });
+      }
+
+      // Create Order
+      [order] = await Order.create([{
+        user: req.user._id,
+        items: orderItems,
+        totalPrice: totalStandardPrice,
+        totalCoins: finalCoinCost,
+        couponCode: appliedCoupon?.code || null,
+        couponDiscount,
+        paymentMethod: 'COIN_PURCHASE',
+        status: 'PAID',
+        shippingAddress: shippingAddress || {},
+      }], { session });
+
+      await session.commitTransaction();
+    } catch (txErr) {
+      await session.abortTransaction();
+      throw txErr;
+    } finally {
+      session.endSession();
     }
-
-    // Deduct coins
-    gamification.coinsBalance -= finalCoinCost;
-    await gamification.save();
-
-    // Mark coupon as used
-    if (appliedCoupon) {
-      appliedCoupon.usageCount += 1;
-      appliedCoupon.usedBy.push(req.user._id);
-      await appliedCoupon.save();
-    }
-
-    // Create Order
-    const order = await Order.create({
-      user: req.user._id,
-      items: orderItems,
-      totalPrice: totalStandardPrice,
-      totalCoins: finalCoinCost,
-      couponCode: appliedCoupon?.code || null,
-      couponDiscount,
-      paymentMethod: 'COIN_PURCHASE',
-      status: 'PAID',
-      shippingAddress: shippingAddress || {},
-    });
 
     // ── Persist + push: order confirmed ──────────────────────────────────
     createNotification(req.user._id, {
@@ -402,7 +421,8 @@ const cancelOrder = async (req, res, next) => {
     if (order.paymentMethod === 'COIN_PURCHASE' && order.totalCoins > 0) {
       const gam = await Gamification.findOne({ user: req.user._id });
       if (gam) {
-        gam.coinsBalance += order.totalCoins;
+        // BUG-031: Use Math.round to prevent floating-point drift in coin balance
+        gam.coinsBalance = Math.round(gam.coinsBalance + order.totalCoins);
         await gam.save();
         refundedCoins = order.totalCoins;
       }
@@ -496,26 +516,27 @@ const getAvailableCoupons = async (req, res, next) => {
 
     const coupons = await Coupon.find({
       isActive: true,
-      $or: [{ validUntil: null }, { validUntil: { $gt: now } }],
       validFrom: { $lte: now },
-      $or: [{ usageLimit: null }, { $expr: { $lt: ['$usageCount', '$usageLimit'] } }],
-    }).select('-usedBy').lean();
+      $and: [
+        { $or: [{ validUntil: null }, { validUntil: { $gt: now } }] },
+        { $or: [{ usageLimit: null }, { $expr: { $lt: ['$usageCount', '$usageLimit'] } }] },
+      ],
+    }).lean(); // BUG-033: single query including usedBy and perUserLimit — no second round-trip
 
-    // Filter out coupons the user has already used up their per-user limit
+    // Filter out coupons the user has already used up their per-user limit.
     const userId = req.user._id.toString();
-    const available = await Promise.all(
-      coupons.map(async c => {
-        const fullCoupon = await Coupon.findById(c._id).select('usedBy perUserLimit');
-        const userUseCount = fullCoupon.usedBy.filter(id => id.toString() === userId).length;
-        if (userUseCount >= fullCoupon.perUserLimit) return null;
-        return {
-          ...c,
-          alreadyUsed: false,
-        };
-      })
-    );
 
-    return success(res, 'Coupons fetched', available.filter(Boolean));
+    const available = coupons
+      .map(c => {
+        const userUseCount = (c.usedBy || []).filter(id => id.toString() === userId).length;
+        if (userUseCount >= c.perUserLimit) return null;
+        // Strip usedBy from the response to avoid leaking other user IDs
+        const { usedBy, ...rest } = c;
+        return { ...rest, alreadyUsed: false };
+      })
+      .filter(Boolean);
+
+    return success(res, 'Coupons fetched', available);
   } catch (err) {
     next(err);
   }

@@ -108,7 +108,14 @@ const syncGamification = async (req, res, next) => {
     if (bestStreakDays !== undefined && bestStreakDays > gam.bestStreakDays) {
       gam.bestStreakDays = bestStreakDays;
     }
-    if (lastActiveDate !== undefined) gam.lastActiveDate = lastActiveDate;
+    if (lastActiveDate !== undefined) {
+      // BUG-028: Validate lastActiveDate — must be a valid ISO date and not in the future
+      const d = new Date(lastActiveDate);
+      if (isNaN(d.getTime()) || lastActiveDate > today) {
+        return error(res, 'lastActiveDate must be a valid ISO date not in the future', 400);
+      }
+      gam.lastActiveDate = lastActiveDate;
+    }
     if (lastCoinDate !== undefined) gam.lastCoinDate = lastCoinDate;
     if (coinsEarnedToday !== undefined && lastCoinDate === today) {
       gam.coinsEarnedToday = coinsEarnedToday;
@@ -186,7 +193,9 @@ const getLeaderboard = async (req, res, next) => {
       loadBadgeDefs(),
     ]);
 
-    const data = top.map((g, i) => ({
+    const data = top
+      .filter(g => g.user != null)
+      .map((g, i) => ({
       rank: i + 1,
       userId: g.user._id,
       name: g.user.name,
@@ -371,8 +380,12 @@ const claimReward = async (req, res, next) => {
     if (!rewardDef.isMet()) return error(res, 'Reward threshold not yet reached', 400);
     if (rewardDef.isAlreadyClaimed()) return error(res, 'Reward already claimed', 400);
 
-    gam.coinsBalance = Math.round(gam.coinsBalance + rewardDef.reward);
-    gam.coinsEarnedToday = Math.round((gam.coinsEarnedToday || 0) + rewardDef.reward);
+    // BUG-025: apply daily coin cap before awarding streak badge coins
+    const MAX_DAILY_COINS = cfg.coin.maxDailyRewards;
+    const remainingAllowance = MAX_DAILY_COINS - (gam.coinsEarnedToday || 0);
+    const actualCoins = Math.round(Math.min(rewardDef.reward, remainingAllowance));
+    gam.coinsBalance = Math.round(gam.coinsBalance + actualCoins);
+    gam.coinsEarnedToday = Math.round((gam.coinsEarnedToday || 0) + actualCoins);
 
     // Run badge-specific side effects
     rewardDef.onClaim();
@@ -380,7 +393,7 @@ const claimReward = async (req, res, next) => {
     if (!gam.claimHistory) gam.claimHistory = [];
     gam.claimHistory.push({
       rewardId,
-      amount: rewardDef.reward,
+      amount: actualCoins,
       source: rewardDef.title || `Claimed ${rewardId}`,
       createdAt: new Date(),
     });
@@ -395,11 +408,11 @@ const claimReward = async (req, res, next) => {
     createNotification(userId, {
       type:    'COIN',
       title:   '🪙 Reward Claimed!',
-      message: `You claimed ${rewardDef.reward} coins for "${rewardDef.title}"!`,
+      message: `You claimed ${actualCoins} coins for "${rewardDef.title}"!`,
       data:    { screen: 'Tracker' },
     });
 
-    return success(res, `Claimed ${rewardDef.reward} coins!`, {
+    return success(res, `Claimed ${actualCoins} coins!`, {
       newBalance: gam.coinsBalance,
       rewardId,
     });

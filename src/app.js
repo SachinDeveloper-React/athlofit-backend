@@ -5,6 +5,11 @@ const helmet = require('helmet');
 const morgan = require('morgan');
 const rateLimit = require('express-rate-limit');
 
+// BUG-003: Fail fast in production if CLIENT_URL is not configured
+if (process.env.NODE_ENV === 'production' && !process.env.CLIENT_URL) {
+  throw new Error('CLIENT_URL environment variable is required in production');
+}
+
 const authRoutes        = require('./routes/auth.routes');
 const userRoutes        = require('./routes/user.routes');
 const healthRoutes      = require('./routes/health.routes');
@@ -27,21 +32,25 @@ app.use(cors({
 }));
 
 // ─── Rate limiting ────────────────────────────────────────────────────────────
-// const limiter = rateLimit({
-//   windowMs: 15 * 60 * 1000, // 15 min
-//   max: 100,
-//   standardHeaders: true,
-//   legacyHeaders: false,
-//   message: { success: false, message: 'Too many requests, please try again later.' },
-// });
-// app.use(limiter);
+const limiter = rateLimit({
+  windowMs: 15 * 60 * 1000, // 15 min
+  max: 100,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, message: 'Too many requests, please try again later.' },
+});
+// BUG-002: Exclude /auth from global limiter — auth routes have their own tighter limiter
+app.use((req, res, next) => {
+  if (req.path.startsWith('/auth')) return next();
+  return limiter(req, res, next);
+});
 
 // Auth endpoints get tighter limiting
-// const authLimiter = rateLimit({
-//   windowMs: 15 * 60 * 1000,
-//   max: 20,
-//   message: { success: false, message: 'Too many auth requests, please try again later.' },
-// });
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 20,
+  message: { success: false, message: 'Too many auth requests, please try again later.' },
+});
 
 // ─── Body parsing ─────────────────────────────────────────────────────────────
 app.use(express.json({ limit: '10kb' }));
@@ -76,8 +85,7 @@ app.use((req, res, next) => {
 });
 
 // ─── Routes ───────────────────────────────────────────────────────────────────
-// app.use('/auth',          authLimiter, authRoutes);
-app.use('/auth',          authRoutes);
+app.use('/auth',          authLimiter, authRoutes);
 app.use('/user',          userRoutes);
 app.use('/health',        healthRoutes);
 app.use('/gamification',  gamificationRoutes);

@@ -26,11 +26,11 @@ const orderSchema = new mongoose.Schema(
       default: 'PAID', // Default PAID since coins are deducted instantly
     },
     shippingAddress: {
-      street: String,
-      city: String,
-      state: String,
-      zipCode: String,
-      country: String,
+      street:  { type: String, required: true },  // BUG-039
+      city:    { type: String, required: true },
+      state:   { type: String, required: true },
+      zipCode: { type: String, required: true },
+      country: { type: String, default: 'India' },
     },
   },
   {

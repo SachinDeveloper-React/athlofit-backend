@@ -303,7 +303,7 @@ const sendNotification = async (req, res, next) => {
       message: body,
       data:    { ...fcmData, ...(imageUrl && { imageUrl }) },
     }));
-    Notification.insertMany(notifDocs).catch(() => {});
+    Notification.insertMany(notifDocs).catch((err) => console.error('[Notification] insertMany failed:', err));
 
     return success(res, 'Notification sent', {
       successCount: results.successCount,

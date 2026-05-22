@@ -258,7 +258,7 @@ const getFaqs = async (req, res, next) => {
         { category: 'Account & Privacy', order: 2, question: 'How do I delete my account?', answer: 'To request account deletion, contact us at support@athlofit.com with the subject "Account Deletion Request". We will process your request within 7 business days.' },
       ];
 
-      const inserted = await Faq.insertMany(defaults.map((f, i) => ({ ...f, isActive: true })));
+      const inserted = await Faq.insertMany(defaults.map((f, i) => ({ ...f, isActive: true })), { ordered: false });
       return success(res, 'FAQs fetched', inserted.map(f => f.toJSON()));
     }
 

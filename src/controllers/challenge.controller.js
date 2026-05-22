@@ -15,12 +15,24 @@ function getDailyPeriodKey() {
   return todayISO(); // "YYYY-MM-DD"
 }
 
+// BUG-024: ISO 8601 week calculation — weeks start on Monday, range 1–53
+function getISOWeek(date) {
+  const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
+  const dayNum = d.getUTCDay() || 7; // Mon=1 … Sun=7
+  d.setUTCDate(d.getUTCDate() + 4 - dayNum); // nearest Thursday
+  const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
+  return Math.ceil((((d - yearStart) / 86400000) + 1) / 7);
+}
+
 function getWeeklyPeriodKey() {
   const now = new Date();
-  const year = now.getFullYear();
-  const startOfYear = new Date(year, 0, 1);
-  const week = Math.ceil(((now - startOfYear) / 86400000 + startOfYear.getDay() + 1) / 7);
-  return `${year}-W${String(week).padStart(2, '0')}`;
+  const week = getISOWeek(now);
+  // Use the ISO week-year (may differ from calendar year in week 1/53 edge cases)
+  const d = new Date(Date.UTC(now.getFullYear(), now.getMonth(), now.getDate()));
+  const dayNum = d.getUTCDay() || 7;
+  d.setUTCDate(d.getUTCDate() + 4 - dayNum);
+  const isoYear = d.getUTCFullYear();
+  return `${isoYear}-W${String(week).padStart(2, '0')}`;
 }
 
 function getPeriodKey(type) {
@@ -181,7 +193,7 @@ const syncChallengeProgress = async (userId) => {
           case 'HYDRATION':           currentValue = weeklyHydration;       break;
           case 'ACTIVE_MINUTES':      currentValue = weeklyMinutes;         break;
           case 'DISTANCE':            currentValue = weeklyDistance;        break;
-          case 'MEALS_LOGGED':        currentValue = mealsLoggedCount;      break;
+          case 'MEALS_LOGGED':        currentValue = weeklyMealLogs.length; break;
           case 'NUTRITION_CALORIES':  currentValue = weeklyCaloriesLogged;  break;
           case 'NUTRITION_PROTEIN':   currentValue = weeklyProteinLogged;   break;
           case 'NUTRITION_DAYS':      currentValue = weeklyNutritionDays;   break;
@@ -226,6 +238,20 @@ const syncChallengeProgress = async (userId) => {
 
       // Auto-award coins if just completed and not yet rewarded
       if (isCompleted && !existing?.isRewarded) {
+        // BUG-023 fix: save gam (coins) BEFORE marking isRewarded on UserChallenge.
+        // If gam.save() fails, isRewarded stays false so the user can retry.
+        // If we marked isRewarded first and gam.save() failed, coins would never be credited.
+        gam.coinsBalance = Math.round(gam.coinsBalance + challenge.coinReward);
+        gam.claimHistory.push({
+          rewardId: `challenge_${challenge._id}_${periodKey}`,
+          amount: challenge.coinReward,
+          source: `Challenge: ${challenge.title}`,
+          createdAt: new Date(),
+        });
+        if (gam.claimHistory.length > 50) gam.claimHistory.shift();
+
+        await gam.save(); // save coins first — if this throws, isRewarded is NOT set
+
         const doc = await UserChallenge.findOneAndUpdate(
           { user: userId, challenge: challenge._id, periodKey },
           { $set: { isRewarded: true, rewardedAt: new Date() } },
@@ -240,27 +266,14 @@ const syncChallengeProgress = async (userId) => {
           coinReward: challenge.coinReward,
         });
 
-        // ── Persist + push notification ───────────────────────────────────
+        // ── Push notification ─────────────────────────────────────────────
         createNotification(userId, {
           type:    'CHALLENGE',
           title:   `${challenge.emoji} Challenge Complete!`,
           message: `You finished "${challenge.title}" and earned ${challenge.coinReward} coins!`,
           data:    { screen: 'ChallengeDetail', params: JSON.stringify({ challengeId: challenge._id.toString() }) },
         });
-
-        gam.claimHistory.push({
-          rewardId: `challenge_${challenge._id}_${periodKey}`,
-          amount: challenge.coinReward,
-          source: `Challenge: ${challenge.title}`,
-          createdAt: new Date(),
-        });
-        if (gam.claimHistory.length > 50) gam.claimHistory.shift();
       }
-    }
-
-    if (coinsToAdd > 0) {
-      gam.coinsBalance = Math.round(gam.coinsBalance + coinsToAdd);
-      await gam.save();
     }
 
     return { coinsAdded: coinsToAdd, newlyCompleted };

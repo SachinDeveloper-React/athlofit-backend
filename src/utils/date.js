@@ -1,9 +1,17 @@
 // src/utils/date.js
 
 /**
- * Returns today's date as "YYYY-MM-DD" in UTC
+ * Returns today's date as "YYYY-MM-DD" in the server's local time.
+ * Using local time (not UTC) avoids off-by-one date issues for users
+ * in timezones ahead of UTC (e.g. UTC+5:30 after midnight UTC).
  */
-const todayISO = () => new Date().toISOString().slice(0, 10);
+const todayISO = () => {
+  const now = new Date();
+  const y = now.getFullYear();
+  const m = String(now.getMonth() + 1).padStart(2, '0');
+  const d = String(now.getDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+};
 
 /**
  * Returns whether two ISO date strings are consecutive days.

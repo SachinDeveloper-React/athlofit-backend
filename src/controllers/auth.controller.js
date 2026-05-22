@@ -73,13 +73,12 @@ const verifySignupOtp = async (req, res, next) => {
       req.headers['user-agent']
     );
 
-    console.log("   accessToken, refreshToken, user,", accessToken, refreshToken, user)
     return success(res, 'Email verified successfully', {
       status: 'success',
       message: 'Email verified',
       accessToken,
       refreshToken,
-      user,
+      user: user.toJSON(),
     });
   } catch (err) {
     next(err);
@@ -199,6 +198,10 @@ const resendOtp = async (req, res, next) => {
     const user = await User.findOne({ email });
     if (!user) return error(res, 'User not found', 404);
 
+    if (flow === 'signup' && user.emailVerified) {
+      return error(res, 'Email is already verified', 400);
+    }
+
     const otp = generateOtp();
     user.otp = otp;
     user.otpExpires = getOtpExpiry();
@@ -314,16 +317,19 @@ const googleLogin = async (req, res, next) => {
         { upsert: true, new: true, setDefaultsOnInsert: true }
       );
     } else {
-      // ── Returning user — always refresh profile data from Google ───────────
+      // ── Returning user — refresh profile data from Google ─────────────────
       const updates = {
         googleId,
         provider:      'google',
         emailVerified: true,
-        avatarUrl,                          // always overwrite with latest Google photo
         givenName:     firstName,
         familyName:    lastName,
         googleScopes:  scopes ?? [],
       };
+
+      // Only update avatarUrl if Google returned a non-null photo — prevents
+      // overwriting a previously set custom avatar with null (BUG-013)
+      if (avatarUrl) updates.avatarUrl = avatarUrl;
 
       // Only update name if user doesn't already have one set
       if (!user.name && displayName) updates.name = displayName;
