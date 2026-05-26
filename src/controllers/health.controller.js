@@ -570,14 +570,18 @@ const saveBmi = async (req, res, next) => {
     else if (bmi < 30.0)  category = 'overweight';
     else                   category = 'obese';
 
-    const record = await BmiRecord.create({
-      user:     userId,
-      date:     todayISO(),
-      weight:   parseFloat(weight.toFixed(1)),
-      height:   parseFloat((height * 100).toFixed(1)), // BUG-020: store in cm (same unit as User.height)
-      bmi,
-      category,
-    });
+    const record = await BmiRecord.findOneAndUpdate(
+      { user: userId, date: todayISO() },
+      {
+        $set: {
+          weight:   parseFloat(weight.toFixed(1)),
+          height:   parseFloat((height * 100).toFixed(1)),
+          bmi,
+          category,
+        },
+      },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
 
     // Also update today's HealthActivity with the latest weight
     await HealthActivity.findOneAndUpdate(
