@@ -85,6 +85,46 @@ const verifySignupOtp = async (req, res, next) => {
   }
 };
 
+// ─── POST /auth/admin/login ───────────────────────────────────────────────────
+// Dedicated login for the admin panel.
+// Skips the emailVerified gate — admin accounts are created directly,
+// not through the OTP signup flow.
+const adminLogin = async (req, res, next) => {
+  try {
+    const { email, password } = req.body;
+
+    if (!email || !password) {
+      return error(res, 'Email and password are required', 400);
+    }
+
+    const user = await User.findOne({ email }).select('+password');
+
+    // Use the same generic message to avoid leaking whether the email exists
+    if (!user || !(await user.comparePassword(password))) {
+      return error(res, 'Invalid email or password', 401);
+    }
+
+    if (user.role !== 'admin') {
+      return error(res, 'Access denied. Admin account required.', 403);
+    }
+
+    const accessToken = generateAccessToken(user._id.toString());
+    const refreshToken = await saveRefreshToken(
+      user._id,
+      req.ip,
+      req.headers['user-agent']
+    );
+
+    return success(res, 'Admin login successful', {
+      accessToken,
+      refreshToken,
+      user: user.toJSON(),
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
 // ─── POST /auth/user/login ────────────────────────────────────────────────────
 const login = async (req, res, next) => {
   try {
@@ -360,6 +400,7 @@ module.exports = {
   signup,
   verifySignupOtp,
   login,
+  adminLogin,
   refreshToken,
   logout,
   forgotPassword,
