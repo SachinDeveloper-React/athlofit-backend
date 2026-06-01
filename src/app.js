@@ -28,7 +28,7 @@ const app = express();
 // ─── Security ─────────────────────────────────────────────────────────────────
 app.use(helmet());
 const allowedOrigins = [
-  process.env.CLIENT_URL||'https://athlofit-admin-gui.vercel.app',
+  'https://athlofit-admin-gui.vercel.app',
   process.env.ADMIN_URL || 'http://localhost:5173',
 ].filter(Boolean);
 
