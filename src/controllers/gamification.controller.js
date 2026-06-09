@@ -345,12 +345,24 @@ const claimReward = async (req, res, next) => {
     const todayWater = todayActivity?.hydration ?? 0;
     const dailyGoal = req.user.dailyStepGoal || 10000;
 
+    // Early return if steps_daily reward is disabled via coin_config
+    if (rewardId === 'steps_daily') {
+      const stepGoalEnabled = cfg.coin_config?.rewards?.daily_step_goal_reached?.enabled ?? true;
+      if (!stepGoalEnabled) {
+        return error(res, 'Daily step goal reward is currently disabled', 400);
+      }
+    }
+
     // Build dynamic reward map from DB config
     const REWARDS = {
       steps_daily: {
         title: `Walk ${dailyGoal.toLocaleString()} Steps`,
-        reward: cfg.rewards.stepGoalCoins,
-        isMet: () => todaySteps >= dailyGoal,
+        reward: cfg.coin_config?.rewards?.daily_step_goal_reached?.coin_value ?? cfg.rewards.stepGoalCoins,
+        isMet: () => {
+          const enabled = cfg.coin_config?.rewards?.daily_step_goal_reached?.enabled ?? true;
+          if (!enabled) return false;
+          return todaySteps >= dailyGoal;
+        },
         isAlreadyClaimed: () => gam.lastCoinDate === today,
         onClaim: () => { gam.lastCoinDate = today; },
       },

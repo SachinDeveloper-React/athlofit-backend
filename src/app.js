@@ -20,26 +20,14 @@ const nutritionRoutes   = require('./routes/nutrition.routes');
 const referralRoutes    = require('./routes/referral.routes');
 const challengeRoutes   = require('./routes/challenge.routes');
 const notificationRoutes = require('./routes/notification.routes');
-const adminRoutes       = require('./routes/admin.routes');
 const { errorHandler, notFound } = require('./middleware/error.middleware');
 
 const app = express();
 
 // ─── Security ─────────────────────────────────────────────────────────────────
 app.use(helmet());
-const allowedOrigins = [
-  'https://athlofit-admin-gui.vercel.app',
-  process.env.ADMIN_URL || 'http://localhost:5173',
-].filter(Boolean);
-
 app.use(cors({
-  origin: (origin, callback) => {
-    // Allow requests with no origin (mobile apps, curl, etc.)
-    if (!origin) return callback(null, true);
-    if (process.env.NODE_ENV !== 'production') return callback(null, true);
-    if (allowedOrigins.includes(origin)) return callback(null, true);
-    return callback(new Error('Not allowed by CORS'));
-  },
+  origin: process.env.CLIENT_URL || '*',
   credentials: true,
 }));
 
@@ -107,7 +95,6 @@ app.use('/nutrition',     nutritionRoutes);
 app.use('/referral',      referralRoutes);
 app.use('/challenges',    challengeRoutes);
 app.use('/notification',  notificationRoutes);
-app.use('/admin',         adminRoutes);
 
 // ─── Error handling ───────────────────────────────────────────────────────────
 app.use(notFound);

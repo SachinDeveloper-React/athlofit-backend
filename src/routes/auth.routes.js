@@ -5,7 +5,6 @@ const {
   signup,
   verifySignupOtp,
   login,
-  adminLogin,
   refreshToken,
   logout,
   forgotPassword,
@@ -32,9 +31,6 @@ router.post('/user/refresh-token', refreshToken);
 router.post('/forgot-password', forgotPasswordRules, validate, forgotPassword);
 router.post('/resend-otp', resendOtpRules, validate, resendOtp);
 router.post('/reset-password', resetPasswordRules, validate, resetPassword);
-
-// Admin panel login — skips emailVerified gate, requires role === 'admin'
-router.post('/admin/login', loginRules, validate, adminLogin);
 
 // Protected
 router.post('/logout', protect, logout);
