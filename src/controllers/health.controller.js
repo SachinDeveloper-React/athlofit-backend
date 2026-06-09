@@ -74,6 +74,20 @@ const syncHealthData = async (req, res, next) => {
     } = req.body;
 
     const today = date || todayISO();
+
+    // ── Guard: reject syncs for dates before the user's account was created ──
+    // This prevents historical Health Connect / HealthKit data from leaking
+    // into a newly created account (the background sync always pushes yesterday,
+    // but yesterday might pre-date the account).
+    const accountCreatedDate = req.user.createdAt
+      ? new Date(req.user.createdAt).toISOString().slice(0, 10)
+      : null;
+    if (accountCreatedDate && today < accountCreatedDate) {
+      return success(res, 'Skipped — date is before account creation', {
+        skipped: true,
+      });
+    }
+
     const dailyGoal = req.user.dailyStepGoal || 10000;
     const isGoalMet = goalMet ?? (steps >= dailyGoal);
 
@@ -166,14 +180,13 @@ const syncHealthData = async (req, res, next) => {
         data:    { screen: 'Steps' },
       });
     } else if (!isGoalMet) {
-      // Passive sweatcoin-style coins from distance walked.
+      // Passive step-based coins: Math.floor(steps / 100) * rate_per_100_steps
+      // Same formula the frontend uses — coins accumulate as the user walks.
       // Only award when the goal has NOT been met — once the goal is met
       // (and coins claimed), we stop adding passive coins to avoid double-counting.
       const dailyEarnLimit = cfg.coin.dailyEarnLimit;
-      const coinsPerStepKm = cfg.coin.coinsPerStepKm;
-      const stepsPerKm = 1300;
-      const kmWalked = (steps ?? 0) / stepsPerKm;
-      const coinsEarnedToday = Math.round(Math.min(dailyEarnLimit, Math.max(0, kmWalked * coinsPerStepKm * 0.95)));
+      const rate = cfg.coin_config?.steps?.rate_per_100_steps ?? 0.00095;
+      const coinsEarnedToday = Math.round(Math.min(dailyEarnLimit, Math.max(0, Math.floor((steps ?? 0) / 100) * rate)));
 
       const currentEarned = gam.coinsEarnedToday || 0;
       if (coinsEarnedToday > currentEarned) {
