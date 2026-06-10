@@ -97,7 +97,7 @@ const userSchema = new mongoose.Schema(
     otpExpires: { type: Date, select: false },
     otpFlow: {
       type: String,
-      enum: ["signup", "forgot_password", null],
+      enum: ["signup", "forgot_password", "phone_verify", null],
       select: false,
       default: null,
     },

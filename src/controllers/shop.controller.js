@@ -225,6 +225,11 @@ const searchProducts = async (req, res, next) => {
 const buyWithCoins = async (req, res, next) => {
   try {
     const { items, shippingAddress, couponCode } = req.body;
+
+    // Require email and phone verification before purchase
+    if (!req.user.emailVerified || !req.user.phoneVerified) {
+      return error(res, 'Please verify your email and phone number before making a purchase', 403);
+    }
     
     if (!items || items.length === 0) {
       return error(res, 'Cart is empty', 400);

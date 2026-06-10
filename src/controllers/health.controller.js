@@ -185,14 +185,15 @@ const syncHealthData = async (req, res, next) => {
       // Only award when the goal has NOT been met — once the goal is met
       // (and coins claimed), we stop adding passive coins to avoid double-counting.
       const dailyEarnLimit = cfg.coin.dailyEarnLimit;
-      const rate = cfg.coin_config?.steps?.rate_per_100_steps ?? 0.00095;
-      const coinsEarnedToday = Math.round(Math.min(dailyEarnLimit, Math.max(0, Math.floor((steps ?? 0) / 100) * rate)));
+      const rate = cfg.coin_config?.steps?.rate_per_100_steps ?? 0.5;
+      // Use parseFloat with toFixed(2) to keep 2 decimal places instead of rounding to integer
+      const coinsEarnedToday = parseFloat(Math.min(dailyEarnLimit, Math.max(0, Math.floor((steps ?? 0) / 100) * rate)).toFixed(2));
 
       const currentEarned = gam.coinsEarnedToday || 0;
       if (coinsEarnedToday > currentEarned) {
-        const actualAdded = coinsEarnedToday - currentEarned;
+        const actualAdded = parseFloat((coinsEarnedToday - currentEarned).toFixed(2));
         gam.coinsEarnedToday = coinsEarnedToday;
-        gam.coinsBalance = Math.round(gam.coinsBalance + actualAdded);
+        gam.coinsBalance = parseFloat((gam.coinsBalance + actualAdded).toFixed(2));
         gam.lastCoinDate = today;
         await gam.save();
       }

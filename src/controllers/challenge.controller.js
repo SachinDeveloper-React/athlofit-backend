@@ -121,7 +121,7 @@ const syncChallengeProgress = async (userId) => {
   try {
     const today = todayISO();
     const challenges = await Challenge.find({ isActive: true });
-    if (!challenges.length) return;
+    if (!challenges.length) return { coinsAdded: 0, newlyCompleted: [] };
 
     // Fetch today's health activity
     const activity = await HealthActivity.findOne({ user: userId, date: today });

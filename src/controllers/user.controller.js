@@ -38,6 +38,17 @@ const updateProfile = async (req, res, next) => {
       if (req.body[key] !== undefined) updates[key] = req.body[key];
     });
 
+    // If phone number is being changed, reset phoneVerified
+    if (updates.phone && updates.phone !== req.user.phone) {
+      // Strip +91 prefix for consistent comparison
+      const newPhone = updates.phone.replace(/^\+?91/, '').replace(/\D/g, '');
+      const currentPhone = (req.user.phone || '').replace(/^\+?91/, '').replace(/\D/g, '');
+      if (newPhone !== currentPhone) {
+        updates.phoneVerified = false;
+        updates.phone = newPhone; // store clean 10-digit number
+      }
+    }
+
     // Compute age from dob if provided (BUG-014: month/day-aware)
     if (updates.dob) {
       const dob = new Date(updates.dob);

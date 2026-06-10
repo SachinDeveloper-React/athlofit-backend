@@ -97,7 +97,7 @@ const appConfigSchema = new mongoose.Schema(
 
     coin_config: {
       steps: {
-        rate_per_100_steps: { type: Number, default: 0.00095 },
+        rate_per_100_steps: { type: Number, default: 0.5 },
       },
       rewards: {
         daily_step_goal_reached: {

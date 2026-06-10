@@ -20,6 +20,7 @@ const nutritionRoutes   = require('./routes/nutrition.routes');
 const referralRoutes    = require('./routes/referral.routes');
 const challengeRoutes   = require('./routes/challenge.routes');
 const notificationRoutes = require('./routes/notification.routes');
+const phoneRoutes       = require('./routes/phone.routes');
 const { errorHandler, notFound } = require('./middleware/error.middleware');
 
 const app = express();
@@ -95,6 +96,7 @@ app.use('/nutrition',     nutritionRoutes);
 app.use('/referral',      referralRoutes);
 app.use('/challenges',    challengeRoutes);
 app.use('/notification',  notificationRoutes);
+app.use('/phone',         phoneRoutes);
 
 // ─── Error handling ───────────────────────────────────────────────────────────
 app.use(notFound);
