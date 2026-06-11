@@ -98,11 +98,24 @@ const syncGamification = async (req, res, next) => {
 
     gam.migrateOldBadges();
 
-    if (streakDays !== undefined) gam.streakDays = streakDays;
+    // streakDays: only accept the client value if it's strictly higher than
+    // what the server already recorded. _updateStreak (called during health/sync)
+    // is the authoritative writer; we must not let a stale client value
+    // overwrite a server-incremented streak.
+    if (streakDays !== undefined && streakDays > gam.streakDays) {
+      gam.streakDays = streakDays;
+    }
     if (bestStreakDays !== undefined && bestStreakDays > gam.bestStreakDays) {
       gam.bestStreakDays = bestStreakDays;
     }
-    if (lastActiveDate !== undefined) gam.lastActiveDate = lastActiveDate;
+    if (lastActiveDate !== undefined) {
+      // BUG-028: Validate lastActiveDate — must be a valid ISO date and not in the future
+      const d = new Date(lastActiveDate);
+      if (isNaN(d.getTime()) || lastActiveDate > today) {
+        return error(res, 'lastActiveDate must be a valid ISO date not in the future', 400);
+      }
+      gam.lastActiveDate = lastActiveDate;
+    }
     if (lastCoinDate !== undefined) gam.lastCoinDate = lastCoinDate;
     if (coinsEarnedToday !== undefined && lastCoinDate === today) {
       gam.coinsEarnedToday = coinsEarnedToday;
@@ -180,7 +193,9 @@ const getLeaderboard = async (req, res, next) => {
       loadBadgeDefs(),
     ]);
 
-    const data = top.map((g, i) => ({
+    const data = top
+      .filter(g => g.user != null)
+      .map((g, i) => ({
       rank: i + 1,
       userId: g.user._id,
       name: g.user.name,
@@ -202,6 +217,11 @@ const getCoinData = async (req, res, next) => {
     const userId = req.user._id;
     const today = todayISO();
 
+    // ── Pagination params ─────────────────────────────────────────────────────
+    const page  = Math.max(1, parseInt(req.query.page  ?? '1', 10));
+    const limit = Math.min(50, parseInt(req.query.limit ?? '20', 10));
+    const skip  = (page - 1) * limit;
+
     const [gam, badgeDefs, cfg] = await Promise.all([
       ensureGamDoc(userId),
       loadBadgeDefs(),
@@ -210,42 +230,31 @@ const getCoinData = async (req, res, next) => {
 
     gam.migrateOldBadges();
 
-    // ── Build transaction history ─────────────────────────────────────────────
-    const recentOrders = await Order.find({ user: userId })
-      .sort({ createdAt: -1 })
-      .limit(10)
-      .select('totalCoins totalPrice createdAt _id paymentMethod');
+    // ── Build full transaction list (merge activities + orders + claims) ───────
+    const [allOrders, allActivities] = await Promise.all([
+      Order.find({ user: userId, totalCoins: { $gt: 0 }, paymentMethod: 'COIN_PURCHASE' })
+        .sort({ createdAt: -1 })
+        .select('totalCoins totalPrice createdAt _id paymentMethod'),
+      HealthActivity.find({ user: userId, goalMet: true })
+        .sort({ date: -1 })
+        .select('date steps calories goalMet coinsEarned'),
+    ]);
 
-    const thirtyDaysAgo = new Date();
-    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-    const thirtyAgoISO = thirtyDaysAgo.toISOString().split('T')[0];
-
-    const activities = await HealthActivity.find({
-      user: userId,
-      goalMet: true,
-      date: { $gte: thirtyAgoISO },
-    })
-      .sort({ date: -1 })
-      .limit(20)
-      .select('date steps calories goalMet coinsEarned');
-
-    const transactions = [
-      ...activities.map(a => ({
+    const allTransactions = [
+      ...allActivities.map(a => ({
         id: `act_${a._id}`,
         type: 'EARNED',
         amount: a.coinsEarned || 10,
         source: `Passive Step Coins — ${a.steps.toLocaleString()} steps`,
         createdAt: new Date(a.date).toISOString(),
       })),
-      ...recentOrders
-        .filter(o => o.totalCoins > 0 && o.paymentMethod === 'COIN_PURCHASE')
-        .map(o => ({
-          id: `ord_${o._id}`,
-          type: 'SPENT',
-          amount: o.totalCoins,
-          source: `Shop Purchase — Order #${o._id.toString().slice(-6).toUpperCase()}`,
-          createdAt: o.createdAt.toISOString(),
-        })),
+      ...allOrders.map(o => ({
+        id: `ord_${o._id}`,
+        type: 'SPENT',
+        amount: o.totalCoins,
+        source: `Shop Purchase — Order #${o._id.toString().slice(-6).toUpperCase()}`,
+        createdAt: o.createdAt.toISOString(),
+      })),
       ...(gam.claimHistory || []).map(c => ({
         id: `claim_${c._id}`,
         type: 'EARNED',
@@ -255,14 +264,17 @@ const getCoinData = async (req, res, next) => {
       })),
     ].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
 
+    const total      = allTransactions.length;
+    const totalPages = Math.ceil(total / limit) || 1;
+    const transactions = allTransactions.slice(skip, skip + limit);
+
     // ── Build claimable rewards ───────────────────────────────────────────────
     const todayActivity = await HealthActivity.findOne({ user: userId, date: today });
     const todaySteps = todayActivity?.steps ?? 0;
     const todayWater = todayActivity?.hydration ?? 0;
     const streakDays = gam.streakDays ?? 0;
-    const dailyGoal = req.user.dailyStepGoal || 10000;
+    const dailyGoal  = req.user.dailyStepGoal || 10000;
 
-    // Dynamic streak badge rewards from DB
     const streakClaimable = badgeDefs.map(def => ({
       id: `streak_${def.key}`,
       title: `Complete ${def.threshold}-Day Streak (${def.title})`,
@@ -298,6 +310,13 @@ const getCoinData = async (req, res, next) => {
       balance: gam.coinsBalance,
       transactions,
       claimable,
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages,
+        hasMore: page < totalPages,
+      },
     });
   } catch (err) {
     next(err);
@@ -326,12 +345,24 @@ const claimReward = async (req, res, next) => {
     const todayWater = todayActivity?.hydration ?? 0;
     const dailyGoal = req.user.dailyStepGoal || 10000;
 
+    // Early return if steps_daily reward is disabled via coin_config
+    if (rewardId === 'steps_daily') {
+      const stepGoalEnabled = cfg.coin_config?.rewards?.daily_step_goal_reached?.enabled ?? true;
+      if (!stepGoalEnabled) {
+        return error(res, 'Daily step goal reward is currently disabled', 400);
+      }
+    }
+
     // Build dynamic reward map from DB config
     const REWARDS = {
       steps_daily: {
         title: `Walk ${dailyGoal.toLocaleString()} Steps`,
-        reward: cfg.rewards.stepGoalCoins,
-        isMet: () => todaySteps >= dailyGoal,
+        reward: cfg.coin_config?.rewards?.daily_step_goal_reached?.coin_value ?? cfg.rewards.stepGoalCoins,
+        isMet: () => {
+          const enabled = cfg.coin_config?.rewards?.daily_step_goal_reached?.enabled ?? true;
+          if (!enabled) return false;
+          return todaySteps >= dailyGoal;
+        },
         isAlreadyClaimed: () => gam.lastCoinDate === today,
         onClaim: () => { gam.lastCoinDate = today; },
       },
@@ -361,8 +392,12 @@ const claimReward = async (req, res, next) => {
     if (!rewardDef.isMet()) return error(res, 'Reward threshold not yet reached', 400);
     if (rewardDef.isAlreadyClaimed()) return error(res, 'Reward already claimed', 400);
 
-    gam.coinsBalance = Math.round(gam.coinsBalance + rewardDef.reward);
-    gam.coinsEarnedToday = Math.round((gam.coinsEarnedToday || 0) + rewardDef.reward);
+    // BUG-025: apply daily coin cap before awarding streak badge coins
+    const MAX_DAILY_COINS = cfg.coin.maxDailyRewards;
+    const remainingAllowance = MAX_DAILY_COINS - (gam.coinsEarnedToday || 0);
+    const actualCoins = Math.round(Math.min(rewardDef.reward, remainingAllowance));
+    gam.coinsBalance = Math.round(gam.coinsBalance + actualCoins);
+    gam.coinsEarnedToday = Math.round((gam.coinsEarnedToday || 0) + actualCoins);
 
     // Run badge-specific side effects
     rewardDef.onClaim();
@@ -370,7 +405,7 @@ const claimReward = async (req, res, next) => {
     if (!gam.claimHistory) gam.claimHistory = [];
     gam.claimHistory.push({
       rewardId,
-      amount: rewardDef.reward,
+      amount: actualCoins,
       source: rewardDef.title || `Claimed ${rewardId}`,
       createdAt: new Date(),
     });
@@ -385,11 +420,11 @@ const claimReward = async (req, res, next) => {
     createNotification(userId, {
       type:    'COIN',
       title:   '🪙 Reward Claimed!',
-      message: `You claimed ${rewardDef.reward} coins for "${rewardDef.title}"!`,
+      message: `You claimed ${actualCoins} coins for "${rewardDef.title}"!`,
       data:    { screen: 'Tracker' },
     });
 
-    return success(res, `Claimed ${rewardDef.reward} coins!`, {
+    return success(res, `Claimed ${actualCoins} coins!`, {
       newBalance: gam.coinsBalance,
       rewardId,
     });

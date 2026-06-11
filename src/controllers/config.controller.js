@@ -58,6 +58,17 @@ const getAppConfig = async (req, res, next) => {
         email:   cfg.support.email,
         website: cfg.support.website,
       },
+      coin_config: {
+        steps: {
+          rate_per_100_steps: cfg.coin_config?.steps?.rate_per_100_steps ?? 0.5,
+        },
+        rewards: {
+          daily_step_goal_reached: {
+            enabled:    cfg.coin_config?.rewards?.daily_step_goal_reached?.enabled ?? true,
+            coin_value: cfg.coin_config?.rewards?.daily_step_goal_reached?.coin_value ?? 50,
+          },
+        },
+      },
     };
 
     return success(res, 'App config fetched', { config });
@@ -89,6 +100,20 @@ const updateAppConfig = async (req, res, next) => {
       }
     };
     flatten(updates);
+
+    // ─── Validate coin_config fields before persisting ──────────────────────────
+    if (setMap['coin_config.steps.rate_per_100_steps'] !== undefined) {
+      const rate = setMap['coin_config.steps.rate_per_100_steps'];
+      if (typeof rate !== 'number' || rate <= 0 || rate > 1.0) {
+        return error(res, 'rate_per_100_steps must be a positive number <= 1.0', 400);
+      }
+    }
+    if (setMap['coin_config.rewards.daily_step_goal_reached.coin_value'] !== undefined) {
+      const val = setMap['coin_config.rewards.daily_step_goal_reached.coin_value'];
+      if (!Number.isInteger(val) || val < 0) {
+        return error(res, 'coin_value must be a non-negative integer', 400);
+      }
+    }
 
     const cfg = await AppConfig.findOneAndUpdate(
       { key: 'global' },
@@ -258,7 +283,7 @@ const getFaqs = async (req, res, next) => {
         { category: 'Account & Privacy', order: 2, question: 'How do I delete my account?', answer: 'To request account deletion, contact us at support@athlofit.com with the subject "Account Deletion Request". We will process your request within 7 business days.' },
       ];
 
-      const inserted = await Faq.insertMany(defaults.map((f, i) => ({ ...f, isActive: true })));
+      const inserted = await Faq.insertMany(defaults.map((f, i) => ({ ...f, isActive: true })), { ordered: false });
       return success(res, 'FAQs fetched', inserted.map(f => f.toJSON()));
     }
 

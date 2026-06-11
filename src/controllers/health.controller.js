@@ -17,6 +17,11 @@ const getWeeklySteps = async (req, res, next) => {
       return error(res, 'from and to query params are required', 400);
     }
 
+    const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+    if (!ISO_DATE_RE.test(from) || !ISO_DATE_RE.test(to)) {
+      return error(res, 'from and to must be valid ISO date strings (YYYY-MM-DD)', 400);
+    }
+
     // Build expected date range (fills gaps with 0)
     const dates = buildDateRange(from, to);
 
@@ -24,17 +29,20 @@ const getWeeklySteps = async (req, res, next) => {
     const records = await HealthActivity.find({
       user: req.user._id,
       date: { $gte: from, $lte: to },
-    }).select('date steps');
+    }).select('date steps goalSnapshot');
 
     // Map to lookup
     const recordMap = {};
-    records.forEach(r => { recordMap[r.date] = r.steps; });
+    records.forEach(r => { recordMap[r.date] = { steps: r.steps, goalSnapshot: r.goalSnapshot }; });
 
     // Build response matching WeeklyStepEntry[] in app
     const data = dates.map(date => ({
       date: toDayLabel(date),       // "Mon", "Tue" etc.
       fullDate: date,
-      steps: recordMap[date] ?? 0,
+      steps: recordMap[date]?.steps ?? 0,
+      // Use the goal that was active on that day; fall back to current goal
+      // for days that have no record yet (future/unsynced days).
+      goalSnapshot: recordMap[date]?.goalSnapshot || req.user.dailyStepGoal || 10000,
     }));
 
     return success(res, 'Weekly steps fetched', data);
@@ -66,29 +74,61 @@ const syncHealthData = async (req, res, next) => {
     } = req.body;
 
     const today = date || todayISO();
+
+    // ── Guard: reject syncs for dates before the user's account was created ──
+    // This prevents historical Health Connect / HealthKit data from leaking
+    // into a newly created account (the background sync always pushes yesterday,
+    // but yesterday might pre-date the account).
+    const accountCreatedDate = req.user.createdAt
+      ? new Date(req.user.createdAt).toISOString().slice(0, 10)
+      : null;
+    if (accountCreatedDate && today < accountCreatedDate) {
+      return success(res, 'Skipped — date is before account creation', {
+        skipped: true,
+      });
+    }
+
     const dailyGoal = req.user.dailyStepGoal || 10000;
     const isGoalMet = goalMet ?? (steps >= dailyGoal);
 
+    // ── Merge strategy: only overwrite a field if the incoming value is
+    // meaningful (> 0). This prevents a background sync that only has steps
+    // from zeroing out vitals (HR, BP, glucose, weight) that were recorded
+    // manually or by a different source earlier in the day.
+    const existing = await HealthActivity.findOne({ user: req.user._id, date: today });
+
+    const merge = (incoming, stored) =>
+      (incoming !== undefined && incoming !== null && incoming > 0)
+        ? incoming
+        : (stored ?? 0);
+
+    const updateFields = {
+      // Steps, calories, distance, activeMinutes — always take the latest
+      // non-zero value (background sync derives these from steps)
+      steps:                  merge(steps,                  existing?.steps),
+      distance:               merge(distance,               existing?.distance),
+      calories:               merge(calories,               existing?.calories),
+      activeMinutes:          merge(activeMinutes,          existing?.activeMinutes),
+      // Vitals — keep existing value if incoming is 0 (device may not have
+      // a reading for this sync cycle)
+      heartRate:              merge(heartRate,              existing?.heartRate),
+      heartRateMin:           merge(heartRateMin,           existing?.heartRateMin),
+      heartRateMax:           merge(heartRateMax,           existing?.heartRateMax),
+      bloodPressureSystolic:  merge(bloodPressureSystolic,  existing?.bloodPressureSystolic),
+      bloodPressureDiastolic: merge(bloodPressureDiastolic, existing?.bloodPressureDiastolic),
+      hydration:              merge(hydration,              existing?.hydration),
+      sleepHours:             merge(sleepHours,             existing?.sleepHours),
+      bloodGlucose:           merge(bloodGlucose,           existing?.bloodGlucose),
+      weight:                 merge(weight,                 existing?.weight),
+      goalMet: isGoalMet,
+      // Snapshot the goal that was active on this day — only set once so that
+      // changing the goal later does NOT retroactively alter past days.
+      goalSnapshot: existing?.goalSnapshot > 0 ? existing.goalSnapshot : dailyGoal,
+    };
+
     await HealthActivity.findOneAndUpdate(
       { user: req.user._id, date: today },
-      {
-        $set: {
-          steps: steps ?? 0,
-          distance: distance ?? 0,
-          calories: calories ?? 0,
-          activeMinutes: activeMinutes ?? 0,
-          heartRate: heartRate ?? 0,
-          heartRateMin: heartRateMin ?? 0,
-          heartRateMax: heartRateMax ?? 0,
-          bloodPressureSystolic: bloodPressureSystolic ?? 0,
-          bloodPressureDiastolic: bloodPressureDiastolic ?? 0,
-          hydration: hydration ?? 0,
-          sleepHours: sleepHours ?? 0,
-          bloodGlucose: bloodGlucose ?? 0,
-          weight: weight ?? 0,
-          goalMet: isGoalMet,
-        },
-      },
+      { $set: updateFields },
       { upsert: true, new: true }
     );
 
@@ -113,12 +153,12 @@ const syncHealthData = async (req, res, next) => {
 
     let goalCoinsAwarded = false;
 
-    if (isGoalMet && gam.lastCoinDate !== today) {
+    if (isGoalMet && gam.stepGoalCoinDate !== today) {
       // Award step goal coins automatically
       const stepGoalCoins = cfg.rewards.stepGoalCoins ?? 50;
       gam.coinsBalance = Math.round(gam.coinsBalance + stepGoalCoins);
       gam.coinsEarnedToday = Math.round((gam.coinsEarnedToday || 0) + stepGoalCoins);
-      gam.lastCoinDate = today;
+      gam.stepGoalCoinDate = today;
 
       if (!gam.claimHistory) gam.claimHistory = [];
       gam.claimHistory.push({
@@ -139,19 +179,21 @@ const syncHealthData = async (req, res, next) => {
         message: `You hit your ${dailyGoal.toLocaleString()} step goal and earned ${cfg.rewards.stepGoalCoins ?? 50} coins!`,
         data:    { screen: 'Steps' },
       });
-    } else {
-      // Passive sweatcoin-style coins from distance walked
+    } else if (!isGoalMet) {
+      // Passive step-based coins: Math.floor(steps / 100) * rate_per_100_steps
+      // Same formula the frontend uses — coins accumulate as the user walks.
+      // Only award when the goal has NOT been met — once the goal is met
+      // (and coins claimed), we stop adding passive coins to avoid double-counting.
       const dailyEarnLimit = cfg.coin.dailyEarnLimit;
-      const coinsPerStepKm = cfg.coin.coinsPerStepKm;
-      const stepsPerKm = 1300;
-      const kmWalked = (steps ?? 0) / stepsPerKm;
-      const coinsEarnedToday = Math.round(Math.min(dailyEarnLimit, Math.max(0, kmWalked * coinsPerStepKm * 0.95)));
+      const rate = cfg.coin_config?.steps?.rate_per_100_steps ?? 0.5;
+      // Use parseFloat with toFixed(2) to keep 2 decimal places instead of rounding to integer
+      const coinsEarnedToday = parseFloat(Math.min(dailyEarnLimit, Math.max(0, Math.floor((steps ?? 0) / 100) * rate)).toFixed(2));
 
       const currentEarned = gam.coinsEarnedToday || 0;
       if (coinsEarnedToday > currentEarned) {
-        const actualAdded = coinsEarnedToday - currentEarned;
+        const actualAdded = parseFloat((coinsEarnedToday - currentEarned).toFixed(2));
         gam.coinsEarnedToday = coinsEarnedToday;
-        gam.coinsBalance = Math.round(gam.coinsBalance + actualAdded);
+        gam.coinsBalance = parseFloat((gam.coinsBalance + actualAdded).toFixed(2));
         gam.lastCoinDate = today;
         await gam.save();
       }
@@ -209,33 +251,54 @@ async function _updateStreak(userId, date) {
   const wasConsecutive = isConsecutiveDay(gam.lastActiveDate, date);
   const isSameDay = gam.lastActiveDate === date;
 
+  let dirty = false;
+
   if (!isSameDay) {
-    if (wasConsecutive) {
+    if (!gam.lastActiveDate) {
+      // First-ever sync or lastActiveDate was cleared — preserve existing streak
+      // rather than resetting it. Only set lastActiveDate going forward.
+      gam.lastActiveDate = date;
+      dirty = true;
+      if (gam.streakDays === 0) {
+        gam.streakDays = 1;
+        dirty = true;
+      }
+    } else if (wasConsecutive) {
       gam.streakDays += 1;
+      gam.lastActiveDate = date;
+      dirty = true;
     } else {
-      gam.streakDays = 1; // reset
+      // Known gap — genuine streak break
+      gam.streakDays = 1;
+      gam.lastActiveDate = date;
+      dirty = true;
     }
-    gam.lastActiveDate = date;
+
     if (gam.streakDays > gam.bestStreakDays) {
       gam.bestStreakDays = gam.streakDays;
+      dirty = true;
     }
     // Load active badge definitions and award any newly unlocked badges
     const badgeDefs = await BadgeDefinition.find({ isActive: true }).sort({ order: 1 });
     const prevUnlocked = new Set((gam.badgeList || []).filter(b => b.unlockedAt).map(b => b.key));
     gam.awardBadges(badgeDefs);
-    await gam.save();
+    // Check if awardBadges changed anything
+    const newlyUnlocked = badgeDefs.filter(def => {
+      const badge = (gam.badgeList || []).find(b => b.key === def.key);
+      return badge?.unlockedAt && !prevUnlocked.has(def.key);
+    });
+    if (newlyUnlocked.length > 0) dirty = true;
+
+    if (dirty) await gam.save();
 
     // Push for any badge newly unlocked this sync
-    for (const def of badgeDefs) {
-      const badge = (gam.badgeList || []).find(b => b.key === def.key);
-      if (badge?.unlockedAt && !prevUnlocked.has(def.key)) {
-        createNotification(userId, {
-          type:    'GOAL',
-          title:   `${def.emoji} Badge Unlocked: ${def.title}!`,
-          message: `You hit a ${def.threshold}-day streak and earned ${def.coinReward} coins!`,
-          data:    { screen: 'Achievements' },
-        });
-      }
+    for (const def of newlyUnlocked) {
+      createNotification(userId, {
+        type:    'GOAL',
+        title:   `${def.emoji} Badge Unlocked: ${def.title}!`,
+        message: `You hit a ${def.threshold}-day streak and earned ${def.coinReward} coins!`,
+        data:    { screen: 'Achievements' },
+      });
     }
   }
 }
@@ -426,12 +489,14 @@ const getAnalyticsDashboard = async (req, res, next) => {
         time:     weeks.map(w => sum(w.map(d => pick(d, 'activeMinutes')))),
       };
     } else {
-      // Year: group by quarter (3 months each)
+      // Year: group by quarter using RELATIVE index within the 12-month window.
+      // BUG-019: Using absolute getMonth() breaks for windows spanning two calendar
+      // years (e.g. May 2024–Apr 2025). Use position in currentDates array instead.
       const monthGroups = [[], [], [], []]; // Q1, Q2, Q3, Q4
-      currentDates.forEach(d => {
-        const month = new Date(d).getMonth(); // 0-11
-        const q = Math.floor(month / 3);     // 0-3
-        monthGroups[q].push(d);
+      currentDates.forEach((d, relativeIndex) => {
+        const q = Math.floor(relativeIndex / Math.ceil(currentDates.length / 4));
+        const safeQ = Math.min(q, 3); // clamp to 0-3
+        monthGroups[safeQ].push(d);
       });
       chartDataSets = {
         steps:    monthGroups.map(g => sum(g.map(d => pick(d, 'steps')))),
@@ -519,14 +584,18 @@ const saveBmi = async (req, res, next) => {
     else if (bmi < 30.0)  category = 'overweight';
     else                   category = 'obese';
 
-    const record = await BmiRecord.create({
-      user:     userId,
-      date:     todayISO(),
-      weight:   parseFloat(weight.toFixed(1)),
-      height:   parseFloat(height.toFixed(2)),
-      bmi,
-      category,
-    });
+    const record = await BmiRecord.findOneAndUpdate(
+      { user: userId, date: todayISO() },
+      {
+        $set: {
+          weight:   parseFloat(weight.toFixed(1)),
+          height:   parseFloat((height * 100).toFixed(1)),
+          bmi,
+          category,
+        },
+      },
+      { upsert: true, new: true, setDefaultsOnInsert: true }
+    );
 
     // Also update today's HealthActivity with the latest weight
     await HealthActivity.findOneAndUpdate(
@@ -732,7 +801,6 @@ const getPeriodStats = async (req, res, next) => {
 const getDayDetail = async (req, res, next) => {
   try {
     const userId    = req.user._id;
-    const dailyGoal = req.user.dailyStepGoal || 10000;
     const date      = req.query.date || todayISO();
 
     // Validate date format
@@ -741,6 +809,13 @@ const getDayDetail = async (req, res, next) => {
     }
 
     const record = await HealthActivity.findOne({ user: userId, date }).lean();
+
+    // Use the goal that was active on that specific day (goalSnapshot).
+    // Fall back to the user's current goal only if the record pre-dates the
+    // goalSnapshot field or has no record at all.
+    const dailyGoal = (record?.goalSnapshot > 0 ? record.goalSnapshot : null)
+      ?? req.user.dailyStepGoal
+      ?? 10000;
 
     const steps          = record?.steps          ?? 0;
     const calories       = record?.calories       ?? 0;

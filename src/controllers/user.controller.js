@@ -29,7 +29,6 @@ const updateProfile = async (req, res, next) => {
       "height",
       "weight",
       "bloodType",
-      "avatarUrl",
       "dailyStepGoal",
       "unitSystem",
     ];
@@ -39,10 +38,25 @@ const updateProfile = async (req, res, next) => {
       if (req.body[key] !== undefined) updates[key] = req.body[key];
     });
 
-    // Compute age from dob if provided
+    // If phone number is being changed, reset phoneVerified
+    if (updates.phone && updates.phone !== req.user.phone) {
+      // Strip +91 prefix for consistent comparison
+      const newPhone = updates.phone.replace(/^\+?91/, '').replace(/\D/g, '');
+      const currentPhone = (req.user.phone || '').replace(/^\+?91/, '').replace(/\D/g, '');
+      if (newPhone !== currentPhone) {
+        updates.phoneVerified = false;
+        updates.phone = newPhone; // store clean 10-digit number
+      }
+    }
+
+    // Compute age from dob if provided (BUG-014: month/day-aware)
     if (updates.dob) {
-      const birthYear = new Date(updates.dob).getFullYear();
-      updates.age = new Date().getFullYear() - birthYear;
+      const dob = new Date(updates.dob);
+      const today = new Date();
+      let age = today.getFullYear() - dob.getFullYear();
+      const m = today.getMonth() - dob.getMonth();
+      if (m < 0 || (m === 0 && today.getDate() < dob.getDate())) age--;
+      updates.age = age;
     }
 
     const user = await User.findByIdAndUpdate(
@@ -63,8 +77,12 @@ const completeProfile = async (req, res, next) => {
     const { phone, dob, gender, height, weight, bloodType, avatarUrl } =
       req.body;
 
-    const birthYear = new Date(dob).getFullYear();
-    const age = new Date().getFullYear() - birthYear;
+    // BUG-014: month/day-aware age calculation
+    const dobDate = new Date(dob);
+    const today = new Date();
+    let age = today.getFullYear() - dobDate.getFullYear();
+    const m = today.getMonth() - dobDate.getMonth();
+    if (m < 0 || (m === 0 && today.getDate() < dobDate.getDate())) age--;
 
     const user = await User.findByIdAndUpdate(
       req.user._id,
@@ -348,7 +366,6 @@ const saveIncomingNotification = async (req, res, next) => {
     if (!title || !message)
       return error(res, "title and message are required", 400);
 
-    const Notification = require("../models/Notification.model");
     const notif = await Notification.create({
       user: req.user._id,
       type: type || "GOAL",

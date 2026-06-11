@@ -94,6 +94,18 @@ const appConfigSchema = new mongoose.Schema(
       email:   { type: String, default: 'support@athlofit.com' },
       website: { type: String, default: 'www.athlofit.com/faq' },
     },
+
+    coin_config: {
+      steps: {
+        rate_per_100_steps: { type: Number, default: 0.5 },
+      },
+      rewards: {
+        daily_step_goal_reached: {
+          enabled:    { type: Boolean, default: true },
+          coin_value: { type: Number, default: 50 },
+        },
+      },
+    },
   },
   {
     timestamps: true,

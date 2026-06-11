@@ -5,6 +5,11 @@ const helmet = require('helmet');
 const morgan = require('morgan');
 const rateLimit = require('express-rate-limit');
 
+// BUG-003: Fail fast in production if CLIENT_URL is not configured
+if (process.env.NODE_ENV === 'production' && !process.env.CLIENT_URL) {
+  throw new Error('CLIENT_URL environment variable is required in production');
+}
+
 const authRoutes        = require('./routes/auth.routes');
 const userRoutes        = require('./routes/user.routes');
 const healthRoutes      = require('./routes/health.routes');
@@ -15,6 +20,7 @@ const nutritionRoutes   = require('./routes/nutrition.routes');
 const referralRoutes    = require('./routes/referral.routes');
 const challengeRoutes   = require('./routes/challenge.routes');
 const notificationRoutes = require('./routes/notification.routes');
+const phoneRoutes       = require('./routes/phone.routes');
 const { errorHandler, notFound } = require('./middleware/error.middleware');
 
 const app = express();
@@ -34,7 +40,11 @@ const limiter = rateLimit({
   legacyHeaders: false,
   message: { success: false, message: 'Too many requests, please try again later.' },
 });
-// app.use(limiter);
+// BUG-002: Exclude /auth from global limiter — auth routes have their own tighter limiter
+app.use((req, res, next) => {
+  if (req.path.startsWith('/auth')) return next();
+  return limiter(req, res, next);
+});
 
 // Auth endpoints get tighter limiting
 const authLimiter = rateLimit({
@@ -86,6 +96,7 @@ app.use('/nutrition',     nutritionRoutes);
 app.use('/referral',      referralRoutes);
 app.use('/challenges',    challengeRoutes);
 app.use('/notification',  notificationRoutes);
+app.use('/phone',         phoneRoutes);
 
 // ─── Error handling ───────────────────────────────────────────────────────────
 app.use(notFound);
