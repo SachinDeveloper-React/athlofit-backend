@@ -146,9 +146,15 @@ const syncHealthData = async (req, res, next) => {
     let gam = await Gamification.findOne({ user: req.user._id });
     if (!gam) gam = await Gamification.create({ user: req.user._id });
 
+    // Always update lastActiveDate when syncing today's data
+    // (tracks that the user was active today, regardless of goal completion)
+    const actualToday = todayISO();
+    if (today === actualToday && gam.lastActiveDate !== actualToday) {
+      gam.lastActiveDate = actualToday;
+    }
+
     // Reset daily coins counter if it's a new day — but ONLY for today's syncs.
     // Past-day background syncs must not touch the daily counter.
-    const actualToday = todayISO();
     if (today === actualToday && gam.lastCoinDate !== actualToday) {
       gam.coinsEarnedToday = 0;
     }
@@ -207,6 +213,11 @@ const syncHealthData = async (req, res, next) => {
           await gam.save();
         }
       }
+    }
+
+    // Ensure lastActiveDate is persisted even if no coins were added this sync
+    if (today === actualToday && gam.isModified('lastActiveDate')) {
+      await gam.save();
     }
 
     // Await challenge sync so we can include newly completed challenges in the response
