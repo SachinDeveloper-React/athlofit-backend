@@ -186,11 +186,13 @@ describe('Property 4: Backward Compatibility — Config endpoint includes all ex
             message: 'We are under maintenance. Back soon!',
           });
 
-          // support section structure unchanged
-          expect(config.support).toEqual({
+          // support section — email and website preserved; phone/address added
+          expect(config.support).toMatchObject({
             email: 'support@athlofit.com',
             website: 'www.athlofit.com/faq',
           });
+          expect(config.support).toHaveProperty('phone');
+          expect(config.support).toHaveProperty('address');
         }
       ),
       { numRuns: 50 }

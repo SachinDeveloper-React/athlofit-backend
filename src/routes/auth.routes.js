@@ -5,6 +5,7 @@ const {
   signup,
   verifySignupOtp,
   login,
+  adminLogin,
   refreshToken,
   logout,
   forgotPassword,
@@ -27,6 +28,7 @@ const { protect } = require('../middleware/auth.middleware');
 router.post('/user/signup', signupRules, validate, signup);
 router.post('/user/signup-verify', verifyOtpRules, validate, verifySignupOtp);
 router.post('/user/login', loginRules, validate, login);
+router.post('/admin/login', loginRules, validate, adminLogin);
 router.post('/user/refresh-token', refreshToken);
 router.post('/forgot-password', forgotPasswordRules, validate, forgotPassword);
 router.post('/resend-otp', resendOtpRules, validate, resendOtp);
