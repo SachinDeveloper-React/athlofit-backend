@@ -110,6 +110,10 @@ const userSchema = new mongoose.Schema(
     notificationsEnabled: { type: Boolean, default: true },
     // Device platform — set when FCM token is registered
     platform: { type: String, enum: ["ios", "android", null], default: null },
+    // Terms & Conditions acceptance
+    termsAccepted: { type: Boolean, default: false },
+    termsAcceptedAt: { type: Date, default: null },
+
     // Account deletion request
     deletionRequest: {
       type: {

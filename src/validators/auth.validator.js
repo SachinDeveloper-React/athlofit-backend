@@ -12,6 +12,15 @@ const signupRules = [
 const loginRules = [
   body('email').isEmail().normalizeEmail().withMessage('Valid email required'),
   body('password').notEmpty().withMessage('Password is required'),
+  body('termsAccepted')
+    .isBoolean()
+    .withMessage('termsAccepted must be a boolean')
+    .custom((value) => {
+      if (value !== true) {
+        throw new Error('You must accept Terms & Conditions and Privacy Policy');
+      }
+      return true;
+    }),
 ];
 
 const verifyOtpRules = [

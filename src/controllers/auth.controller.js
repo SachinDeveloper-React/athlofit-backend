@@ -1,6 +1,7 @@
 // src/controllers/auth.controller.js
 const User = require('../models/User.model');
 const Gamification = require('../models/Gamification.model');
+const RefreshToken = require('../models/RefreshToken.model');
 const { generateAccessToken, saveRefreshToken, rotateRefreshToken, revokeAllUserTokens } = require('../utils/jwt');
 const { generateOtp, getOtpExpiry, sendOtpEmail } = require('../utils/otp');
 const { success, error } = require('../utils/response');
@@ -96,9 +97,12 @@ const verifySignupOtp = async (req, res, next) => {
 // ─── POST /auth/user/login ────────────────────────────────────────────────────
 const login = async (req, res, next) => {
   try {
-    const { email, password } = req.body;
-    console.log("email", email);
-    console.log("password", password);
+    const { email, password, termsAccepted } = req.body;
+
+    // Require terms & conditions acceptance
+    if (!termsAccepted) {
+      return error(res, 'You must accept the Terms & Conditions and Privacy Policy to log in', 400);
+    }
     
     const user = await User.findOne({ email }).select('+password');
     if (!user || !(await user.comparePassword(password))) {
@@ -127,6 +131,28 @@ const login = async (req, res, next) => {
           emailNotVerified: true,
           email: email,
         },
+      });
+    }
+
+    // Record terms acceptance
+    if (!user.termsAccepted) {
+      user.termsAccepted = true;
+      user.termsAcceptedAt = new Date();
+      await user.save();
+    }
+
+    // Check if user is already logged in on another device
+    const activeSession = await RefreshToken.findOne({
+      user: user._id,
+      revoked: false,
+      expiresAt: { $gt: new Date() },
+    });
+
+    if (activeSession) {
+      return res.status(409).json({
+        success: false,
+        message: 'Your account is already logged in on another device. Please logout from that device first and then try again.',
+        data: { activeSession: true },
       });
     }
 
