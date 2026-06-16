@@ -1,5 +1,5 @@
 // src/controllers/phone.controller.js
-// Phone number verification via OTP (Fast2SMS)
+// Phone number verification via OTP (MSG91)
 
 const User = require('../models/User.model');
 const { generateOtp, getOtpExpiry } = require('../utils/otp');
@@ -44,7 +44,8 @@ const sendPhoneOtp = async (req, res, next) => {
     user.otpFlow = 'phone_verify';
     await user.save();
 
-    // Send SMS via Fast2SMS
+    console.log(`[Phone] Sending OTP to ${cleanPhone}`);
+    // Send SMS via MSG91
     const smsResult = await sendOtpSms(cleanPhone, otp);
 
     if (!smsResult.success) {

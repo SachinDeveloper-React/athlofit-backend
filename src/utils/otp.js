@@ -30,6 +30,14 @@ const transporter = nodemailer.createTransport({
   },
 });
 
+// Verify SMTP connection on startup (non-blocking)
+transporter.verify().then(() => {
+  console.log('[SMTP] Mail server connection verified ✓');
+}).catch((err) => {
+  console.error('[SMTP] ✗ Mail server connection FAILED:', err.message);
+  console.error('[SMTP] Check SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS in .env');
+});
+
 // ─── Send OTP email ───────────────────────────────────────────────────────────
 
 const sendOtpEmail = async (to, otp, flow) => {
@@ -50,12 +58,15 @@ const sendOtpEmail = async (to, otp, flow) => {
       <p style="color:#999;font-size:12px;margin-top:24px">If you didn't request this, please ignore this email.</p>
     </div>`;
 
-  await transporter.sendMail({
+ const abc = await transporter.sendMail({
     from: process.env.EMAIL_FROM || '"Athlofit" <noreply@athlofit.com>',
     to,
     subject,
     html,
   });
+
+  console.log("abc", abc);
+  
 };
 
 module.exports = { generateOtp, getOtpExpiry, sendOtpEmail };

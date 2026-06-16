@@ -27,9 +27,17 @@ const signup = async (req, res, next) => {
     });
 
     // Send verification OTP
-    await sendOtpEmail(email, otp, 'signup').catch(err =>
-      console.error('OTP send failed:', err.message)
-    );
+    try {
+      await sendOtpEmail(email, otp, 'signup');
+    } catch (err) {
+      console.error('[signup] OTP email send failed:', err.message, err.stack);
+      // Account is created — return success but warn about email
+      return success(res, 'Account created but email delivery failed. Please use resend OTP.', {
+        message: 'OTP email delivery failed',
+        status: 'success',
+        emailSendFailed: true,
+      }, 201);
+    }
 
     return success(res, 'Account created. Please verify your email with the OTP sent.', {
       message: 'OTP sent to email',
@@ -89,7 +97,9 @@ const verifySignupOtp = async (req, res, next) => {
 const login = async (req, res, next) => {
   try {
     const { email, password } = req.body;
-
+    console.log("email", email);
+    console.log("password", password);
+    
     const user = await User.findOne({ email }).select('+password');
     if (!user || !(await user.comparePassword(password))) {
       return error(res, 'Invalid email or password', 401);
@@ -102,8 +112,22 @@ const login = async (req, res, next) => {
       user.otpExpires = getOtpExpiry();
       user.otpFlow = 'signup';
       await user.save();
-      await sendOtpEmail(email, otp, 'signup').catch(() => {});
-      return error(res, 'Email not verified. A new OTP has been sent.', 403);
+
+      try {
+        await sendOtpEmail(email, otp, 'signup');
+      } catch (mailErr) {
+        console.error('OTP send failed on login (unverified):', mailErr.message);
+      }
+
+      // Return 403 with a flag so the frontend can navigate to OTP screen
+      return res.status(403).json({
+        success: false,
+        message: 'Email not verified. A new OTP has been sent.',
+        data: {
+          emailNotVerified: true,
+          email: email,
+        },
+      });
     }
 
     // Ensure gamification doc exists

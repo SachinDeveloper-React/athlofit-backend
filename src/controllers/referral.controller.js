@@ -4,6 +4,7 @@ const Referral = require('../models/Referral.model');
 const Gamification = require('../models/Gamification.model');
 const AppConfig = require('../models/AppConfig.model');
 const { success, error } = require('../utils/response');
+const { logCoinTransaction } = require('../utils/logCoinTransaction');
 
 async function getLiveConfig() {
   let cfg = await AppConfig.findOne({ key: 'global' });
@@ -118,6 +119,17 @@ const applyReferralCode = async (req, res, next) => {
     if (referrerGam.claimHistory.length > 50) referrerGam.claimHistory.shift();
     await referrerGam.save();
 
+    // Log referrer coin transaction
+    logCoinTransaction({
+      userId: referrer._id,
+      type: 'EARNED',
+      amount: REFERRER_BONUS,
+      balanceAfter: referrerGam.coinsBalance,
+      source: 'REFERRAL_BONUS',
+      description: `Referral Bonus — ${req.user.name} joined`,
+      metadata: { rewardId: `referral_${referral._id}` },
+    });
+
     // 7. Award coins to referee (current user)
     let refereeGam = await Gamification.findOne({ user: refereeId });
     if (!refereeGam) {
@@ -132,6 +144,17 @@ const applyReferralCode = async (req, res, next) => {
     });
     if (refereeGam.claimHistory.length > 50) refereeGam.claimHistory.shift();
     await refereeGam.save();
+
+    // Log referee coin transaction
+    logCoinTransaction({
+      userId: refereeId,
+      type: 'EARNED',
+      amount: REFEREE_BONUS,
+      balanceAfter: refereeGam.coinsBalance,
+      source: 'REFERRAL_BONUS',
+      description: `Welcome Bonus — Used referral code`,
+      metadata: { rewardId: `referral_welcome_${referral._id}` },
+    });
 
     // 8. Mark bonuses as awarded
     referral.referrerBonusAwarded = true;

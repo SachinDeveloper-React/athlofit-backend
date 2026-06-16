@@ -12,6 +12,7 @@ const appConfigSchema = new mongoose.Schema(
       conversionRate:  { type: Number, default: 10 },   // coins per ₹1
       dailyEarnLimit:  { type: Number, default: 10 },   // max passive coins/day from steps
       maxDailyRewards: { type: Number, default: 250 },  // max claimable coins/day
+      unverifiedDailyCap: { type: Number, default: 50 }, // max coins/day for unverified users
       coinsPerStepKm:  { type: Number, default: 1 },
       purchaseEnabled: { type: Boolean, default: true },
       referrerBonus:   { type: Number, default: 200 },  // coins to referrer

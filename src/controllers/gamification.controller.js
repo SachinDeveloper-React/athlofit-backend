@@ -4,16 +4,29 @@ const BadgeDefinition = require('../models/BadgeDefinition.model');
 const HealthActivity = require('../models/HealthActivity.model');
 const Order = require('../models/Order.model');
 const AppConfig = require('../models/AppConfig.model');
+const CoinTransaction = require('../models/CoinTransaction.model');
 const { success, error } = require('../utils/response');
 const { todayISO } = require('../utils/date');
 const { sendPushToUser } = require('../utils/pushNotification');
 const { createNotification } = require('../utils/createNotification');
+const { logCoinTransaction } = require('../utils/logCoinTransaction');
 
 // ─── Helper: load live config (falls back to defaults if not seeded) ──────────
 async function getLiveConfig() {
   let cfg = await AppConfig.findOne({ key: 'global' });
   if (!cfg) cfg = await AppConfig.create({ key: 'global' });
   return cfg;
+}
+
+// ─── Helper: get effective daily coin cap based on user verification status ───
+// Unverified users (email not verified) get a lower cap from config.
+function getEffectiveDailyCap(user, configMax, unverifiedCap) {
+  const isVerified = user.emailVerified;
+  if (!isVerified) {
+    const cap = unverifiedCap ?? 50; // fallback if config not set
+    return Math.min(cap, configMax);
+  }
+  return configMax;
 }
 
 // ─── Helper: load active badge defs + ensure user record is migrated ──────────
@@ -143,7 +156,7 @@ const earnCoins = async (req, res, next) => {
 
     const today = todayISO();
     const [gam, cfg] = await Promise.all([ensureGamDoc(req.user._id), getLiveConfig()]);
-    const MAX_DAILY_COINS = cfg.coin.maxDailyRewards;
+    const MAX_DAILY_COINS = getEffectiveDailyCap(req.user, cfg.coin.maxDailyRewards, cfg.coin.unverifiedDailyCap);
 
     // Reset daily coins if it's a new day
     if (gam.lastCoinDate !== today) {
@@ -172,6 +185,19 @@ const earnCoins = async (req, res, next) => {
     }
 
     await gam.save();
+
+    // Log coin transaction
+    if (actualCoins > 0) {
+      logCoinTransaction({
+        userId: req.user._id,
+        type: 'EARNED',
+        amount: actualCoins,
+        balanceAfter: gam.coinsBalance,
+        source: 'DAILY_STEP_GOAL',
+        description: `Daily Step Reward — ${actualCoins} coins`,
+        metadata: { rewardId: 'steps_daily_card', date: today },
+      });
+    }
 
     return success(res, `Earned ${actualCoins} coins`, {
       coinsBalance: gam.coinsBalance,
@@ -230,43 +256,71 @@ const getCoinData = async (req, res, next) => {
 
     gam.migrateOldBadges();
 
-    // ── Build full transaction list (merge activities + orders + claims) ───────
-    const [allOrders, allActivities] = await Promise.all([
-      Order.find({ user: userId, totalCoins: { $gt: 0 }, paymentMethod: 'COIN_PURCHASE' })
+    // ── Fetch transactions from CoinTransaction collection (primary) ──────────
+    const [coinTxns, coinTxnTotal] = await Promise.all([
+      CoinTransaction.find({ user: userId })
         .sort({ createdAt: -1 })
-        .select('totalCoins totalPrice createdAt _id paymentMethod'),
-      HealthActivity.find({ user: userId, goalMet: true })
-        .sort({ date: -1 })
-        .select('date steps calories goalMet coinsEarned'),
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      CoinTransaction.countDocuments({ user: userId }),
     ]);
 
-    const allTransactions = [
-      ...allActivities.map(a => ({
-        id: `act_${a._id}`,
-        type: 'EARNED',
-        amount: a.coinsEarned || 10,
-        source: `Passive Step Coins — ${a.steps.toLocaleString()} steps`,
-        createdAt: new Date(a.date).toISOString(),
-      })),
-      ...allOrders.map(o => ({
-        id: `ord_${o._id}`,
-        type: 'SPENT',
-        amount: o.totalCoins,
-        source: `Shop Purchase — Order #${o._id.toString().slice(-6).toUpperCase()}`,
-        createdAt: o.createdAt.toISOString(),
-      })),
-      ...(gam.claimHistory || []).map(c => ({
-        id: `claim_${c._id}`,
-        type: 'EARNED',
-        amount: c.amount,
-        source: c.source || `Claimed ${c.rewardId}`,
-        createdAt: c.createdAt.toISOString(),
-      })),
-    ].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+    let transactions;
+    let total;
 
-    const total      = allTransactions.length;
+    if (coinTxnTotal > 0) {
+      // Use the new CoinTransaction collection
+      transactions = coinTxns.map(t => ({
+        id: t._id.toString(),
+        type: t.type === 'REFUND' ? 'EARNED' : t.type,
+        amount: t.amount,
+        source: t.description,
+        createdAt: t.createdAt.toISOString(),
+        balanceAfter: t.balanceAfter,
+        category: t.source,
+      }));
+      total = coinTxnTotal;
+    } else {
+      // ── Legacy fallback: assemble from HealthActivity + Order + claimHistory ─
+      const [allOrders, allActivities] = await Promise.all([
+        Order.find({ user: userId, totalCoins: { $gt: 0 }, paymentMethod: 'COIN_PURCHASE' })
+          .sort({ createdAt: -1 })
+          .select('totalCoins totalPrice createdAt _id paymentMethod'),
+        HealthActivity.find({ user: userId, goalMet: true })
+          .sort({ date: -1 })
+          .select('date steps calories goalMet coinsEarned'),
+      ]);
+
+      const allTransactions = [
+        ...allActivities.map(a => ({
+          id: `act_${a._id}`,
+          type: 'EARNED',
+          amount: a.coinsEarned || 10,
+          source: `Passive Step Coins — ${a.steps.toLocaleString()} steps`,
+          createdAt: new Date(a.date).toISOString(),
+        })),
+        ...allOrders.map(o => ({
+          id: `ord_${o._id}`,
+          type: 'SPENT',
+          amount: o.totalCoins,
+          source: `Shop Purchase — Order #${o._id.toString().slice(-6).toUpperCase()}`,
+          createdAt: o.createdAt.toISOString(),
+        })),
+        ...(gam.claimHistory || []).map(c => ({
+          id: `claim_${c._id}`,
+          type: 'EARNED',
+          amount: c.amount,
+          source: c.source || `Claimed ${c.rewardId}`,
+          createdAt: c.createdAt.toISOString(),
+        })),
+      ].sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+
+      total = allTransactions.length;
+      transactions = allTransactions.slice(skip, skip + limit);
+    }
+
     const totalPages = Math.ceil(total / limit) || 1;
-    const transactions = allTransactions.slice(skip, skip + limit);
 
     // ── Build claimable rewards ───────────────────────────────────────────────
     const todayActivity = await HealthActivity.findOne({ user: userId, date: today });
@@ -393,7 +447,7 @@ const claimReward = async (req, res, next) => {
     if (rewardDef.isAlreadyClaimed()) return error(res, 'Reward already claimed', 400);
 
     // BUG-025: apply daily coin cap before awarding streak badge coins
-    const MAX_DAILY_COINS = cfg.coin.maxDailyRewards;
+    const MAX_DAILY_COINS = getEffectiveDailyCap(req.user, cfg.coin.maxDailyRewards, cfg.coin.unverifiedDailyCap);
     const remainingAllowance = MAX_DAILY_COINS - (gam.coinsEarnedToday || 0);
     const actualCoins = Math.round(Math.min(rewardDef.reward, remainingAllowance));
     gam.coinsBalance = Math.round(gam.coinsBalance + actualCoins);
@@ -415,6 +469,26 @@ const claimReward = async (req, res, next) => {
     }
 
     await gam.save();
+
+    // Log coin transaction for reward claim
+    const sourceMap = {
+      steps_daily: 'DAILY_STEP_GOAL',
+      hydration_daily: 'HYDRATION_GOAL',
+    };
+    const txSource = sourceMap[rewardId] || (rewardId.startsWith('streak_') ? 'STREAK_BADGE' : 'MANUAL');
+    logCoinTransaction({
+      userId,
+      type: 'EARNED',
+      amount: actualCoins,
+      balanceAfter: gam.coinsBalance,
+      source: txSource,
+      description: rewardDef.title || `Claimed ${rewardId}`,
+      metadata: {
+        rewardId,
+        date: today,
+        badgeKey: rewardId.startsWith('streak_') ? rewardId.replace('streak_', '') : undefined,
+      },
+    });
 
     // ── Persist + push: reward claimed ───────────────────────────────────
     createNotification(userId, {
@@ -575,6 +649,17 @@ const claimAdvancedAchievement = async (req, res, next) => {
 
     await gam.save();
 
+    // Log coin transaction for achievement
+    logCoinTransaction({
+      userId,
+      type: 'EARNED',
+      amount: achievement.reward,
+      balanceAfter: gam.coinsBalance,
+      source: 'ACHIEVEMENT',
+      description: `Achievement: ${achievement.title}`,
+      metadata: { achievementId: achievement._id, rewardId: `ach_${achievement.key}` },
+    });
+
     // ── Persist + push: achievement claimed ──────────────────────────────
     createNotification(userId, {
       type:    'GOAL',
@@ -671,6 +756,58 @@ const adminDeleteBadge = async (req, res, next) => {
   }
 };
 
+// ─── GET /gamification/coins/history ─────────────────────────────────────────
+// Paginated coin history with optional category/type filtering.
+// Query: ?page=1&limit=20&category=PASSIVE_STEPS&type=EARNED
+const getCoinHistory = async (req, res, next) => {
+  try {
+    const userId = req.user._id;
+    const page     = Math.max(1, parseInt(req.query.page ?? '1', 10));
+    const limit    = Math.min(50, parseInt(req.query.limit ?? '20', 10));
+    const skip     = (page - 1) * limit;
+    const category = req.query.category;
+    const type     = req.query.type;
+
+    const filter = { user: userId };
+    if (category) filter.source = category;
+    if (type) filter.type = type;
+
+    const [transactions, total] = await Promise.all([
+      CoinTransaction.find(filter)
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      CoinTransaction.countDocuments(filter),
+    ]);
+
+    const totalPages = Math.ceil(total / limit) || 1;
+
+    const formatted = transactions.map(t => ({
+      id: t._id.toString(),
+      type: t.type === 'REFUND' ? 'EARNED' : t.type,
+      amount: t.amount,
+      source: t.description,
+      createdAt: t.createdAt.toISOString(),
+      balanceAfter: t.balanceAfter,
+      category: t.source,
+    }));
+
+    return success(res, 'Coin history fetched', {
+      transactions: formatted,
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages,
+        hasMore: page < totalPages,
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
 module.exports = {
   getGamification,
   getStreaks,
@@ -678,6 +815,7 @@ module.exports = {
   earnCoins,
   getLeaderboard,
   getCoinData,
+  getCoinHistory,
   claimReward,
   createAchievement,
   getAdvancedAchievements,

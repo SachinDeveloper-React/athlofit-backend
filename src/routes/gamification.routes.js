@@ -8,6 +8,7 @@ const {
   earnCoins,
   getLeaderboard,
   getCoinData,
+  getCoinHistory,
   claimReward,
   createAchievement,
   getAdvancedAchievements,
@@ -36,6 +37,9 @@ router.post('/coins/earn', earnCoins);
 
 // GET /gamification/coins/data  — full CoinData (balance, transactions, claimable)
 router.get('/coins/data', getCoinData);
+
+// GET /gamification/coins/history  — paginated coin history with optional category filter
+router.get('/coins/history', getCoinHistory);
 
 // POST /gamification/coins/claim  — claim a specific reward by id
 router.post('/coins/claim', claimReward);
