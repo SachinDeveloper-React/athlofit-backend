@@ -17,7 +17,7 @@ const orderSchema = new mongoose.Schema(
     totalCoins: { type: Number, default: 0 },
     paymentMethod: {
       type: String,
-      enum: ['STANDARD', 'COIN_PURCHASE'],
+      enum: ['STANDARD', 'COIN_PURCHASE', 'RAZORPAY'],
       default: 'STANDARD',
     },
     status: {
@@ -25,6 +25,20 @@ const orderSchema = new mongoose.Schema(
       enum: ['PENDING', 'PAID', 'SHIPPED', 'DELIVERED', 'CANCELLED'],
       default: 'PAID', // Default PAID since coins are deducted instantly
     },
+    // ── Razorpay payment fields ──────────────────────────────────────────────
+    payment: {
+      razorpayOrderId:   { type: String, default: null, index: true },
+      razorpayPaymentId: { type: String, default: null },
+      razorpaySignature: { type: String, default: null },
+      status: {
+        type: String,
+        enum: ['CREATED', 'CAPTURED', 'FAILED', 'REFUNDED'],
+        default: 'CREATED',
+      },
+    },
+    // Guest contact (for non-logged-in website purchases, if allowed)
+    contactEmail: { type: String, default: null },
+    contactPhone: { type: String, default: null },
     shippingAddress: {
       street:  { type: String, required: true },  // BUG-039
       city:    { type: String, required: true },

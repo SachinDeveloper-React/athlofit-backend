@@ -8,6 +8,9 @@ const {
   updateTerms,
   getPrivacy,
   updatePrivacy,
+  getLegalList,
+  getLegalByType,
+  updateLegalByType,
   submitSupport,
   getFaqs,
   adminCreateFaq,
@@ -23,6 +26,8 @@ router.get('/app',     getAppConfig);
 router.get('/terms',   getTerms);
 router.get('/privacy', getPrivacy);
 router.get('/faqs',    getFaqs);
+router.get('/legal',       getLegalList);
+router.get('/legal/:type', getLegalByType);
 
 // Support — optionally authenticated (attaches user ID if logged in)
 router.post('/support', (req, res, next) => {
@@ -38,6 +43,7 @@ router.post('/support', (req, res, next) => {
 router.patch('/app',    protect, adminOnly, updateAppConfig);
 router.put('/terms',    protect, adminOnly, updateTerms);
 router.put('/privacy',  protect, adminOnly, updatePrivacy);
+router.put('/legal/:type', protect, adminOnly, updateLegalByType);
 
 // FAQ admin CRUD
 router.post('/admin/faqs',        protect, adminOnly, adminCreateFaq);

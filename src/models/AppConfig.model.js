@@ -94,6 +94,39 @@ const appConfigSchema = new mongoose.Schema(
     support: {
       email:   { type: String, default: 'support@athlofit.com' },
       website: { type: String, default: 'www.athlofit.com/faq' },
+      phone:   { type: String, default: '+91 98765 43210' },
+      address: { type: String, default: 'Bengaluru, Karnataka, India' },
+    },
+
+    // ── Dynamic app store / download links shown on the website ──────────────
+    appLinks: {
+      playStore:   { type: String, default: '' },
+      appStore:    { type: String, default: '' },
+      // Optional universal/deep link for "Open App" buttons
+      universal:   { type: String, default: '' },
+      // Toggle visibility of download buttons on the website
+      showBadges:  { type: Boolean, default: true },
+    },
+
+    // ── Social media handles (rendered in footer / structured data) ──────────
+    social: {
+      instagram: { type: String, default: '' },
+      twitter:   { type: String, default: '' },
+      facebook:  { type: String, default: '' },
+      youtube:   { type: String, default: '' },
+      linkedin:  { type: String, default: '' },
+    },
+
+    // ── Website-level SEO + payment settings ─────────────────────────────────
+    website: {
+      siteName:        { type: String, default: 'Athlofit' },
+      defaultMetaTitle:{ type: String, default: 'Athlofit — Walk. Earn. Shop.' },
+      defaultMetaDescription: {
+        type: String,
+        default: 'Track your fitness, earn coins by walking, and shop premium health products.',
+      },
+      ogImage:         { type: String, default: '' },
+      razorpayEnabled: { type: Boolean, default: false },
     },
 
     coin_config: {

@@ -38,6 +38,15 @@ const errorHandler = (err, req, res, next) => {
     });
   }
 
+  // Multer upload errors (file too large, unexpected field, wrong type)
+  if (err.name === 'MulterError' || /Only image files/.test(err.message || '')) {
+    const msg =
+      err.code === 'LIMIT_FILE_SIZE'
+        ? 'Image is too large (max 8 MB)'
+        : err.message || 'File upload error';
+    return res.status(400).json({ success: false, message: msg, data: null });
+  }
+
   if (process.env.NODE_ENV === 'development') {
     console.error('[ERROR]', err);
   }

@@ -16,21 +16,45 @@ const healthRoutes      = require('./routes/health.routes');
 const gamificationRoutes = require('./routes/gamification.routes');
 const configRoutes      = require('./routes/config.routes');
 const shopRoutes        = require('./routes/shop.routes');
+const blogRoutes        = require('./routes/blog.routes');
+const paymentRoutes     = require('./routes/payment.routes');
+const uploadRoutes      = require('./routes/upload.routes');
 const nutritionRoutes   = require('./routes/nutrition.routes');
 const referralRoutes    = require('./routes/referral.routes');
 const challengeRoutes   = require('./routes/challenge.routes');
 const notificationRoutes = require('./routes/notification.routes');
-// Phone verification removed — const phoneRoutes = require('./routes/phone.routes');
+const { handleWebhook } = require('./controllers/payment.controller');
 const { errorHandler, notFound } = require('./middleware/error.middleware');
 
 const app = express();
 
 // ─── Security ─────────────────────────────────────────────────────────────────
 app.use(helmet());
+
+// Support multiple comma-separated origins (mobile app, admin panel, website)
+const allowedOrigins = (process.env.CLIENT_URL || '*')
+  .split(',')
+  .map((o) => o.trim())
+  .filter(Boolean);
+
 app.use(cors({
-  origin: process.env.CLIENT_URL || '*',
+  origin: (origin, callback) => {
+    // Allow requests with no origin (mobile apps, curl, server-to-server)
+    if (!origin || allowedOrigins.includes('*') || allowedOrigins.includes(origin)) {
+      return callback(null, true);
+    }
+    return callback(new Error('Not allowed by CORS'));
+  },
   credentials: true,
 }));
+
+// ─── Razorpay webhook (must use raw body BEFORE express.json) ────────────────
+// Signature verification requires the unparsed request body.
+app.post(
+  '/payment/webhook',
+  express.raw({ type: 'application/json' }),
+  handleWebhook,
+);
 
 // ─── Rate limiting ────────────────────────────────────────────────────────────
 const limiter = rateLimit({
@@ -92,6 +116,9 @@ app.use('/health',        healthRoutes);
 app.use('/gamification',  gamificationRoutes);
 app.use('/config',        configRoutes);
 app.use('/shop',          shopRoutes);
+app.use('/blog',          blogRoutes);
+app.use('/payment',       paymentRoutes);
+app.use('/upload',        uploadRoutes);
 app.use('/nutrition',     nutritionRoutes);
 app.use('/referral',      referralRoutes);
 app.use('/challenges',    challengeRoutes);

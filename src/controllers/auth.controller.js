@@ -159,6 +159,40 @@ const login = async (req, res, next) => {
   }
 };
 
+// ─── POST /auth/admin/login ───────────────────────────────────────────────────
+// Admin-only login. Validates credentials and enforces role === 'admin'.
+const adminLogin = async (req, res, next) => {
+  try {
+    const { email, password } = req.body;
+
+    const user = await User.findOne({ email }).select('+password');
+    if (!user || !(await user.comparePassword(password))) {
+      return error(res, 'Invalid email or password', 401);
+    }
+
+    if (user.role !== 'admin') {
+      return error(res, 'Access denied. Admin account required.', 403);
+    }
+
+    const accessToken = generateAccessToken(user._id.toString());
+    const refreshToken = await saveRefreshToken(
+      user._id,
+      req.ip,
+      req.headers['user-agent']
+    );
+
+    return success(res, 'Login successful', {
+      status: 'success',
+      message: 'Login successful',
+      accessToken,
+      refreshToken,
+      user: user.toJSON(),
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
 // ─── POST /auth/user/refresh-token ───────────────────────────────────────────
 const refreshToken = async (req, res, next) => {
   try {
@@ -384,6 +418,7 @@ module.exports = {
   signup,
   verifySignupOtp,
   login,
+  adminLogin,
   refreshToken,
   logout,
   forgotPassword,

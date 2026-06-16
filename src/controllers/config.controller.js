@@ -7,6 +7,20 @@ const LegalContent = require("../models/LegalContent.model");
 const SupportTicket = require("../models/SupportTicket.model");
 const { success, error } = require("../utils/response");
 
+const { LEGAL_TYPES } = LegalContent;
+
+// Human-readable default titles for each legal type
+const LEGAL_TITLES = {
+  terms: "Terms & Conditions",
+  privacy: "Privacy Policy",
+  "coin-earning": "Coin Earning & Rewards Policy",
+  "coin-redemption": "Coin Redemption Policy",
+  "community-guidelines": "Community Guidelines",
+  "data-deletion": "Data Deletion Policy",
+  "medical-disclaimer": "Medical / Fitness Disclaimer",
+  refund: "Refund & Cancellation Policy",
+};
+
 // ─── Internal: get or seed the single global config doc ──────────────────────
 async function getOrCreateConfig() {
   let cfg = await AppConfig.findOne({ key: "global" });
@@ -57,6 +71,30 @@ const getAppConfig = async (req, res, next) => {
       support: {
         email: cfg.support.email,
         website: cfg.support.website,
+        phone: cfg.support?.phone ?? '',
+        address: cfg.support?.address ?? '',
+      },
+      appLinks: {
+        playStore: cfg.appLinks?.playStore ?? '',
+        appStore: cfg.appLinks?.appStore ?? '',
+        universal: cfg.appLinks?.universal ?? '',
+        showBadges: cfg.appLinks?.showBadges ?? true,
+      },
+      social: {
+        instagram: cfg.social?.instagram ?? '',
+        twitter: cfg.social?.twitter ?? '',
+        facebook: cfg.social?.facebook ?? '',
+        youtube: cfg.social?.youtube ?? '',
+        linkedin: cfg.social?.linkedin ?? '',
+      },
+      website: {
+        siteName: cfg.website?.siteName ?? 'Athlofit',
+        defaultMetaTitle: cfg.website?.defaultMetaTitle ?? 'Athlofit — Walk. Earn. Shop.',
+        defaultMetaDescription:
+          cfg.website?.defaultMetaDescription ??
+          'Track your fitness, earn coins by walking, and shop premium health products.',
+        ogImage: cfg.website?.ogImage ?? '',
+        razorpayEnabled: cfg.website?.razorpayEnabled ?? false,
       },
       coin_config: {
         steps: {
@@ -248,6 +286,86 @@ const updatePrivacy = async (req, res, next) => {
     );
 
     return success(res, "Privacy policy updated", doc);
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ─── GET /config/legal ────────────────────────────────────────────────────────
+// Returns a list of all published legal documents (type, title, version, updatedAt).
+// Used by the website footer / legal index page.
+const getLegalList = async (req, res, next) => {
+  try {
+    const docs = await LegalContent.find({ isPublished: true })
+      .select("type title version updatedAt")
+      .sort({ title: 1 });
+
+    return success(res, "Legal documents fetched", docs);
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ─── GET /config/legal/:type ────────────────────────────────────────────────
+// Returns a single legal document by type. Seeds a placeholder if missing.
+const getLegalByType = async (req, res, next) => {
+  try {
+    const { type } = req.params;
+
+    if (!LEGAL_TYPES.includes(type)) {
+      return error(res, `Unknown legal document type: ${type}`, 404);
+    }
+
+    let doc = await LegalContent.findOne({ type });
+
+    if (!doc) {
+      doc = await LegalContent.create({
+        type,
+        title: LEGAL_TITLES[type] || type,
+        version: "1.0",
+        content: `# ${LEGAL_TITLES[type] || type}\n\nThis document has not been published yet. Please check back soon.`,
+        isPublished: false,
+      });
+    }
+
+    return success(res, "Legal document fetched", {
+      type: doc.type,
+      title: doc.title,
+      content: doc.content,
+      version: doc.version,
+      isPublished: doc.isPublished,
+      updatedAt: doc.updatedAt,
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ─── PUT /config/legal/:type  (admin only) ───────────────────────────────────
+const updateLegalByType = async (req, res, next) => {
+  try {
+    const { type } = req.params;
+    const { title, content, version, isPublished } = req.body;
+
+    if (!LEGAL_TYPES.includes(type)) {
+      return error(res, `Unknown legal document type: ${type}`, 400);
+    }
+    if (!content) return error(res, "content is required", 400);
+
+    const doc = await LegalContent.findOneAndUpdate(
+      { type },
+      {
+        $set: {
+          content,
+          title: title || LEGAL_TITLES[type] || type,
+          ...(version && { version }),
+          ...(isPublished !== undefined && { isPublished }),
+        },
+      },
+      { new: true, upsert: true, runValidators: true },
+    );
+
+    return success(res, "Legal document updated", doc);
   } catch (err) {
     next(err);
   }
@@ -515,6 +633,9 @@ module.exports = {
   updateTerms,
   getPrivacy,
   updatePrivacy,
+  getLegalList,
+  getLegalByType,
+  updateLegalByType,
   submitSupport,
   getFaqs,
   adminCreateFaq,
