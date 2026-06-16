@@ -332,8 +332,13 @@ const resetPassword = async (req, res, next) => {
 // ─── POST /auth/google ────────────────────────────────────────────────────────
 const googleLogin = async (req, res, next) => {
   try {
-    const { idToken, givenName, familyName, scopes, serverAuthCode, photo } = req.body;
+    const { idToken, givenName, familyName, scopes, serverAuthCode, photo, termsAccepted } = req.body;
     if (!idToken) return error(res, 'Google idToken is required', 400);
+
+    // Require terms & conditions acceptance
+    if (!termsAccepted) {
+      return error(res, 'You must accept the Terms & Conditions and Privacy Policy to log in', 400);
+    }
 
     // Verify idToken — accept both web and Android client IDs as valid audience
     const validAudiences = [
@@ -424,6 +429,28 @@ const googleLogin = async (req, res, next) => {
         { $set: updates },
         { new: true }
       );
+    }
+
+    // Record terms acceptance
+    if (!user.termsAccepted) {
+      user.termsAccepted = true;
+      user.termsAcceptedAt = new Date();
+      await user.save();
+    }
+
+    // Check if user is already logged in on another device
+    const activeSession = await RefreshToken.findOne({
+      user: user._id,
+      revoked: false,
+      expiresAt: { $gt: new Date() },
+    });
+
+    if (activeSession) {
+      return res.status(409).json({
+        success: false,
+        message: 'Your account is already logged in on another device. Please logout from that device first and then try again.',
+        data: { activeSession: true },
+      });
     }
 
     const accessToken  = generateAccessToken(user._id.toString());
