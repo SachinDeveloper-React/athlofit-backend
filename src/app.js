@@ -58,7 +58,7 @@ app.post(
 
 // ─── Rate limiting ────────────────────────────────────────────────────────────
 const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 min
+  windowMs: 3 * 60 * 60 * 1000, // 3 hours
   max: 100,
   standardHeaders: true,
   legacyHeaders: false,
