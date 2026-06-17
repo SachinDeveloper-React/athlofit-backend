@@ -115,6 +115,7 @@ app.use((req, res, next) => {
 // ─── Routes ───────────────────────────────────────────────────────────────────
 app.use('/auth',          authLimiter, authRoutes);
 app.use('/user',          userRoutes);
+app.use('/admin',          adminRoutes);
 app.use('/health',        healthRoutes);
 app.use('/gamification',  gamificationRoutes);
 app.use('/config',        configRoutes);
