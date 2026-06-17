@@ -4,7 +4,6 @@
 // Persists to MongoDB AND fires an FCM push — call this everywhere
 // instead of calling sendPushToUser directly.
 
-const mongoose = require('mongoose');
 const Notification = require('../models/Notification.model');
 const { sendPushToUser } = require('./pushNotification');
 
@@ -13,8 +12,10 @@ const MAX_PER_USER = 200;
 /**
  * Create a persisted notification and send an FCM push.
  *
- * The count→find→delete sequence is wrapped in a MongoDB session/transaction
- * so the notification cap is enforced atomically under concurrent requests.
+ * Note: the count→trim→create sequence is NOT wrapped in a transaction so it
+ * works on standalone MongoDB (transactions require a replica set). The cap is
+ * enforced best-effort — a rare concurrent race may briefly leave one extra
+ * notification, which is harmless and self-corrects on the next write.
  *
  * @param {string|ObjectId} userId
  * @param {object} opts
@@ -25,36 +26,28 @@ const MAX_PER_USER = 200;
  * @param {boolean} [opts.push=true]            — set false to skip FCM push
  */
 async function createNotification(userId, { type, title, message, data = {}, push = true }) {
-  const session = await mongoose.startSession();
-  session.startTransaction();
   try {
-    // 1. Count existing notifications inside the transaction
-    const count = await Notification.countDocuments({ user: userId }).session(session);
+    // 1. Count existing notifications for this user
+    const count = await Notification.countDocuments({ user: userId });
 
     // 2. If at or over the cap, delete the oldest to make room for the new one
     if (count >= MAX_PER_USER) {
       const oldest = await Notification.find({ user: userId })
         .sort({ createdAt: 1 })
         .limit(count - MAX_PER_USER + 1)
-        .select('_id')
-        .session(session);
-      await Notification.deleteMany({ _id: { $in: oldest.map(n => n._id) } }).session(session);
+        .select('_id');
+      await Notification.deleteMany({ _id: { $in: oldest.map((n) => n._id) } });
     }
 
-    // 3. Persist the new notification inside the same transaction
-    await Notification.create([{ user: userId, type, title, message, data }], { session });
+    // 3. Persist the new notification
+    await Notification.create({ user: userId, type, title, message, data });
 
-    await session.commitTransaction();
-
-    // 4. Fire FCM push (non-blocking, outside the transaction)
+    // 4. Fire FCM push (non-blocking)
     if (push) {
       sendPushToUser(userId, { title, body: message, data });
     }
   } catch (err) {
-    await session.abortTransaction();
     console.warn('[createNotification] failed:', err.message);
-  } finally {
-    session.endSession();
   }
 }
 
