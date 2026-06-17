@@ -38,6 +38,7 @@ const coinTransactionSchema = new mongoose.Schema(
         'HYDRATION_GOAL',        // Daily water goal
         'STREAK_BADGE',          // Streak milestone badge
         'ACHIEVEMENT',           // Advanced achievement claimed
+        'CHALLENGE',             // Challenge completed
         'REFERRAL_BONUS',        // Referral bonus
         'SHOP_PURCHASE',         // Spent on shop
         'SHOP_REFUND',           // Refund from order cancellation
@@ -55,7 +56,9 @@ const coinTransactionSchema = new mongoose.Schema(
       orderId: mongoose.Schema.Types.ObjectId,
       rewardId: String,
       achievementId: mongoose.Schema.Types.ObjectId,
+      challengeId: mongoose.Schema.Types.ObjectId,
       badgeKey: String,
+      periodKey: String,
       date: String,
     },
   },

@@ -8,6 +8,7 @@ const { success, error } = require('../utils/response');
 const { todayISO } = require('../utils/date');
 const { sendPushToUser } = require('../utils/pushNotification');
 const { createNotification } = require('../utils/createNotification');
+const { logCoinTransaction } = require('../utils/logCoinTransaction');
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -264,6 +265,22 @@ const syncChallengeProgress = async (userId) => {
           title:      challenge.title,
           emoji:      challenge.emoji,
           coinReward: challenge.coinReward,
+        });
+
+        // Log coin transaction for challenge completion
+        logCoinTransaction({
+          userId,
+          type: 'EARNED',
+          amount: challenge.coinReward,
+          balanceAfter: gam.coinsBalance,
+          source: 'CHALLENGE',
+          description: `Challenge: ${challenge.title}`,
+          metadata: {
+            rewardId: `challenge_${challenge._id}_${periodKey}`,
+            challengeId: challenge._id,
+            periodKey,
+            date: todayISO(),
+          },
         });
 
         // ── Push notification ─────────────────────────────────────────────
