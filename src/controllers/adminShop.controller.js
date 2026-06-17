@@ -6,6 +6,7 @@ const Category = require('../models/Category.model');
 const Coupon = require('../models/Coupon.model');
 const Order = require('../models/Order.model');
 const { success, error } = require('../utils/response');
+const { uploadImages, uploadImage } = require('../utils/uploadImage');
 
 const slugify = (text) =>
   text.toString().toLowerCase().trim()
@@ -21,17 +22,37 @@ const createProduct = async (req, res, next) => {
     if (!name || !description || price === undefined || !category) {
       return error(res, 'name, description, price and category are required', 400);
     }
+
+    // Collect image URLs: uploaded files (multipart) + any provided URLs.
+    const uploadedUrls = req.files?.length ? await uploadImages(req.files, 'products') : [];
+    let providedUrls = [];
+    if (Array.isArray(req.body.images)) providedUrls = req.body.images;
+    else if (typeof req.body.images === 'string' && req.body.images.trim()) {
+      // Accept JSON array string or comma-separated list
+      try { providedUrls = JSON.parse(req.body.images); }
+      catch { providedUrls = req.body.images.split(',').map((u) => u.trim()).filter(Boolean); }
+    }
+    const images = [...providedUrls, ...uploadedUrls];
+
+    // Tags may be array or comma-separated string (multipart)
+    let tags = [];
+    if (Array.isArray(req.body.tags)) tags = req.body.tags;
+    else if (typeof req.body.tags === 'string' && req.body.tags.trim())
+      tags = req.body.tags.split(',').map((t) => t.trim()).filter(Boolean);
+
     const product = await Product.create({
       name,
       description,
       price: Number(price),
-      discountedPrice: req.body.discountedPrice != null ? Number(req.body.discountedPrice) : null,
-      images: Array.isArray(req.body.images) ? req.body.images : [],
+      discountedPrice: req.body.discountedPrice != null && req.body.discountedPrice !== ''
+        ? Number(req.body.discountedPrice) : null,
+      images,
       category,
       stock: Number(req.body.stock) || 0,
-      tags: Array.isArray(req.body.tags) ? req.body.tags : [],
-      isFeatured: !!req.body.isFeatured,
-      isActive: req.body.isActive !== undefined ? !!req.body.isActive : true,
+      tags,
+      isFeatured: req.body.isFeatured === true || req.body.isFeatured === 'true',
+      isActive: req.body.isActive !== undefined
+        ? (req.body.isActive === true || req.body.isActive === 'true') : true,
       coinReward: Number(req.body.coinReward) || 0,
     });
     return success(res, 'Product created', product, 201);
@@ -45,11 +66,42 @@ const updateProduct = async (req, res, next) => {
     const product = await Product.findById(req.params.id);
     if (!product) return error(res, 'Product not found', 404);
 
-    const fields = ['name', 'description', 'images', 'category', 'tags', 'isFeatured', 'isActive'];
+    // Newly uploaded image files (multipart)
+    const uploadedUrls = req.files?.length ? await uploadImages(req.files, 'products') : [];
+
+    // Existing/kept image URLs sent by the client
+    let keptUrls;
+    if (req.body.images !== undefined) {
+      if (Array.isArray(req.body.images)) keptUrls = req.body.images;
+      else if (typeof req.body.images === 'string') {
+        try { keptUrls = JSON.parse(req.body.images); }
+        catch { keptUrls = req.body.images.split(',').map((u) => u.trim()).filter(Boolean); }
+      }
+    }
+
+    // Merge: if client provided an images list, use it + new uploads;
+    // otherwise just append new uploads to whatever already exists.
+    if (keptUrls !== undefined || uploadedUrls.length) {
+      const base = keptUrls !== undefined ? keptUrls : product.images;
+      product.images = [...base, ...uploadedUrls];
+    }
+
+    const fields = ['name', 'description', 'category'];
     for (const f of fields) if (req.body[f] !== undefined) product[f] = req.body[f];
+
+    if (req.body.tags !== undefined) {
+      if (Array.isArray(req.body.tags)) product.tags = req.body.tags;
+      else if (typeof req.body.tags === 'string')
+        product.tags = req.body.tags.split(',').map((t) => t.trim()).filter(Boolean);
+    }
+    if (req.body.isFeatured !== undefined)
+      product.isFeatured = req.body.isFeatured === true || req.body.isFeatured === 'true';
+    if (req.body.isActive !== undefined)
+      product.isActive = req.body.isActive === true || req.body.isActive === 'true';
     if (req.body.price !== undefined) product.price = Number(req.body.price);
     if (req.body.discountedPrice !== undefined)
-      product.discountedPrice = req.body.discountedPrice != null ? Number(req.body.discountedPrice) : null;
+      product.discountedPrice = req.body.discountedPrice != null && req.body.discountedPrice !== ''
+        ? Number(req.body.discountedPrice) : null;
     if (req.body.stock !== undefined) product.stock = Number(req.body.stock);
     if (req.body.coinReward !== undefined) product.coinReward = Number(req.body.coinReward);
 

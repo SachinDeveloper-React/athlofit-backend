@@ -1,6 +1,7 @@
 // src/controllers/blog.controller.js
 const Blog = require("../models/Blog.model");
 const { success, error } = require("../utils/response");
+const { uploadImage, deleteImage } = require("../utils/uploadImage");
 
 // BUG-safe regex escaping for search
 const escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -151,17 +152,29 @@ const adminCreateBlog = async (req, res, next) => {
       return error(res, "title and content are required", 400);
     }
 
+    // Cover image: prefer an uploaded file, fall back to a provided URL.
+    let coverImageUrl = coverImage || "";
+    if (req.file) {
+      coverImageUrl = await uploadImage(req.file, "blogs");
+    }
+
+    // tags may arrive as an array (JSON) or comma-separated string (multipart)
+    let parsedTags = [];
+    if (Array.isArray(tags)) parsedTags = tags;
+    else if (typeof tags === "string" && tags.trim())
+      parsedTags = tags.split(",").map((t) => t.trim()).filter(Boolean);
+
     const blog = await Blog.create({
       title,
       content,
       excerpt,
-      coverImage,
+      coverImage: coverImageUrl,
       category,
-      tags: Array.isArray(tags) ? tags : [],
+      tags: parsedTags,
       author,
       metaTitle,
       metaDescription,
-      isPublished: !!isPublished,
+      isPublished: isPublished === true || isPublished === "true",
     });
 
     return success(res, "Blog created", blog, 201);
@@ -176,9 +189,30 @@ const adminUpdateBlog = async (req, res, next) => {
     const blog = await Blog.findById(req.params.id);
     if (!blog) return error(res, "Blog post not found", 404);
 
+    // If a new cover image file was uploaded, push it to S3 and replace.
+    if (req.file) {
+      const oldImage = blog.coverImage;
+      blog.coverImage = await uploadImage(req.file, "blogs");
+      // Best-effort cleanup of the previous S3 image.
+      if (oldImage) deleteImage(oldImage).catch(() => {});
+    } else if (req.body.coverImage !== undefined) {
+      blog.coverImage = req.body.coverImage;
+    }
+
+    // Normalize tags (array or comma-separated string)
+    if (req.body.tags !== undefined) {
+      if (Array.isArray(req.body.tags)) blog.tags = req.body.tags;
+      else if (typeof req.body.tags === "string")
+        blog.tags = req.body.tags.split(",").map((t) => t.trim()).filter(Boolean);
+    }
+
+    if (req.body.isPublished !== undefined) {
+      blog.isPublished = req.body.isPublished === true || req.body.isPublished === "true";
+    }
+
     const fields = [
-      "title", "content", "excerpt", "coverImage", "category",
-      "tags", "author", "metaTitle", "metaDescription", "isPublished",
+      "title", "content", "excerpt", "category",
+      "author", "metaTitle", "metaDescription",
     ];
     for (const f of fields) {
       if (req.body[f] !== undefined) blog[f] = req.body[f];
@@ -196,6 +230,8 @@ const adminDeleteBlog = async (req, res, next) => {
   try {
     const blog = await Blog.findByIdAndDelete(req.params.id);
     if (!blog) return error(res, "Blog post not found", 404);
+    // Best-effort cleanup of the cover image from S3.
+    if (blog.coverImage) deleteImage(blog.coverImage).catch(() => {});
     return success(res, "Blog deleted", { id: req.params.id });
   } catch (err) {
     next(err);

@@ -52,6 +52,7 @@ const couponSchema = new mongoose.Schema(
   },
 );
 
-couponSchema.index({ code: 1 });
+// Note: `code` already has a unique index via `unique: true` on the field.
+// Do not add couponSchema.index({ code: 1 }) — it would create a duplicate index.
 
 module.exports = mongoose.model('Coupon', couponSchema);

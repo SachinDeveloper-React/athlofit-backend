@@ -6,7 +6,7 @@ const HealthActivity = require("../models/HealthActivity.model");
 const Notification = require("../models/Notification.model");
 const { success, error } = require("../utils/response");
 const { todayISO } = require("../utils/date");
-const { uploadBuffer } = require("../utils/cloudinary");
+const { uploadImage } = require("../utils/uploadImage");
 const { createNotification } = require("../utils/createNotification");
 
 // ─── GET /user/profile ────────────────────────────────────────────────────────
@@ -208,11 +208,10 @@ const uploadAvatar = async (req, res, next) => {
   try {
     if (!req.file) return error(res, "No image file provided", 400);
 
-    const avatarUrl = await uploadBuffer(
-      req.file.buffer,
-      "athlofit/avatars",
-      `user_${req.user._id}`, // deterministic public_id — overwrites previous avatar
-    );
+    const avatarUrl = await uploadImage(req.file, "avatars", {
+      faceCrop: true,
+      publicId: `user_${req.user._id}`, // Cloudinary fallback: deterministic id
+    });
 
     const user = await User.findByIdAndUpdate(
       req.user._id,

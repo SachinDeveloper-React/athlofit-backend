@@ -2,6 +2,7 @@
 const express = require('express');
 const router = express.Router();
 const { protect, adminOnly } = require('../middleware/auth.middleware');
+const { imageUpload } = require('../middleware/upload.middleware');
 
 const {
   getUsers,
@@ -45,8 +46,8 @@ router.get('/users/:id/gamification', getUserGamification);
 router.get('/users/:id/orders', getUserOrders);
 
 // ── Shop: Products ──────────────────────────────────────────────────────────
-router.post('/shop/products', createProduct);
-router.put('/shop/products/:id', updateProduct);
+router.post('/shop/products', imageUpload.array('images', 8), createProduct);
+router.put('/shop/products/:id', imageUpload.array('images', 8), updateProduct);
 router.delete('/shop/products/:id', deleteProduct);
 
 // ── Shop: Categories ──────────────────────────────────────────────────────────
