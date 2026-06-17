@@ -38,6 +38,15 @@ const errorHandler = (err, req, res, next) => {
     });
   }
 
+  // Payload too large (body exceeds express.json/urlencoded limit)
+  if (err.type === 'entity.too.large' || err.statusCode === 413 || /request entity too large/i.test(err.message || '')) {
+    return res.status(413).json({
+      success: false,
+      message: 'Request payload is too large. Please reduce the content size or upload images as files instead of base64.',
+      data: null,
+    });
+  }
+
   // Multer upload errors (file too large, unexpected field, wrong type)
   if (err.name === 'MulterError' || /Only image files/.test(err.message || '')) {
     const msg =

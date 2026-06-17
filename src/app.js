@@ -81,8 +81,8 @@ const authLimiter = rateLimit({
 });
 
 // ─── Body parsing ─────────────────────────────────────────────────────────────
-app.use(express.json({ limit: '10kb' }));
-app.use(express.urlencoded({ extended: true }));
+app.use(express.json({ limit: '2mb' }));
+app.use(express.urlencoded({ extended: true, limit: '2mb' }));
 
 // ─── Logging ──────────────────────────────────────────────────────────────────
 if (process.env.NODE_ENV === 'development') {
