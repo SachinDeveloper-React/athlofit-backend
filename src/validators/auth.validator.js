@@ -23,6 +23,12 @@ const loginRules = [
     }),
 ];
 
+// Admin panel login — no termsAccepted requirement (admins aren't end-users)
+const adminLoginRules = [
+  body('email').isEmail().normalizeEmail().withMessage('Valid email required'),
+  body('password').notEmpty().withMessage('Password is required'),
+];
+
 const verifyOtpRules = [
   body('email').isEmail().withMessage('Valid email required'),
   body('otp').isLength({ min: 6, max: 6 }).withMessage('OTP must be 6 digits'),
@@ -47,6 +53,7 @@ const resendOtpRules = [
 module.exports = {
   signupRules,
   loginRules,
+  adminLoginRules,
   verifyOtpRules,
   forgotPasswordRules,
   resetPasswordRules,

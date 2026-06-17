@@ -19,6 +19,7 @@ const shopRoutes        = require('./routes/shop.routes');
 const blogRoutes        = require('./routes/blog.routes');
 const paymentRoutes     = require('./routes/payment.routes');
 const uploadRoutes      = require('./routes/upload.routes');
+const adminRoutes       = require('./routes/admin.routes');
 const nutritionRoutes   = require('./routes/nutrition.routes');
 const referralRoutes    = require('./routes/referral.routes');
 const challengeRoutes   = require('./routes/challenge.routes');
@@ -58,8 +59,8 @@ app.post(
 
 // ─── Rate limiting ────────────────────────────────────────────────────────────
 const limiter = rateLimit({
-  windowMs: 3 * 60 * 60 * 1000, // 3 hours
-  max: 100,
+  windowMs: 15 * 60 * 1000, // 15 min
+  max: 1000,
   standardHeaders: true,
   legacyHeaders: false,
   message: { success: false, message: 'Too many requests, please try again later.' },
@@ -73,7 +74,9 @@ app.use((req, res, next) => {
 // Auth endpoints get tighter limiting
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
-  max: 20,
+  max: 200,
+  standardHeaders: true,
+  legacyHeaders: false,
   message: { success: false, message: 'Too many auth requests, please try again later.' },
 });
 
@@ -112,6 +115,7 @@ app.use((req, res, next) => {
 // ─── Routes ───────────────────────────────────────────────────────────────────
 app.use('/auth',          authLimiter, authRoutes);
 app.use('/user',          userRoutes);
+app.use('/admin',          adminRoutes);
 app.use('/health',        healthRoutes);
 app.use('/gamification',  gamificationRoutes);
 app.use('/config',        configRoutes);
