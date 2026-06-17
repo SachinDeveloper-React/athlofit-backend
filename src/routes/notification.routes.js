@@ -10,7 +10,7 @@ const sendRules = [
   body('title').notEmpty().withMessage('title is required'),
   body('body').notEmpty().withMessage('body is required'),
   body('type').optional()
-    .isIn(['GOAL', 'HYDRATION', 'PRODUCT', 'CHALLENGE', 'COIN', 'SECURITY', 'HEART'])
+    .isIn(['GOAL', 'HYDRATION', 'PRODUCT', 'CHALLENGE', 'COIN', 'SECURITY', 'HEART', 'SYSTEM'])
     .withMessage('Invalid notification type'),
   body('target').optional()
     .isIn(['all','ios','android','user','users','streak','coins','gender','provider','profileComplete','newUsers'])
