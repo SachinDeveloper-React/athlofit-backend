@@ -11,6 +11,7 @@ const {
   deleteUser,
   getUserHealth,
   getUserGamification,
+  getUserAchievements,
   getUserOrders,
   getDashboardStats,
 } = require('../controllers/admin.controller');
@@ -43,6 +44,7 @@ router.patch('/users/:id/role', updateUserRole);
 router.delete('/users/:id', deleteUser);
 router.get('/users/:id/health', getUserHealth);
 router.get('/users/:id/gamification', getUserGamification);
+router.get('/users/:id/achievements', getUserAchievements);
 router.get('/users/:id/orders', getUserOrders);
 
 // ── Shop: Products ──────────────────────────────────────────────────────────

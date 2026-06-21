@@ -6,6 +6,8 @@ const Order = require('../models/Order.model');
 const Product = require('../models/Product.model');
 const Gamification = require('../models/Gamification.model');
 const HealthActivity = require('../models/HealthActivity.model');
+const Achievement = require('../models/Achievement.model');
+const AppConfig = require('../models/AppConfig.model');
 const { success, error } = require('../utils/response');
 
 const escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -103,12 +105,117 @@ const deleteUser = async (req, res, next) => {
 };
 
 // ─── GET /admin/users/:id/health ─────────────────────────────────────────────
+// Returns recent daily activity + summary totals + coin-per-step rate.
 const getUserHealth = async (req, res, next) => {
   try {
     const activities = await HealthActivity.find({ user: req.params.id })
       .sort({ date: -1 })
-      .limit(30);
-    return success(res, 'User health fetched', activities);
+      .limit(60);
+
+    // Pull the coin-per-step rate from app config (per 100 steps).
+    const cfg = await AppConfig.findOne({ key: 'global' });
+    const ratePer100 = cfg?.coin_config?.steps?.rate_per_100_steps ?? 0.5;
+
+    // Aggregate lifetime totals
+    const agg = await HealthActivity.aggregate([
+      { $match: { user: new (require('mongoose').Types.ObjectId)(req.params.id) } },
+      {
+        $group: {
+          _id: null,
+          totalSteps: { $sum: '$steps' },
+          totalDistance: { $sum: '$distance' },
+          totalCalories: { $sum: '$calories' },
+          totalHydration: { $sum: '$hydration' },
+          daysTracked: { $sum: 1 },
+          goalsMet: { $sum: { $cond: ['$goalMet', 1, 0] } },
+        },
+      },
+    ]);
+
+    const totals = agg[0] || {
+      totalSteps: 0, totalDistance: 0, totalCalories: 0,
+      totalHydration: 0, daysTracked: 0, goalsMet: 0,
+    };
+
+    // Decorate each day with the coins those steps are worth.
+    const days = activities.map((a) => {
+      const obj = a.toJSON();
+      obj.stepCoins = Math.round((a.steps / 100) * ratePer100 * 100) / 100;
+      return obj;
+    });
+
+    return success(res, 'User health fetched', {
+      days,
+      summary: {
+        ...totals,
+        totalStepCoins: Math.round((totals.totalSteps / 100) * ratePer100 * 100) / 100,
+        ratePer100Steps: ratePer100,
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ─── GET /admin/users/:id/achievements ───────────────────────────────────────
+// Returns all achievements with the user's claim status + progress.
+const getUserAchievements = async (req, res, next) => {
+  try {
+    const mongoose = require('mongoose');
+    const userId = req.params.id;
+
+    const [achievements, gam, healthAgg, ordersCount] = await Promise.all([
+      Achievement.find({}).sort({ targetValue: 1 }),
+      Gamification.findOne({ user: userId }),
+      HealthActivity.aggregate([
+        { $match: { user: new mongoose.Types.ObjectId(userId) } },
+        {
+          $group: {
+            _id: null,
+            totalSteps: { $sum: '$steps' },
+            totalWater: { $sum: '$hydration' },
+            maxDailySteps: { $max: '$steps' },
+          },
+        },
+      ]),
+      Order.countDocuments({ user: userId, status: { $ne: 'CANCELLED' } }),
+    ]);
+
+    const stats = healthAgg[0] || { totalSteps: 0, totalWater: 0, maxDailySteps: 0 };
+    const claimedIds = new Set(
+      (gam?.claimedAchievements || []).map((c) => c.achievementId?.toString()),
+    );
+
+    const currentFor = (type) => {
+      switch (type) {
+        case 'STEPS_TOTAL': return stats.totalSteps;
+        case 'STEPS_DAILY': return stats.maxDailySteps;
+        case 'WATER_TOTAL': return stats.totalWater;
+        case 'ORDERS_COUNT': return ordersCount;
+        default: return 0;
+      }
+    };
+
+    const result = achievements.map((a) => {
+      const current = currentFor(a.criteriaType);
+      const claimed = claimedIds.has(a._id.toString());
+      return {
+        _id: a._id,
+        key: a.key,
+        title: a.title,
+        description: a.description,
+        reward: a.reward,
+        icon: a.icon,
+        criteriaType: a.criteriaType,
+        targetValue: a.targetValue,
+        current,
+        progress: Math.min(100, Math.round((current / a.targetValue) * 100)),
+        achieved: current >= a.targetValue,
+        claimed,
+      };
+    });
+
+    return success(res, 'User achievements fetched', result);
   } catch (err) {
     next(err);
   }
@@ -118,7 +225,21 @@ const getUserHealth = async (req, res, next) => {
 const getUserGamification = async (req, res, next) => {
   try {
     const gam = await Gamification.findOne({ user: req.params.id });
-    return success(res, 'User gamification fetched', gam);
+    if (!gam) return success(res, 'No gamification record', null);
+
+    // Attach badge definitions so the admin sees titles/emojis, not just keys.
+    let badges = [];
+    try {
+      const BadgeDefinition = require('../models/BadgeDefinition.model');
+      const defs = await BadgeDefinition.find({}).sort({ order: 1 });
+      badges = gam.getBadgeList(defs);
+    } catch {
+      badges = gam.badgeList || [];
+    }
+
+    const data = gam.toJSON();
+    data.badges = badges;
+    return success(res, 'User gamification fetched', data);
   } catch (err) {
     next(err);
   }
@@ -172,6 +293,7 @@ module.exports = {
   deleteUser,
   getUserHealth,
   getUserGamification,
+  getUserAchievements,
   getUserOrders,
   getDashboardStats,
 };
