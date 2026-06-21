@@ -27,6 +27,7 @@
     "mongoose": "^8.4.1",
     "morgan": "^1.10.0",
     "multer": "^2.1.1",
+    "node-cron": "^3.0.3",
     "nodemailer": "^6.9.13",
     "razorpay": "^2.9.6",
     "uuid": "^9.0.1"

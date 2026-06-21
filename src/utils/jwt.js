@@ -5,8 +5,8 @@ const RefreshToken = require("../models/RefreshToken.model");
 
 // ─── Generate tokens ──────────────────────────────────────────────────────────
 
-const generateAccessToken = (userId) => {
-  return jwt.sign({ sub: userId, type: "access" }, process.env.JWT_SECRET, {
+const generateAccessToken = (userId, tokenVersion = 0) => {
+  return jwt.sign({ sub: userId, type: "access", tv: tokenVersion }, process.env.JWT_SECRET, {
     expiresIn: process.env.JWT_EXPIRES_IN || "15m",
   });
 };
@@ -100,7 +100,10 @@ const rotateRefreshToken = async (oldToken, ip, userAgent) => {
     userAgent,
     stored.absoluteExpiresAt ?? null,
   );
-  const accessToken = generateAccessToken(stored.user.toString());
+  // Fetch current tokenVersion for the new access token
+  const User = require('../models/User.model');
+  const tokenUser = await User.findById(stored.user).select('tokenVersion');
+  const accessToken = generateAccessToken(stored.user.toString(), tokenUser?.tokenVersion ?? 0);
 
   return { accessToken, refreshToken: newToken, userId: stored.user };
 };
@@ -108,7 +111,10 @@ const rotateRefreshToken = async (oldToken, ip, userAgent) => {
 // ─── Revoke all user tokens ───────────────────────────────────────────────────
 
 const revokeAllUserTokens = async (userId) => {
-  await RefreshToken.updateMany({ user: userId }, { revoked: true });
+  await RefreshToken.updateMany(
+    { user: userId, revoked: false },
+    { $set: { revoked: true } },
+  );
 };
 
 module.exports = {

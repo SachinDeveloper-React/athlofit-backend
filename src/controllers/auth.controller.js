@@ -2,6 +2,7 @@
 const User = require('../models/User.model');
 const Gamification = require('../models/Gamification.model');
 const RefreshToken = require('../models/RefreshToken.model');
+const admin = require('../config/firebase.admin');
 const { generateAccessToken, saveRefreshToken, rotateRefreshToken, revokeAllUserTokens } = require('../utils/jwt');
 const { generateOtp, getOtpExpiry, sendOtpEmail } = require('../utils/otp');
 const { success, error } = require('../utils/response');
@@ -75,7 +76,7 @@ const verifySignupOtp = async (req, res, next) => {
       { upsert: true, new: true, setDefaultsOnInsert: true }
     );
 
-    const accessToken = generateAccessToken(user._id.toString());
+    const accessToken = generateAccessToken(user._id.toString(), user.tokenVersion);
     const refreshToken = await saveRefreshToken(
       user._id,
       req.ip,
@@ -104,7 +105,7 @@ const login = async (req, res, next) => {
       return error(res, 'You must accept the Terms & Conditions and Privacy Policy to log in', 400);
     }
     
-    const user = await User.findOne({ email }).select('+password');
+    let user = await User.findOne({ email }).select('+password');
     if (!user || !(await user.comparePassword(password))) {
       return error(res, 'Invalid email or password', 401);
     }
@@ -149,11 +150,94 @@ const login = async (req, res, next) => {
     });
 
     if (activeSession) {
-      return res.status(409).json({
-        success: false,
-        message: 'Your account is already logged in on another device. Please logout from that device first and then try again.',
-        data: { activeSession: true },
-      });
+      // If the user explicitly requests force login, skip the FCM check
+      // and revoke old sessions directly (handles uninstall case where
+      // FCM token stays valid for hours after app removal).
+      const forceLogin = req.body.forceLogin === true;
+
+      if (forceLogin) {
+        await RefreshToken.updateMany(
+          { user: user._id, revoked: false },
+          { $set: { revoked: true } },
+        );
+        await User.updateOne(
+          { _id: user._id },
+          { $set: { fcmToken: null }, $inc: { tokenVersion: 1 } },
+        );
+        // Refresh user object to get the updated tokenVersion for the new JWT
+        user = await User.findById(user._id).select('-password');
+      } else {
+        // Verify the old device still has the app by sending a silent push
+        const oldFcmToken = user.fcmToken;
+        let oldDeviceAlive = false;
+
+        if (oldFcmToken) {
+          try {
+            // Send silent data-only message to check token validity
+            await admin.messaging().send({
+              token: oldFcmToken,
+              data: { type: 'heartbeat', timestamp: String(Date.now()) },
+              android: { priority: 'normal' },
+              apns: {
+                headers: { 'apns-priority': '5' },
+                payload: { aps: { 'content-available': 1 } },
+              },
+            });
+            // Token is valid — old device still has the app installed
+            oldDeviceAlive = true;
+          } catch (fcmErr) {
+            const code = fcmErr?.errorInfo?.code || fcmErr?.code;
+            if (
+              code === 'messaging/registration-token-not-registered' ||
+              code === 'messaging/invalid-registration-token'
+            ) {
+              // Token is stale — app was uninstalled on old device
+              oldDeviceAlive = false;
+            } else {
+              // Other FCM error (network issue, etc.) — assume device is alive to be safe
+              oldDeviceAlive = true;
+            }
+          }
+        }
+
+        if (oldDeviceAlive) {
+          // Old device is still active — send alert notification and block login
+          try {
+            await admin.messaging().send({
+              token: oldFcmToken,
+              notification: {
+                title: 'Login Attempt Detected',
+                body: 'Someone is trying to log in to your account from another device. If this wasn\'t you, please secure your account.',
+              },
+              data: { type: 'SECURITY', screen: 'AccountScreen' },
+              android: {
+                priority: 'high',
+                notification: { channelId: 'athlofit_push', sound: 'default' },
+              },
+              apns: { payload: { aps: { sound: 'default', badge: 1 } } },
+            });
+          } catch (_) {
+            // Notification send failed — still block the login
+          }
+
+          return res.status(409).json({
+            success: false,
+            message: 'Your account is already logged in on another device. A security alert has been sent to that device.',
+            data: { activeSession: true },
+          });
+        } else {
+          // Old device no longer has the app — auto-revoke old sessions and allow login
+          await RefreshToken.updateMany(
+            { user: user._id, revoked: false },
+            { $set: { revoked: true } },
+          );
+          // Clear stale FCM token
+          await User.updateOne(
+            { _id: user._id },
+            { $set: { fcmToken: null } },
+          );
+        }
+      }
     }
 
     // Ensure gamification doc exists
@@ -163,7 +247,7 @@ const login = async (req, res, next) => {
       { upsert: true, new: true, setDefaultsOnInsert: true }
     );
 
-    const accessToken = generateAccessToken(user._id.toString());
+    const accessToken = generateAccessToken(user._id.toString(), user.tokenVersion);
     const refreshToken = await saveRefreshToken(
       user._id,
       req.ip,
@@ -200,7 +284,7 @@ const adminLogin = async (req, res, next) => {
       return error(res, 'Access denied. Admin account required.', 403);
     }
 
-    const accessToken = generateAccessToken(user._id.toString());
+    const accessToken = generateAccessToken(user._id.toString(), user.tokenVersion);
     const refreshToken = await saveRefreshToken(
       user._id,
       req.ip,
@@ -241,6 +325,11 @@ const refreshToken = async (req, res, next) => {
 const logout = async (req, res, next) => {
   try {
     await revokeAllUserTokens(req.user._id);
+    // Clear FCM token so the device is no longer considered "active"
+    await User.updateOne(
+      { _id: req.user._id },
+      { $set: { fcmToken: null } },
+    );
     return success(res, 'Logged out successfully');
   } catch (err) {
     next(err);
@@ -446,14 +535,83 @@ const googleLogin = async (req, res, next) => {
     });
 
     if (activeSession) {
-      return res.status(409).json({
-        success: false,
-        message: 'Your account is already logged in on another device. Please logout from that device first and then try again.',
-        data: { activeSession: true },
-      });
+      const forceLogin = req.body.forceLogin === true;
+
+      if (forceLogin) {
+        await RefreshToken.updateMany(
+          { user: user._id, revoked: false },
+          { $set: { revoked: true } },
+        );
+        await User.updateOne(
+          { _id: user._id },
+          { $set: { fcmToken: null }, $inc: { tokenVersion: 1 } },
+        );
+        user = await User.findById(user._id).select('-password');
+      } else {
+        const oldFcmToken = user.fcmToken;
+        let oldDeviceAlive = false;
+
+        if (oldFcmToken) {
+          try {
+            await admin.messaging().send({
+              token: oldFcmToken,
+              data: { type: 'heartbeat', timestamp: String(Date.now()) },
+              android: { priority: 'normal' },
+              apns: {
+                headers: { 'apns-priority': '5' },
+                payload: { aps: { 'content-available': 1 } },
+              },
+            });
+            oldDeviceAlive = true;
+          } catch (fcmErr) {
+            const code = fcmErr?.errorInfo?.code || fcmErr?.code;
+            if (
+              code === 'messaging/registration-token-not-registered' ||
+              code === 'messaging/invalid-registration-token'
+            ) {
+              oldDeviceAlive = false;
+            } else {
+              oldDeviceAlive = true;
+            }
+          }
+        }
+
+        if (oldDeviceAlive) {
+          try {
+            await admin.messaging().send({
+              token: oldFcmToken,
+              notification: {
+                title: 'Login Attempt Detected',
+                body: 'Someone is trying to log in to your account from another device. If this wasn\'t you, please secure your account.',
+              },
+              data: { type: 'SECURITY', screen: 'AccountScreen' },
+              android: {
+                priority: 'high',
+                notification: { channelId: 'athlofit_push', sound: 'default' },
+              },
+              apns: { payload: { aps: { sound: 'default', badge: 1 } } },
+            });
+          } catch (_) {}
+
+          return res.status(409).json({
+            success: false,
+            message: 'Your account is already logged in on another device. A security alert has been sent to that device.',
+            data: { activeSession: true },
+          });
+        } else {
+          await RefreshToken.updateMany(
+            { user: user._id, revoked: false },
+            { $set: { revoked: true } },
+          );
+          await User.updateOne(
+            { _id: user._id },
+            { $set: { fcmToken: null } },
+          );
+        }
+      }
     }
 
-    const accessToken  = generateAccessToken(user._id.toString());
+    const accessToken  = generateAccessToken(user._id.toString(), user.tokenVersion);
     const refreshToken = await saveRefreshToken(user._id, req.ip, req.headers['user-agent']);
 
     return success(res, 'Google login successful', {

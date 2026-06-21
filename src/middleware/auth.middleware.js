@@ -18,6 +18,17 @@ const protect = async (req, res, next) => {
       return error(res, 'User not found', 401);
     }
 
+    // Verify token version — rejects tokens issued before a forced logout
+    if (decoded.tv !== undefined && decoded.tv !== user.tokenVersion) {
+      return error(res, 'Session expired. Please log in again.', 401);
+    }
+
+    // Track last activity (fire-and-forget, throttled to once per 5 min to reduce DB writes)
+    const FIVE_MINUTES = 5 * 60 * 1000;
+    if (!user.lastActiveAt || Date.now() - user.lastActiveAt.getTime() > FIVE_MINUTES) {
+      User.updateOne({ _id: user._id }, { $set: { lastActiveAt: new Date() } }).catch(() => {});
+    }
+
     req.user = user;
     next();
   } catch (err) {
