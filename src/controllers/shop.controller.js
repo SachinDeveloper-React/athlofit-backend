@@ -1,5 +1,4 @@
 // src/controllers/shop.controller.js
-const mongoose = require('mongoose');
 const Product = require('../models/Product.model');
 const Category = require('../models/Category.model');
 const Order = require('../models/Order.model');
@@ -304,30 +303,37 @@ const buyWithCoins = async (req, res, next) => {
       return error(res, `Insufficient coins. Need ${finalCoinCost} but you have ${gamification.coinsBalance}.`, 400);
     }
 
-    // BUG-029: Wrap stock decrement, coin deduction, and order creation in a
-    // MongoDB transaction so any failure rolls back all changes atomically.
-    const session = await mongoose.startSession();
-    session.startTransaction();
+    // Perform stock decrement, coin deduction, and order creation sequentially.
+    // Uses atomic per-document operations with manual rollback on failure.
     let order;
+    const decrementedItems = [];
     try {
-      // Deduct stock
+      // Deduct stock atomically per product
       for (const item of items) {
-        await Product.findByIdAndUpdate(item.productId, { $inc: { stock: -item.quantity } }, { session });
+        const updated = await Product.findOneAndUpdate(
+          { _id: item.productId, stock: { $gte: item.quantity } },
+          { $inc: { stock: -item.quantity } },
+          { new: true },
+        );
+        if (!updated) {
+          throw new Error(`Insufficient stock for product ${item.productId}`);
+        }
+        decrementedItems.push(item);
       }
 
       // BUG-030: Use Math.round to prevent floating-point drift in coin balance
       gamification.coinsBalance = Math.round(gamification.coinsBalance - finalCoinCost);
-      await gamification.save({ session });
+      await gamification.save();
 
       // Mark coupon as used
       if (appliedCoupon) {
         appliedCoupon.usageCount += 1;
         appliedCoupon.usedBy.push(req.user._id);
-        await appliedCoupon.save({ session });
+        await appliedCoupon.save();
       }
 
       // Create Order
-      [order] = await Order.create([{
+      order = await Order.create({
         user: req.user._id,
         items: orderItems,
         totalPrice: totalStandardPrice,
@@ -337,14 +343,16 @@ const buyWithCoins = async (req, res, next) => {
         paymentMethod: 'COIN_PURCHASE',
         status: 'PAID',
         shippingAddress: shippingAddress || {},
-      }], { session });
-
-      await session.commitTransaction();
+      });
     } catch (txErr) {
-      await session.abortTransaction();
+      // Rollback: restore stock for already decremented products
+      for (const item of decrementedItems) {
+        await Product.findOneAndUpdate(
+          { _id: item.productId },
+          { $inc: { stock: item.quantity } },
+        );
+      }
       throw txErr;
-    } finally {
-      session.endSession();
     }
 
     // Log coin transaction for purchase

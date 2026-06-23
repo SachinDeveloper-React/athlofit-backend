@@ -1,7 +1,6 @@
 // src/controllers/payment.controller.js
 // ─── Razorpay order creation, verification, and webhook handling ─────────────
 
-const mongoose = require('mongoose');
 const Product = require('../models/Product.model');
 const Order = require('../models/Order.model');
 const { success, error } = require('../utils/response');
@@ -138,33 +137,36 @@ const verifyPayment = async (req, res, next) => {
       return success(res, 'Payment already verified', { order });
     }
 
-    // Finalize: decrement stock + mark paid inside a transaction
-    const session = await mongoose.startSession();
-    session.startTransaction();
+    // Finalize: decrement stock + mark paid using atomic operations
+    // (No transaction needed – each findOneAndUpdate is atomic per-document)
+    const decrementedProducts = [];
     try {
       for (const item of order.items) {
         const updated = await Product.findOneAndUpdate(
           { _id: item.product, stock: { $gte: item.quantity } },
           { $inc: { stock: -item.quantity } },
-          { session, new: true },
+          { new: true },
         );
         if (!updated) {
           throw new Error(`Insufficient stock for ${item.name}`);
         }
+        decrementedProducts.push(item);
       }
 
       order.status = 'PAID';
       order.payment.razorpayPaymentId = razorpayPaymentId;
       order.payment.razorpaySignature = razorpaySignature;
       order.payment.status = 'CAPTURED';
-      await order.save({ session });
-
-      await session.commitTransaction();
-    } catch (txErr) {
-      await session.abortTransaction();
-      throw txErr;
-    } finally {
-      session.endSession();
+      await order.save();
+    } catch (stockErr) {
+      // Rollback: restore stock for any products already decremented
+      for (const item of decrementedProducts) {
+        await Product.findOneAndUpdate(
+          { _id: item.product },
+          { $inc: { stock: item.quantity } },
+        );
+      }
+      throw stockErr;
     }
 
     createNotification(req.user._id, {
