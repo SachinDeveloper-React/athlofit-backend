@@ -331,10 +331,36 @@ async function _updateStreak(userId, date) {
       gam.streakDays += 1;
       gam.lastActiveDate = date;
       dirty = true;
+
+      // Grant freeze/life protections after streak grows.
+      const { getStreakConfig, grantProtections } = require('../utils/streak');
+      const sCfg = await getStreakConfig();
+      grantProtections(gam, sCfg);
     } else {
-      // Known gap — genuine streak break
-      gam.streakDays = 1;
-      gam.lastActiveDate = date;
+      // Known gap — attempt freeze/life protection before breaking.
+      const { getStreakConfig, attemptProtect } = require('../utils/streak');
+      const sCfg = await getStreakConfig();
+      const protection = attemptProtect(gam, sCfg);
+
+      if (protection.protected) {
+        // Streak saved! Mark today as active, do NOT reset.
+        gam.lastActiveDate = date;
+      } else {
+        // Streak broken — attemptProtect already set streakDays to 0.
+        // Now start a new streak at 1 for today's activity.
+        gam.streakDays = 1;
+        gam.lastActiveDate = date;
+
+        // Send motivational push notification (fire-and-forget).
+        try {
+          createNotification(userId, {
+            type: 'STREAK',
+            title: "💪 Don't worry — start fresh!",
+            message: 'Your streak broke, but every step counts. Get back on track today!',
+            data: { screen: 'Tracker' },
+          });
+        } catch (_) { /* non-critical */ }
+      }
       dirty = true;
     }
 

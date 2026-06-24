@@ -14,6 +14,28 @@ const slugify = (text) =>
     .replace(/\s+/g, '-')
     .replace(/-+/g, '-');
 
+// Parse + sanitize a variants payload (array or JSON string from multipart).
+function normalizeVariants(input) {
+  if (input === undefined) return undefined; // signal "no change"
+  let arr = input;
+  if (typeof input === 'string') {
+    if (!input.trim()) return [];
+    try { arr = JSON.parse(input); } catch { return []; }
+  }
+  if (!Array.isArray(arr)) return [];
+  return arr
+    .map((v) => ({
+      size: (v.size || '').toString().trim(),
+      color: (v.color || '').toString().trim(),
+      stock: Math.max(0, Number(v.stock) || 0),
+      sku: (v.sku || '').toString().trim(),
+      priceOverride: v.priceOverride != null && v.priceOverride !== ''
+        ? Number(v.priceOverride) : null,
+    }))
+    // drop fully-empty rows
+    .filter((v) => v.size || v.color || v.stock || v.sku);
+}
+
 // ─── PRODUCTS ─────────────────────────────────────────────────────────────────
 
 const createProduct = async (req, res, next) => {
@@ -54,6 +76,7 @@ const createProduct = async (req, res, next) => {
       isActive: req.body.isActive !== undefined
         ? (req.body.isActive === true || req.body.isActive === 'true') : true,
       coinReward: Number(req.body.coinReward) || 0,
+      variants: normalizeVariants(req.body.variants) || [],
     });
     return success(res, 'Product created', product, 201);
   } catch (err) {
@@ -104,6 +127,9 @@ const updateProduct = async (req, res, next) => {
         ? Number(req.body.discountedPrice) : null;
     if (req.body.stock !== undefined) product.stock = Number(req.body.stock);
     if (req.body.coinReward !== undefined) product.coinReward = Number(req.body.coinReward);
+
+    const normVariants = normalizeVariants(req.body.variants);
+    if (normVariants !== undefined) product.variants = normVariants;
 
     await product.save();
     return success(res, 'Product updated', product);

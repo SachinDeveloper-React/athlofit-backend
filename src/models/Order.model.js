@@ -7,6 +7,12 @@ const orderItemSchema = new mongoose.Schema({
   price: { type: Number, required: true },
   coinPrice: { type: Number, required: true },
   quantity: { type: Number, required: true, min: 1 },
+  // Selected variant (if the product has variants)
+  variant: {
+    variantId: { type: mongoose.Schema.Types.ObjectId, default: null },
+    size: { type: String, default: '' },
+    color: { type: String, default: '' },
+  },
 });
 
 const orderSchema = new mongoose.Schema(

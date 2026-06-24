@@ -23,6 +23,17 @@ const protect = async (req, res, next) => {
       return error(res, 'Session expired. Please log in again.', 401);
     }
 
+    // Block banned/suspended accounts (admins are exempt).
+    if (user.isBanned && user.role !== 'admin') {
+      return error(
+        res,
+        user.banInfo?.reason
+          ? `Account suspended: ${user.banInfo.reason}`
+          : 'Your account has been suspended. Contact support.',
+        403,
+      );
+    }
+
     // Track last activity (fire-and-forget, throttled to once per 5 min to reduce DB writes)
     const FIVE_MINUTES = 5 * 60 * 1000;
     if (!user.lastActiveAt || Date.now() - user.lastActiveAt.getTime() > FIVE_MINUTES) {

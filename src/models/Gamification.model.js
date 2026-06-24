@@ -45,6 +45,22 @@ const gamificationSchema = new mongoose.Schema(
       },
     ],
 
+    // ─── Streak protection system ────────────────────────────────────────────
+    // Freezes (earned at 7-day milestones — 24hr grace on miss)
+    streakFreezes: { type: Number, default: 0, min: 0 },
+    // Lives / bandages (earned weekly — auto-repair a break)
+    streakLives: { type: Number, default: 0, min: 0 },
+    // When a freeze is active (consuming a freeze sets this to tomorrow midnight)
+    freezeActiveUntil: { type: Date, default: null },
+    // ISO week key when last freeze was granted (prevent double-grant)
+    lastFreezeGrantStreak: { type: Number, default: 0 },
+    // ISO week key when last weekly life was granted
+    lastLifeGrantWeek: { type: String, default: null },
+    // When streak was last broken (for restore window)
+    streakBrokenAt: { type: Date, default: null },
+    // Streak value before the break (for restore)
+    streakBeforeBreak: { type: Number, default: 0 },
+
     // Track advanced achievements that the user has claimed
     claimedAchievements: [
       {

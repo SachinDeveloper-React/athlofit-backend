@@ -140,6 +140,24 @@ const appConfigSchema = new mongoose.Schema(
         },
       },
     },
+
+    // ─── Streak protection settings (admin-controlled) ───────────────────────
+    streak: {
+      // Freeze: earned every N consecutive streak days (milestone).
+      freezeEarnEvery:  { type: Number, default: 7 },
+      // Max freezes a user can store at any time.
+      maxFreezes:       { type: Number, default: 2 },
+      // Freeze grace period (hours). Default 24 = 1 missed day is forgiven.
+      freezeGraceHours: { type: Number, default: 24 },
+      // Weekly life: earn 1 life every 7 calendar days.
+      lifeEarnIntervalDays: { type: Number, default: 7 },
+      // Max lives a user can store.
+      maxLives:         { type: Number, default: 2 },
+      // Coin cost to restore a broken streak (manual restore option).
+      restoreCostCoins: { type: Number, default: 100 },
+      // Time window (hours) in which restore is allowed after a break.
+      restoreWindowHours: { type: Number, default: 48 },
+    },
   },
   {
     timestamps: true,

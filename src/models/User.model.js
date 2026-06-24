@@ -105,6 +105,14 @@ const userSchema = new mongoose.Schema(
     // Token versioning (for invalidation)
     tokenVersion: { type: Number, default: 0 },
 
+    // ─── Account ban / suspension ───────────────────────────────────────────
+    isBanned: { type: Boolean, default: false },
+    banInfo: {
+      reason: { type: String, default: null },
+      bannedAt: { type: Date, default: null },
+      bannedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+    },
+
     // FCM push notification token
     fcmToken: { type: String, default: null },
     notificationsEnabled: { type: Boolean, default: true },

@@ -60,6 +60,9 @@ router.post('/achievements/claim', claimAdvancedAchievement);
 
 // ─── Admin: Badge Definitions CRUD ───────────────────────────────────────────
 
+// POST /gamification/streak/restore — User restores their broken streak with coins
+router.post('/streak/restore', require('../controllers/streakRestore.controller'));
+
 // GET  /gamification/admin/badges        — list all badge definitions
 router.get('/admin/badges', adminOnly, adminGetBadges);
 

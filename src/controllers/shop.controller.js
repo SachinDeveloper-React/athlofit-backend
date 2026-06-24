@@ -250,22 +250,41 @@ const buyWithCoins = async (req, res, next) => {
       if (!product || !product.isActive) {
         return error(res, `Product ${item.productId} unavailable`, 400);
       }
-      if (product.stock < item.quantity) {
-        return error(res, `Insufficient stock for ${product.name}`, 400);
+
+      let activePrice = product.discountedPrice !== null ? product.discountedPrice : product.price;
+      let variantInfo = { variantId: null, size: '', color: '' };
+
+      if (product.hasVariants && product.variants.length) {
+        // A variant must be selected and have enough stock.
+        if (!item.variantId) {
+          return error(res, `Please select a variant for ${product.name}`, 400);
+        }
+        const variant = product.variants.id(item.variantId);
+        if (!variant) {
+          return error(res, `Selected variant unavailable for ${product.name}`, 400);
+        }
+        if (variant.stock < item.quantity) {
+          return error(res, `Insufficient stock for ${product.name} (${[variant.size, variant.color].filter(Boolean).join('/')})`, 400);
+        }
+        if (variant.priceOverride != null) activePrice = variant.priceOverride;
+        variantInfo = { variantId: variant._id, size: variant.size, color: variant.color };
+      } else {
+        if (product.stock < item.quantity) {
+          return error(res, `Insufficient stock for ${product.name}`, 400);
+        }
       }
 
-      const activePrice = product.discountedPrice !== null ? product.discountedPrice : product.price;
       const itemCoinPrice = activePrice * COIN_CONVERSION_RATE;
-      
       totalStandardPrice += activePrice * item.quantity;
       totalCoinCost += itemCoinPrice * item.quantity;
-      
+
       orderItems.push({
         product: product._id,
         name: product.name,
         price: activePrice,
         coinPrice: itemCoinPrice,
         quantity: item.quantity,
+        variant: variantInfo,
       });
     }
 
@@ -308,17 +327,24 @@ const buyWithCoins = async (req, res, next) => {
     let order;
     const decrementedItems = [];
     try {
+      // Deduct stock (variant-aware, atomic with guard)
       // Deduct stock atomically per product
       for (const item of items) {
-        const updated = await Product.findOneAndUpdate(
-          { _id: item.productId, stock: { $gte: item.quantity } },
-          { $inc: { stock: -item.quantity } },
-          { new: true },
-        );
-        if (!updated) {
-          throw new Error(`Insufficient stock for product ${item.productId}`);
+        if (item.variantId) {
+          const r = await Product.updateOne(
+            { _id: item.productId, 'variants._id': item.variantId, 'variants.stock': { $gte: item.quantity } },
+            { $inc: { 'variants.$.stock': -item.quantity, stock: -item.quantity } },
+            { session },
+          );
+          if (r.matchedCount === 0) throw new Error('Variant went out of stock');
+        } else {
+          const r = await Product.updateOne(
+            { _id: item.productId, stock: { $gte: item.quantity } },
+            { $inc: { stock: -item.quantity } },
+            { session },
+          );
+          if (r.matchedCount === 0) throw new Error('Product went out of stock');
         }
-        decrementedItems.push(item);
       }
 
       // BUG-030: Use Math.round to prevent floating-point drift in coin balance
@@ -466,7 +492,13 @@ const cancelOrder = async (req, res, next) => {
 
     // ── Restore product stock ────────────────────────────────────────────────
     for (const item of order.items) {
-      if (item.product) {
+      if (!item.product) continue;
+      if (item.variant?.variantId) {
+        await Product.updateOne(
+          { _id: item.product, 'variants._id': item.variant.variantId },
+          { $inc: { 'variants.$.stock': item.quantity, stock: item.quantity } },
+        );
+      } else {
         await Product.findByIdAndUpdate(item.product, {
           $inc: { stock: item.quantity },
         });

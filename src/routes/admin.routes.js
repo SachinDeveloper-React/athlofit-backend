@@ -8,6 +8,15 @@ const {
   getUsers,
   getUserById,
   updateUserRole,
+  updateUserAccount,
+  adjustUserCoins,
+  resetUserStreak,
+  banUser,
+  unbanUser,
+  getUserSessions,
+  revokeUserSession,
+  revokeAllUserSessions,
+  getUserActionLog,
   deleteUser,
   getUserHealth,
   getUserGamification,
@@ -31,6 +40,9 @@ const {
   updateOrderStatus,
 } = require('../controllers/adminShop.controller');
 
+const { getUserAnalytics } = require('../controllers/adminAnalytics.controller');
+const { analyzeUser, recommendForUser } = require('../controllers/adminAI.controller');
+
 // All routes here require an authenticated admin.
 router.use(protect, adminOnly);
 
@@ -40,12 +52,24 @@ router.get('/dashboard/stats', getDashboardStats);
 // ── Users ─────────────────────────────────────────────────────────────────────
 router.get('/users', getUsers);
 router.get('/users/:id', getUserById);
+router.patch('/users/:id', updateUserAccount);
 router.patch('/users/:id/role', updateUserRole);
+router.post('/users/:id/coins', adjustUserCoins);
+router.post('/users/:id/reset-streak', resetUserStreak);
+router.post('/users/:id/ban', banUser);
+router.post('/users/:id/unban', unbanUser);
+router.get('/users/:id/sessions', getUserSessions);
+router.delete('/users/:id/sessions/:sessionId', revokeUserSession);
+router.post('/users/:id/sessions/revoke-all', revokeAllUserSessions);
+router.get('/users/:id/action-log', getUserActionLog);
 router.delete('/users/:id', deleteUser);
 router.get('/users/:id/health', getUserHealth);
 router.get('/users/:id/gamification', getUserGamification);
 router.get('/users/:id/achievements', getUserAchievements);
 router.get('/users/:id/orders', getUserOrders);
+router.get('/users/:id/analytics', getUserAnalytics);
+router.post('/users/:id/ai-analysis', analyzeUser);
+router.post('/users/:id/ai-recommendations', recommendForUser);
 
 // ── Shop: Products ──────────────────────────────────────────────────────────
 router.post('/shop/products', imageUpload.array('images', 8), createProduct);
