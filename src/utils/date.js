@@ -1,16 +1,20 @@
 // src/utils/date.js
 
 /**
- * Returns today's date as "YYYY-MM-DD" in the server's local time.
- * Using local time (not UTC) avoids off-by-one date issues for users
- * in timezones ahead of UTC (e.g. UTC+5:30 after midnight UTC).
+ * Returns today's date as "YYYY-MM-DD" in Asia/Kolkata (IST) timezone.
+ * Using a fixed timezone ensures consistent day boundaries regardless
+ * of where the server is deployed (UTC cloud servers, local dev, etc.).
  */
 const todayISO = () => {
   const now = new Date();
-  const y = now.getFullYear();
-  const m = String(now.getMonth() + 1).padStart(2, '0');
-  const d = String(now.getDate()).padStart(2, '0');
-  return `${y}-${m}-${d}`;
+  // Intl.DateTimeFormat gives us the correct local date in IST
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Kolkata',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(now); // returns "YYYY-MM-DD" with en-CA locale
+  return parts;
 };
 
 /**
@@ -31,14 +35,20 @@ const isConsecutiveDay = (prevDate, currDate) => {
 };
 
 /**
- * Build date range array "YYYY-MM-DD" between from and to (inclusive)
+ * Build date range array "YYYY-MM-DD" between from and to (inclusive).
+ * Uses manual date arithmetic to avoid UTC shifts from toISOString().
  */
 const buildDateRange = (from, to) => {
   const dates = [];
-  const cur = new Date(from);
-  const end = new Date(to);
+  const [fy, fm, fd] = from.split('-').map(Number);
+  const [ty, tm, td] = to.split('-').map(Number);
+  const cur = new Date(fy, fm - 1, fd);
+  const end = new Date(ty, tm - 1, td);
   while (cur <= end) {
-    dates.push(cur.toISOString().slice(0, 10));
+    const y = cur.getFullYear();
+    const m = String(cur.getMonth() + 1).padStart(2, '0');
+    const d = String(cur.getDate()).padStart(2, '0');
+    dates.push(`${y}-${m}-${d}`);
     cur.setDate(cur.getDate() + 1);
   }
   return dates;
@@ -46,10 +56,12 @@ const buildDateRange = (from, to) => {
 
 /**
  * Short day label "Mon", "Tue" ... from "YYYY-MM-DD"
+ * Parses as local date (not UTC) to avoid day-shift issues.
  */
 const toDayLabel = (isoDate) => {
   const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
-  return days[new Date(isoDate).getDay()];
+  const [y, m, d] = isoDate.split('-').map(Number);
+  return days[new Date(y, m - 1, d).getDay()];
 };
 
 module.exports = { todayISO, isConsecutiveDay, buildDateRange, toDayLabel };
