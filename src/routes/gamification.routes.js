@@ -52,6 +52,15 @@ router.get('/leaderboard', getLeaderboard);
 // POST /gamification/admin/achievements  — Admin: create/update achievement
 router.post('/admin/achievements', adminOnly, createAchievement);
 
+// PUT /gamification/admin/achievements/:id  — Admin: update achievement by id
+router.put('/admin/achievements/:id', adminOnly, require('../controllers/gamification.controller').adminUpdateAchievement);
+
+// PATCH /gamification/admin/achievements/:id/toggle — Admin: activate/deactivate
+router.patch('/admin/achievements/:id/toggle', adminOnly, require('../controllers/gamification.controller').adminToggleAchievement);
+
+// DELETE /gamification/admin/achievements/:id — Admin: hard delete
+router.delete('/admin/achievements/:id', adminOnly, require('../controllers/gamification.controller').adminDeleteAchievement);
+
 // GET /gamification/achievements  — Get all achievements and user progress
 router.get('/achievements', getAdvancedAchievements);
 

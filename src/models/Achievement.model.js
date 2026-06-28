@@ -35,6 +35,10 @@ const achievementSchema = new mongoose.Schema(
       type: String,
       default: 'Award',
     },
+    isActive: {
+      type: Boolean,
+      default: true,
+    },
   },
   {
     timestamps: true,

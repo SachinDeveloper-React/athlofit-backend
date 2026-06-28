@@ -169,7 +169,7 @@ const updateAppConfig = async (req, res, next) => {
     const cfg = await AppConfig.findOneAndUpdate(
       { key: "global" },
       { $set: setMap },
-      { new: true, upsert: true, runValidators: true },
+      { new: true, upsert: true },
     );
 
     return success(res, "App config updated", cfg);

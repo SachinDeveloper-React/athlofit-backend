@@ -7,20 +7,25 @@ const {
   getChallengeConfig,
   adminUpsertChallenge,
   adminDeleteChallenge,
+  adminGetAllChallenges,
+  adminToggleChallenge,
   seedChallenges,
 } = require('../controllers/challenge.controller');
 const { protect, adminOnly } = require('../middleware/auth.middleware');
 
 router.use(protect);
 
-router.get('/config', getChallengeConfig);   // must be before /:id
+// Admin (must be before /:id to avoid shadowing)
+router.get('/admin/all',       adminOnly, adminGetAllChallenges);
+router.patch('/:id/toggle',    adminOnly, adminToggleChallenge);
+router.post('/seed',           adminOnly, seedChallenges);
+router.post('/',               adminOnly, adminUpsertChallenge);
+router.put('/:id',             adminOnly, adminUpsertChallenge);
+router.delete('/:id',          adminOnly, adminDeleteChallenge);
+
+// Public
+router.get('/config', getChallengeConfig);
 router.get('/',       getChallenges);
 router.get('/:id',    getChallengeById);
-
-// Admin
-router.post('/seed',  adminOnly, seedChallenges);
-router.post('/',      adminOnly, adminUpsertChallenge);
-router.put('/:id',    adminOnly, adminUpsertChallenge);
-router.delete('/:id', adminOnly, adminDeleteChallenge);
 
 module.exports = router;

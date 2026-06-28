@@ -808,6 +808,44 @@ const getCoinHistory = async (req, res, next) => {
   }
 };
 
+// ─── Admin: Update Achievement ────────────────────────────────────────────────
+const adminUpdateAchievement = async (req, res, next) => {
+  try {
+    const ach = await Achievement.findById(req.params.id);
+    if (!ach) return error(res, 'Achievement not found', 404);
+    const fields = ['key', 'title', 'description', 'reward', 'criteriaType', 'targetValue', 'icon', 'isActive'];
+    for (const f of fields) if (req.body[f] !== undefined) ach[f] = req.body[f];
+    await ach.save();
+    return success(res, 'Achievement updated', ach);
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ─── Admin: Delete Achievement ────────────────────────────────────────────────
+const adminDeleteAchievement = async (req, res, next) => {
+  try {
+    const ach = await Achievement.findByIdAndDelete(req.params.id);
+    if (!ach) return error(res, 'Achievement not found', 404);
+    return success(res, 'Achievement deleted', { id: req.params.id });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ─── Admin: Toggle Achievement Active/Inactive ───────────────────────────────
+const adminToggleAchievement = async (req, res, next) => {
+  try {
+    const ach = await Achievement.findById(req.params.id);
+    if (!ach) return error(res, 'Achievement not found', 404);
+    ach.isActive = !ach.isActive;
+    await ach.save();
+    return success(res, `Achievement ${ach.isActive ? 'activated' : 'deactivated'}`, ach);
+  } catch (err) {
+    next(err);
+  }
+};
+
 module.exports = {
   getGamification,
   getStreaks,
@@ -818,6 +856,9 @@ module.exports = {
   getCoinHistory,
   claimReward,
   createAchievement,
+  adminUpdateAchievement,
+  adminDeleteAchievement,
+  adminToggleAchievement,
   getAdvancedAchievements,
   claimAdvancedAchievement,
   adminGetBadges,

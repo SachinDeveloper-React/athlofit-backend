@@ -460,6 +460,29 @@ const adminDeleteChallenge = async (req, res, next) => {
   }
 };
 
+// ─── Admin: GET all challenges (active + inactive) ────────────────────────────
+const adminGetAllChallenges = async (req, res, next) => {
+  try {
+    const challenges = await Challenge.find({}).sort({ type: 1, order: 1 });
+    return success(res, 'All challenges fetched', challenges);
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ─── Admin: Toggle challenge active/inactive ──────────────────────────────────
+const adminToggleChallenge = async (req, res, next) => {
+  try {
+    const challenge = await Challenge.findById(req.params.id);
+    if (!challenge) return error(res, 'Challenge not found', 404);
+    challenge.isActive = !challenge.isActive;
+    await challenge.save();
+    return success(res, `Challenge ${challenge.isActive ? 'activated' : 'deactivated'}`, challenge);
+  } catch (err) {
+    next(err);
+  }
+};
+
 module.exports = {
   getChallenges,
   getChallengeById,
@@ -467,5 +490,7 @@ module.exports = {
   syncChallengeProgress,
   adminUpsertChallenge,
   adminDeleteChallenge,
+  adminGetAllChallenges,
+  adminToggleChallenge,
   seedChallenges,
 };
