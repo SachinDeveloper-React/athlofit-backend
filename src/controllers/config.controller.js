@@ -21,6 +21,24 @@ const LEGAL_TITLES = {
   refund: "Refund & Cancellation Policy",
 };
 
+// Convert content to clean HTML for the mobile app.
+// If already HTML, just sanitize. If markdown, convert via `marked`.
+function toHtml(raw) {
+  if (!raw || !raw.trim()) return '';
+  let html = raw;
+  const looksLikeHtml = /<[a-z][\s\S]*>/i.test(html);
+  if (!looksLikeHtml) {
+    const { marked } = require('marked');
+    html = marked.parse(html);
+  }
+  // Strip PDF/Word paste artifacts
+  html = html
+    .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
+    .replace(/\s*class="[^"]*"/gi, '')
+    .replace(/\s*style="[^"]*"/gi, '');
+  return html;
+}
+
 // ─── Internal: get or seed the single global config doc ──────────────────────
 async function getOrCreateConfig() {
   let cfg = await AppConfig.findOne({ key: "global" });
@@ -209,6 +227,7 @@ We may update these terms from time to time. Your continued use of the app const
 
     return success(res, "Terms fetched", {
       content: doc.content,
+      htmlContent: toHtml(doc.content),
       version: doc.version,
       updatedAt: doc.updatedAt,
     });
@@ -265,6 +284,7 @@ You can request to delete your account and associated data at any time through t
 
     return success(res, "Privacy policy fetched", {
       content: doc.content,
+      htmlContent: toHtml(doc.content),
       version: doc.version,
       updatedAt: doc.updatedAt,
     });
@@ -328,10 +348,14 @@ const getLegalByType = async (req, res, next) => {
       });
     }
 
+    // Generate HTML for the mobile app.
+    let htmlContent = toHtml(doc.content);
+
     return success(res, "Legal document fetched", {
       type: doc.type,
       title: doc.title,
-      content: doc.content,
+      content: doc.content,       // raw (markdown or HTML) — used by admin editor
+      htmlContent,                 // clean HTML — used by mobile app
       version: doc.version,
       isPublished: doc.isPublished,
       updatedAt: doc.updatedAt,
