@@ -126,6 +126,7 @@ const appConfigSchema = new mongoose.Schema(
         default: 'Track your fitness, earn coins by walking, and shop premium health products.',
       },
       ogImage:         { type: String, default: '' },
+      logoUrl:         { type: String, default: '' },
       razorpayEnabled: { type: Boolean, default: false },
     },
 

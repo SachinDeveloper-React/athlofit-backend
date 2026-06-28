@@ -112,6 +112,7 @@ const getAppConfig = async (req, res, next) => {
           cfg.website?.defaultMetaDescription ??
           'Track your fitness, earn coins by walking, and shop premium health products.',
         ogImage: cfg.website?.ogImage ?? '',
+        logoUrl: cfg.website?.logoUrl ?? '',
         razorpayEnabled: cfg.website?.razorpayEnabled ?? false,
       },
       coin_config: {
