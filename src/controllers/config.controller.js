@@ -608,7 +608,13 @@ const adminGetTickets = async (req, res, next) => {
 // PATCH /config/admin/support-tickets/:id
 const adminUpdateTicket = async (req, res, next) => {
   try {
-    const { status, adminNotes } = req.body;
+    const { status, adminNotes, adminReply } = req.body;
+
+    const oldTicket = await SupportTicket.findById(req.params.id);
+    if (!oldTicket) return error(res, "Ticket not found", 404);
+
+    const oldStatus = oldTicket.status;
+
     const ticket = await SupportTicket.findByIdAndUpdate(
       req.params.id,
       {
@@ -619,7 +625,75 @@ const adminUpdateTicket = async (req, res, next) => {
       },
       { new: true },
     );
-    if (!ticket) return error(res, "Ticket not found", 404);
+
+    // ── Notify the user about the update ─────────────────────────────────────
+    const statusChanged = status && status !== oldStatus;
+    const hasReply = adminReply?.trim();
+
+    if (statusChanged || hasReply) {
+      const statusLabels = {
+        open: 'Open',
+        in_progress: 'In Progress',
+        resolved: 'Resolved',
+        closed: 'Closed',
+      };
+      const newStatusLabel = statusLabels[ticket.status] || ticket.status;
+      const shortId = ticket._id.toString().slice(-6).toUpperCase();
+
+      // Push notification (only if the ticket was submitted by a logged-in user)
+      if (ticket.user) {
+        const { createNotification } = require("../utils/createNotification");
+        createNotification(ticket.user, {
+          type: 'SUPPORT',
+          title: '📩 Support Ticket Updated',
+          message: hasReply
+            ? `Reply on ticket #${shortId}: "${adminReply.trim().slice(0, 80)}"`
+            : `Your ticket #${shortId} status changed to: ${newStatusLabel}`,
+          data: { screen: 'Support', ticketId: ticket._id.toString() },
+        });
+      }
+
+      // Email notification (always — every ticket has an email)
+      try {
+        const { sendOtpEmail } = require("../utils/otp");
+        const nodemailer = require("nodemailer");
+        const transporter = nodemailer.createTransport({
+          host: process.env.SMTP_HOST,
+          port: Number(process.env.SMTP_PORT) || 587,
+          secure: Number(process.env.SMTP_PORT) === 465,
+          auth: { user: process.env.SMTP_USER, pass: process.env.SMTP_PASS },
+        });
+
+        const subject = hasReply
+          ? `Re: ${ticket.subject} — Ticket #${shortId}`
+          : `Your support ticket #${shortId} is now ${newStatusLabel}`;
+
+        const body = [
+          `Hi ${ticket.name},`,
+          '',
+          hasReply ? `We've replied to your support request:` : `Your support ticket status has been updated:`,
+          '',
+          `Subject: ${ticket.subject}`,
+          `Status: ${newStatusLabel}`,
+          ...(hasReply ? ['', `Admin reply:`, adminReply.trim()] : []),
+          '',
+          'If you have more questions, simply reply to this email or submit a new request.',
+          '',
+          '— Athlofit Support Team',
+        ].join('\n');
+
+        await transporter.sendMail({
+          from: process.env.EMAIL_FROM || '"Athlofit" <noreply@athlofit.com>',
+          to: ticket.email,
+          subject,
+          text: body,
+        });
+      } catch (emailErr) {
+        // Non-critical — log but don't fail the request.
+        console.error('[SupportTicket] Email notification failed:', emailErr.message);
+      }
+    }
+
     return success(res, "Ticket updated", ticket);
   } catch (err) {
     next(err);
