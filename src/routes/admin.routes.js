@@ -40,6 +40,15 @@ const {
   updateOrderStatus,
 } = require('../controllers/adminShop.controller');
 
+const {
+  getFoods,
+  createFood,
+  updateFood,
+  deleteFood,
+  toggleFood,
+  bulkUpload,
+} = require('../controllers/adminFood.controller');
+
 const { getUserAnalytics } = require('../controllers/adminAnalytics.controller');
 const { analyzeUser, recommendForUser } = require('../controllers/adminAI.controller');
 
@@ -90,5 +99,15 @@ router.delete('/shop/coupons/:id', deleteCoupon);
 // ── Shop: Orders ────────────────────────────────────────────────────────────
 router.get('/shop/orders', getOrders);
 router.patch('/shop/orders/:id/status', updateOrderStatus);
+
+// ── Food Catalog (admin) ──────────────────────────────────────────────────────
+const multer = require('multer');
+const csvUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
+router.get('/foods', getFoods);
+router.post('/foods', createFood);
+router.put('/foods/:id', updateFood);
+router.delete('/foods/:id', deleteFood);
+router.patch('/foods/:id/toggle', toggleFood);
+router.post('/foods/bulk-upload', csvUpload.single('file'), bulkUpload);
 
 module.exports = router;
