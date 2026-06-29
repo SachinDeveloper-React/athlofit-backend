@@ -32,7 +32,8 @@
     "node-cron": "^3.0.3",
     "nodemailer": "^6.9.13",
     "razorpay": "^2.9.6",
-    "uuid": "^9.0.1"
+    "uuid": "^9.0.1",
+    "xlsx": "^0.18.5"
   },
   "devDependencies": {
     "fast-check": "^4.8.0",

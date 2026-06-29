@@ -100,23 +100,33 @@ const bulkUpload = async (req, res, next) => {
   try {
     if (!req.file) return error(res, 'No file uploaded', 400);
 
-    let content = req.file.buffer.toString('utf8');
-    // Handle BOM
-    if (content.charCodeAt(0) === 0xFEFF) content = content.slice(1);
-
+    const filename = (req.file.originalname || '').toLowerCase();
     let records;
-    try {
-      records = parse(content, {
-        columns: true,
-        skip_empty_lines: true,
-        trim: true,
-        relax_column_count: true,
-      });
-    } catch (parseErr) {
-      return error(res, `CSV parse error: ${parseErr.message}`, 400);
+
+    if (filename.endsWith('.xlsx') || filename.endsWith('.xls')) {
+      // Parse Excel
+      const XLSX = require('xlsx');
+      const workbook = XLSX.read(req.file.buffer, { type: 'buffer' });
+      const sheetName = workbook.SheetNames[0];
+      if (!sheetName) return error(res, 'Excel file has no sheets', 400);
+      records = XLSX.utils.sheet_to_json(workbook.Sheets[sheetName], { defval: '' });
+    } else {
+      // Parse CSV
+      let content = req.file.buffer.toString('utf8');
+      if (content.charCodeAt(0) === 0xFEFF) content = content.slice(1);
+      try {
+        records = parse(content, {
+          columns: true,
+          skip_empty_lines: true,
+          trim: true,
+          relax_column_count: true,
+        });
+      } catch (parseErr) {
+        return error(res, `CSV parse error: ${parseErr.message}`, 400);
+      }
     }
 
-    if (!records.length) return error(res, 'File is empty or has no valid rows', 400);
+    if (!records || !records.length) return error(res, 'File is empty or has no valid rows', 400);
 
     const VALID_DIET = ['veg', 'non-veg', 'vegan'];
     const VALID_CAT = ['breakfast', 'lunch', 'dinner', 'snacks'];
@@ -162,7 +172,7 @@ const bulkUpload = async (req, res, next) => {
         protein,
         carbs,
         fat,
-        fiber: row.fiber ? parseFloat(row.fiber) : null,
+        fiber: row.fiber || row.fibre ? parseFloat(row.fiber || row.fibre) : null,
         sugar: row.sugar ? parseFloat(row.sugar) : null,
         servingSize: row.servingSize ? parseFloat(row.servingSize) : 100,
         servingUnit: VALID_UNIT.includes((row.servingUnit || '').trim().toLowerCase())

@@ -102,7 +102,22 @@ router.patch('/shop/orders/:id/status', updateOrderStatus);
 
 // ── Food Catalog (admin) ──────────────────────────────────────────────────────
 const multer = require('multer');
-const csvUpload = multer({ storage: multer.memoryStorage(), limits: { fileSize: 10 * 1024 * 1024 } });
+const csvUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024 },
+  fileFilter: (_req, file, cb) => {
+    const allowed = [
+      'text/csv', 'text/plain',
+      'application/vnd.ms-excel',
+      'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+    ];
+    if (allowed.includes(file.mimetype) || /\.(csv|xlsx|xls)$/i.test(file.originalname)) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only CSV, XLSX, or XLS files are allowed'));
+    }
+  },
+});
 router.get('/foods', getFoods);
 router.post('/foods', createFood);
 router.put('/foods/:id', updateFood);
