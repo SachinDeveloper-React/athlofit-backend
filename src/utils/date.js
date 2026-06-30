@@ -64,4 +64,17 @@ const toDayLabel = (isoDate) => {
   return days[new Date(y, m - 1, d).getDay()];
 };
 
-module.exports = { todayISO, isConsecutiveDay, buildDateRange, toDayLabel };
+/**
+ * Number of whole days between two ISO date strings (currDate - prevDate).
+ * Positive if currDate is after prevDate.
+ */
+const daysBetween = (prevDate, currDate) => {
+  if (!prevDate || !currDate) return null;
+  const [py, pm, pd] = prevDate.split('-').map(Number);
+  const [cy, cm, cd] = currDate.split('-').map(Number);
+  const prev = new Date(py, pm - 1, pd);
+  const curr = new Date(cy, cm - 1, cd);
+  return Math.round((curr.getTime() - prev.getTime()) / (1000 * 60 * 60 * 24));
+};
+
+module.exports = { todayISO, isConsecutiveDay, buildDateRange, toDayLabel, daysBetween };

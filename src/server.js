@@ -5,6 +5,7 @@ require('dotenv').config();
 const { connectDB } = require('./config/db');
 const app = require('./app');
 const { startScheduler } = require('./services/scheduler');
+const { startCronJobs } = require('./cron');
 
 const PORT = process.env.PORT || 5001;
 
@@ -14,5 +15,7 @@ connectDB().then(() => {
 
     // Start background cron jobs (uninstall detection, inactivity cleanup)
     startScheduler();
+    // Start streak evaluation + weekly lives cron
+    startCronJobs();
   });
 });

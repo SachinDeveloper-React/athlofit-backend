@@ -160,15 +160,22 @@ const syncHealthData = async (req, res, next) => {
     // Always update lastActiveDate when syncing today's data
     // (tracks that the user was active today, regardless of goal completion)
     const actualToday = todayISO();
-    // Allow coins for today's date OR the date the app sent (handles timezone edge cases
-    // where app says "today" but server clock disagrees by a few hours)
-    const isTodaySync = (today === actualToday) || (today === date && !existing?.goalMet);
+    // Coins are ONLY awarded for today's actual date — never for past-day background syncs.
+    // Allow a 1-day tolerance for timezone edge cases (app in UTC vs server in IST).
+    const isTodaySync = (today === actualToday);
+    const isNearToday = isTodaySync || (() => {
+      // Check if `today` is yesterday (server time) — which could still be "today" for the user
+      const d1 = new Date(`${actualToday}T00:00:00Z`);
+      const d2 = new Date(`${today}T00:00:00Z`);
+      return Math.abs(d1 - d2) <= 86400000; // within 24 hours
+    })();
     
-    if (isTodaySync && gam.lastActiveDate !== actualToday) {
+    if ((isTodaySync || isNearToday) && gam.lastActiveDate !== actualToday) {
       gam.lastActiveDate = actualToday;
     }
 
-    // Reset daily coins counter if it's a new day
+    // Reset daily coins counter ONLY when we're sure it's a new server-day.
+    // Use lastCoinDate (which is set to the server's actualToday) to avoid double-resets.
     if (isTodaySync && gam.lastCoinDate !== actualToday) {
       gam.coinsEarnedToday = 0;
     }
@@ -244,7 +251,7 @@ const syncHealthData = async (req, res, next) => {
           const actualAdded = parseFloat((coinsEarnedToday - currentEarned).toFixed(2));
           gam.coinsEarnedToday = coinsEarnedToday;
           gam.coinsBalance = parseFloat((gam.coinsBalance + actualAdded).toFixed(2));
-          gam.lastCoinDate = today;
+          gam.lastCoinDate = actualToday;
           await gam.save();
 
           // Log passive step coin transaction

@@ -10,6 +10,7 @@ jest.mock('../models/BadgeDefinition.model');
 jest.mock('../models/HealthActivity.model');
 jest.mock('../utils/pushNotification', () => ({ sendPushToUser: jest.fn() }));
 jest.mock('../utils/createNotification', () => ({ createNotification: jest.fn() }));
+jest.mock('../utils/logCoinTransaction', () => ({ logCoinTransaction: jest.fn() }));
 
 const AppConfig = require('../models/AppConfig.model');
 const Gamification = require('../models/Gamification.model');
@@ -32,7 +33,7 @@ function mockRes() {
 
 function buildReq({ userId = 'user123', rewardId = 'steps_daily', dailyStepGoal = 10000 } = {}) {
   return {
-    user: { _id: userId, dailyStepGoal },
+    user: { _id: userId, dailyStepGoal, emailVerified: true },
     body: { rewardId },
   };
 }

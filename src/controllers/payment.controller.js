@@ -10,6 +10,8 @@ const {
   verifyWebhookSignature,
 } = require('../utils/razorpay');
 const { createNotification } = require('../utils/createNotification');
+const { getCachedConfig } = require('../utils/configCache');
+const { resolveNotification } = require('../utils/notificationTemplates');
 
 // ─── POST /payment/create-order ──────────────────────────────────────────────
 // Creates a Razorpay order for the given cart items and a PENDING local order.
@@ -37,6 +39,8 @@ const createPaymentOrder = async (req, res, next) => {
 
     let totalPrice = 0;
     const orderItems = [];
+    const cfg = await getCachedConfig();
+    const coinRate = cfg?.coin?.conversionRate ?? 10;
 
     // Validate products + stock, compute server-side total (never trust client)
     for (const item of items) {
@@ -68,7 +72,7 @@ const createPaymentOrder = async (req, res, next) => {
         product: product._id,
         name: product.name,
         price: activePrice,
-        coinPrice: activePrice * 10,
+        coinPrice: activePrice * coinRate,
         quantity: item.quantity,
         variant: variantInfo,
       });
@@ -161,14 +165,13 @@ const verifyPayment = async (req, res, next) => {
           const r = await Product.updateOne(
             { _id: item.product, 'variants._id': item.variant.variantId, 'variants.stock': { $gte: item.quantity } },
             { $inc: { 'variants.$.stock': -item.quantity, stock: -item.quantity } },
-            { session },
           );
           if (r.matchedCount === 0) throw new Error(`Insufficient stock for ${item.name}`);
         } else {
           const updated = await Product.findOneAndUpdate(
             { _id: item.product, stock: { $gte: item.quantity } },
             { $inc: { stock: -item.quantity } },
-            { session, new: true },
+            { new: true },
           );
           if (!updated) throw new Error(`Insufficient stock for ${item.name}`);
         }
@@ -183,18 +186,27 @@ const verifyPayment = async (req, res, next) => {
     } catch (stockErr) {
       // Rollback: restore stock for any products already decremented
       for (const item of decrementedProducts) {
-        await Product.findOneAndUpdate(
-          { _id: item.product },
-          { $inc: { stock: item.quantity } },
-        );
+        if (item.variant?.variantId) {
+          await Product.updateOne(
+            { _id: item.product, 'variants._id': item.variant.variantId },
+            { $inc: { 'variants.$.stock': item.quantity, stock: item.quantity } },
+          );
+        } else {
+          await Product.findOneAndUpdate(
+            { _id: item.product },
+            { $inc: { stock: item.quantity } },
+          );
+        }
       }
       throw stockErr;
     }
 
+    const shortId = order._id.toString().slice(-6).toUpperCase();
+    const tpl = await resolveNotification('orderConfirmed', { orderId: shortId });
     createNotification(req.user._id, {
       type: 'PRODUCT',
-      title: '🛍️ Order Confirmed!',
-      message: `Your order #${order._id.toString().slice(-6).toUpperCase()} has been placed successfully.`,
+      title: tpl?.title || '🛍️ Order Confirmed!',
+      message: tpl?.message || `Your order #${shortId} has been placed successfully.`,
       data: { screen: 'OrderHistory' },
     });
 

@@ -191,6 +191,11 @@ const updateAppConfig = async (req, res, next) => {
       { new: true, upsert: true },
     );
 
+    // Invalidate the in-memory config cache so changes take effect immediately.
+    try {
+      require('../utils/configCache').invalidateConfigCache();
+    } catch (_) { /* cache module optional */ }
+
     return success(res, "App config updated", cfg);
   } catch (err) {
     next(err);

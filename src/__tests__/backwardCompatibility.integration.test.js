@@ -18,6 +18,7 @@ jest.mock('../models/BadgeDefinition.model');
 jest.mock('../models/HealthActivity.model');
 jest.mock('../utils/pushNotification', () => ({ sendPushToUser: jest.fn() }));
 jest.mock('../utils/createNotification', () => ({ createNotification: jest.fn() }));
+jest.mock('../utils/logCoinTransaction', () => ({ logCoinTransaction: jest.fn() }));
 jest.mock('../utils/date', () => ({ todayISO: jest.fn(() => '2025-01-15') }));
 
 const fc = require('fast-check');
@@ -284,7 +285,7 @@ describe('Property 5: Existing Source Preservation — hydration, streak, and re
             });
 
             const req = {
-              user: { _id: 'user123', dailyStepGoal: 10000 },
+              user: { _id: 'user123', dailyStepGoal: 10000, emailVerified: true },
               body: { rewardId: 'hydration_daily' },
             };
             const res = mockRes();
@@ -337,7 +338,7 @@ describe('Property 5: Existing Source Preservation — hydration, streak, and re
       });
 
       const req = {
-        user: { _id: 'user123', dailyStepGoal: 10000 },
+        user: { _id: 'user123', dailyStepGoal: 10000, emailVerified: true },
         body: { rewardId: 'hydration_daily' },
       };
       const res = mockRes();
@@ -400,7 +401,7 @@ describe('Property 5: Existing Source Preservation — hydration, streak, and re
             HealthActivity.findOne = jest.fn().mockResolvedValue({ steps: 5000, hydration: 0 });
 
             const req = {
-              user: { _id: 'user123', dailyStepGoal: 10000 },
+              user: { _id: 'user123', dailyStepGoal: 10000, emailVerified: true },
               body: { rewardId: `streak_${badgeKey}` },
             };
             const res = mockRes();
@@ -463,7 +464,7 @@ describe('Property 5: Existing Source Preservation — hydration, streak, and re
       HealthActivity.findOne = jest.fn().mockResolvedValue({ steps: 5000, hydration: 0 });
 
       const req = {
-        user: { _id: 'user123', dailyStepGoal: 10000 },
+        user: { _id: 'user123', dailyStepGoal: 10000, emailVerified: true },
         body: { rewardId: 'streak_streak_7' },
       };
       const res = mockRes();
@@ -559,7 +560,7 @@ describe('Property 5: Existing Source Preservation — hydration, streak, and re
       Gamification.findOne = jest.fn().mockResolvedValue(mockGam);
 
       const req = {
-        user: { _id: 'user123' },
+        user: { _id: 'user123', emailVerified: true },
         body: { coinsToAdd: 100 }, // wants 100 but only 50 remaining
       };
       const res = mockRes();

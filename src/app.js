@@ -29,6 +29,10 @@ const { errorHandler, notFound } = require('./middleware/error.middleware');
 
 const app = express();
 
+// Trust the first proxy (Vercel/Nginx/etc.) so req.ip reflects the real client.
+// Required for express-rate-limit to work per-client instead of per-proxy.
+app.set('trust proxy', 1);
+
 // ─── Security ─────────────────────────────────────────────────────────────────
 app.use(helmet());
 
@@ -99,6 +103,10 @@ app.get('/', (req, res) => {
     isMaintenance: process.env.MAINTENANCE_MODE === 'true',
   });
 });
+
+// ─── Cron endpoints (must work even during maintenance) ──────────────────────
+const cronRoutes = require('./routes/cron.routes');
+app.use('/cron', cronRoutes);
 
 // ─── Maintenance Mode Middleware ──────────────────────────────────────────────
 app.use((req, res, next) => {

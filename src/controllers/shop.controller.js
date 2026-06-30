@@ -8,12 +8,24 @@ const User = require('../models/User.model');
 const { sendPushToUser } = require('../utils/pushNotification');
 const { createNotification } = require('../utils/createNotification');
 const { logCoinTransaction } = require('../utils/logCoinTransaction');
+const { resolveNotification } = require('../utils/notificationTemplates');
 
 // BUG-032: Escape regex special characters to prevent ReDoS
 const escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
-// Conversion Rate: 10 Coins = 1 INR
-const COIN_CONVERSION_RATE = 10;
+// Conversion Rate: reads from AppConfig (admin-controlled). Fallback = 10.
+// Do NOT use this const directly in purchase logic — use getCoinRate() below.
+const DEFAULT_COIN_RATE = 10;
+
+async function getCoinRate() {
+  try {
+    const { getCachedConfig } = require('../utils/configCache');
+    const cfg = await getCachedConfig();
+    return cfg?.coin?.conversionRate ?? DEFAULT_COIN_RATE;
+  } catch {
+    return DEFAULT_COIN_RATE;
+  }
+}
 
 // ─── GET /shop/categories ─────────────────────────────────────────────────────
 const getCategories = async (req, res, next) => {
@@ -274,7 +286,7 @@ const buyWithCoins = async (req, res, next) => {
         }
       }
 
-      const itemCoinPrice = activePrice * COIN_CONVERSION_RATE;
+      const itemCoinPrice = activePrice * (await getCoinRate());
       totalStandardPrice += activePrice * item.quantity;
       totalCoinCost += itemCoinPrice * item.quantity;
 
@@ -323,23 +335,26 @@ const buyWithCoins = async (req, res, next) => {
     }
 
     // Perform stock decrement, coin deduction, and order creation sequentially.
-    // Uses atomic per-document operations with manual rollback on failure.
+    // Wrap stock decrement, coin deduction, coupon use, and order creation in a
+    // MongoDB transaction so any failure rolls back ALL changes atomically.
+    const session = await mongoose.startSession();
+    session.startTransaction();
     let order;
-    const decrementedItems = [];
     try {
       // Deduct stock (variant-aware, atomic with guard)
-      // Deduct stock atomically per product
       for (const item of items) {
         if (item.variantId) {
           const r = await Product.updateOne(
             { _id: item.productId, 'variants._id': item.variantId, 'variants.stock': { $gte: item.quantity } },
             { $inc: { 'variants.$.stock': -item.quantity, stock: -item.quantity } },
+            { session },
           );
           if (r.matchedCount === 0) throw new Error('Variant went out of stock');
         } else {
           const r = await Product.updateOne(
             { _id: item.productId, stock: { $gte: item.quantity } },
             { $inc: { stock: -item.quantity } },
+            { session },
           );
           if (r.matchedCount === 0) throw new Error('Product went out of stock');
         }
@@ -347,17 +362,17 @@ const buyWithCoins = async (req, res, next) => {
 
       // BUG-030: Use Math.round to prevent floating-point drift in coin balance
       gamification.coinsBalance = Math.round(gamification.coinsBalance - finalCoinCost);
-      await gamification.save();
+      await gamification.save({ session });
 
       // Mark coupon as used
       if (appliedCoupon) {
         appliedCoupon.usageCount += 1;
         appliedCoupon.usedBy.push(req.user._id);
-        await appliedCoupon.save();
+        await appliedCoupon.save({ session });
       }
 
       // Create Order
-      order = await Order.create({
+      [order] = await Order.create([{
         user: req.user._id,
         items: orderItems,
         totalPrice: totalStandardPrice,
@@ -367,16 +382,14 @@ const buyWithCoins = async (req, res, next) => {
         paymentMethod: 'COIN_PURCHASE',
         status: 'PAID',
         shippingAddress: shippingAddress || {},
-      });
+      }], { session });
+
+      await session.commitTransaction();
     } catch (txErr) {
-      // Rollback: restore stock for already decremented products
-      for (const item of decrementedItems) {
-        await Product.findOneAndUpdate(
-          { _id: item.productId },
-          { $inc: { stock: item.quantity } },
-        );
-      }
+      await session.abortTransaction();
       throw txErr;
+    } finally {
+      session.endSession();
     }
 
     // Log coin transaction for purchase
@@ -391,10 +404,12 @@ const buyWithCoins = async (req, res, next) => {
     });
 
     // ── Persist + push: order confirmed ──────────────────────────────────
+    const ordShortId = order._id.toString().slice(-6).toUpperCase();
+    const ordTpl = await resolveNotification('orderConfirmed', { orderId: ordShortId });
     createNotification(req.user._id, {
       type:    'PRODUCT',
-      title:   '🛍️ Order Confirmed!',
-      message: `Your order #${order._id.toString().slice(-6).toUpperCase()} has been placed successfully.`,
+      title:   ordTpl?.title || '🛍️ Order Confirmed!',
+      message: ordTpl?.message || `Your order #${ordShortId} has been placed successfully.`,
       data:    { screen: 'OrderHistory' },
     });
 
