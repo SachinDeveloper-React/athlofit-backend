@@ -572,6 +572,7 @@ const getAdvancedAchievements = async (req, res, next) => {
       const isClaimable = progress >= ach.targetValue && !isClaimed;
 
       return {
+        _id: ach._id,
         id: ach._id,
         key: ach.key,
         title: ach.title,
@@ -580,6 +581,7 @@ const getAdvancedAchievements = async (req, res, next) => {
         icon: ach.icon || 'Award',
         criteriaType: ach.criteriaType,
         targetValue: ach.targetValue,
+        isActive: ach.isActive !== false,
         progress: Math.min(progress, ach.targetValue),
         isClaimable,
         isClaimed,

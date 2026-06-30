@@ -1,4 +1,5 @@
 // src/controllers/shop.controller.js
+const mongoose = require('mongoose');
 const Product = require('../models/Product.model');
 const Category = require('../models/Category.model');
 const Order = require('../models/Order.model');
@@ -255,6 +256,7 @@ const buyWithCoins = async (req, res, next) => {
     let totalStandardPrice = 0;
     let totalCoinCost = 0;
     const orderItems = [];
+    const coinRate = await getCoinRate();
 
     // Verify products, stock, and calculate costs
     for (const item of items) {
@@ -286,7 +288,7 @@ const buyWithCoins = async (req, res, next) => {
         }
       }
 
-      const itemCoinPrice = activePrice * (await getCoinRate());
+      const itemCoinPrice = activePrice * coinRate;
       totalStandardPrice += activePrice * item.quantity;
       totalCoinCost += itemCoinPrice * item.quantity;
 
