@@ -334,14 +334,12 @@ const buyWithCoins = async (req, res, next) => {
           const r = await Product.updateOne(
             { _id: item.productId, 'variants._id': item.variantId, 'variants.stock': { $gte: item.quantity } },
             { $inc: { 'variants.$.stock': -item.quantity, stock: -item.quantity } },
-            { session },
           );
           if (r.matchedCount === 0) throw new Error('Variant went out of stock');
         } else {
           const r = await Product.updateOne(
             { _id: item.productId, stock: { $gte: item.quantity } },
             { $inc: { stock: -item.quantity } },
-            { session },
           );
           if (r.matchedCount === 0) throw new Error('Product went out of stock');
         }

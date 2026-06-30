@@ -29,20 +29,24 @@ const foodSchema = new mongoose.Schema(
     servingSize: { type: Number, required: true, default: 100 },
     servingUnit: {
       type: String,
-      enum: ['g', 'ml', 'serving', 'piece'],
+      enum: ['g', 'ml', 'serving', 'piece', 'tbsp'],
       default: 'g',
     },
 
     // ── Classification ────────────────────────────────────────────────────────
     dietType: {
       type: String,
-      enum: ['veg', 'non-veg', 'vegan'],
+      enum: ['veg', 'vegetarian', 'non-veg', 'vegan'],
       required: true,
     },
     category: {
-      type: String,
+      type: [String],
       enum: ['breakfast', 'lunch', 'dinner', 'snacks'],
       required: true,
+      validate: {
+        validator: (v) => Array.isArray(v) && v.length > 0,
+        message: 'At least one meal category is required',
+      },
     },
 
     // ── Optional media ────────────────────────────────────────────────────────

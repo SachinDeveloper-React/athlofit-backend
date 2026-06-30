@@ -128,9 +128,9 @@ const bulkUpload = async (req, res, next) => {
 
     if (!records || !records.length) return error(res, 'File is empty or has no valid rows', 400);
 
-    const VALID_DIET = ['veg', 'non-veg', 'vegan'];
+    const VALID_DIET = ['veg', 'vegetarian', 'non-veg', 'vegan'];
     const VALID_CAT = ['breakfast', 'lunch', 'dinner', 'snacks'];
-    const VALID_UNIT = ['g', 'ml', 'serving', 'piece'];
+    const VALID_UNIT = ['g', 'ml', 'serving', 'piece', 'tbsp'];
 
     let created = 0;
     let updated = 0;
@@ -148,7 +148,8 @@ const bulkUpload = async (req, res, next) => {
       const carbs = parseFloat(row.carbs);
       const fat = parseFloat(row.fat);
       const dietType = (row.dietType || row.diet_type || '').trim().toLowerCase();
-      const category = (row.category || '').trim().toLowerCase();
+      const categoryRaw = (row.category || '').trim().toLowerCase();
+      const categories = categoryRaw.split(',').map((c) => c.trim()).filter(Boolean);
 
       if (!name || isNaN(calories) || isNaN(protein) || isNaN(carbs) || isNaN(fat)) {
         skipped++;
@@ -157,12 +158,12 @@ const bulkUpload = async (req, res, next) => {
       }
       if (!VALID_DIET.includes(dietType)) {
         skipped++;
-        errors.push(`Row ${rowNum}: invalid dietType "${dietType}" (must be veg/non-veg/vegan)`);
+        errors.push(`Row ${rowNum}: invalid dietType "${dietType}" (must be veg/vegetarian/non-veg/vegan)`);
         continue;
       }
-      if (!VALID_CAT.includes(category)) {
+      if (categories.length === 0 || !categories.every((c) => VALID_CAT.includes(c))) {
         skipped++;
-        errors.push(`Row ${rowNum}: invalid category "${category}" (must be breakfast/lunch/dinner/snacks)`);
+        errors.push(`Row ${rowNum}: invalid category "${categoryRaw}" (must be breakfast/lunch/dinner/snacks, comma-separated for multiple)`);
         continue;
       }
 
@@ -175,10 +176,13 @@ const bulkUpload = async (req, res, next) => {
         fiber: row.fiber || row.fibre ? parseFloat(row.fiber || row.fibre) : null,
         sugar: row.sugar ? parseFloat(row.sugar) : null,
         servingSize: row.servingSize ? parseFloat(row.servingSize) : 100,
-        servingUnit: VALID_UNIT.includes((row.servingUnit || '').trim().toLowerCase())
-          ? row.servingUnit.trim().toLowerCase() : 'g',
+        servingUnit: (() => {
+          let u = (row.servingUnit || row.serving_unit || '').trim().toLowerCase();
+          if (u === 'tablespoon') u = 'tbsp';
+          return VALID_UNIT.includes(u) ? u : 'g';
+        })(),
         dietType,
-        category,
+        category: categories,
         description: (row.description || '').trim() || null,
         imageUrl: (row.imageUrl || row.image_url || '').trim() || null,
         isActive: true,
