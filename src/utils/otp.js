@@ -65,8 +65,8 @@ const sendOtpEmail = async (to, otp, flow) => {
     html,
   });
 
-  console.log("abc", abc);
-  
+  console.log('[SMTP] Email sent to:', to, '| MessageId:', abc.messageId);
+  return abc;
 };
 
 module.exports = { generateOtp, getOtpExpiry, sendOtpEmail };

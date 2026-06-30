@@ -1,4 +1,5 @@
 // src/controllers/shop.controller.js
+const mongoose = require('mongoose');
 const Product = require('../models/Product.model');
 const Category = require('../models/Category.model');
 const Order = require('../models/Order.model');
