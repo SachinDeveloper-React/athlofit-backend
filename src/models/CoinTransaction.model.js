@@ -53,6 +53,8 @@ const coinTransactionSchema = new mongoose.Schema(
     // Optional metadata for context
     metadata: {
       steps: Number,
+      previousSteps: Number,
+      stepDelta: Number,
       orderId: mongoose.Schema.Types.ObjectId,
       rewardId: String,
       achievementId: mongoose.Schema.Types.ObjectId,

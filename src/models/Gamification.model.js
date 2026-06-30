@@ -18,6 +18,12 @@ const gamificationSchema = new mongoose.Schema(
     stepGoalCoinDate: { type: String, default: null }, // ISO "YYYY-MM-DD" — tracks last date step-goal coins were awarded (BUG-017)
     lastWaterCoinDate: { type: String, default: null }, // ISO "YYYY-MM-DD"
 
+    // ─── Passive step coin throttle (3-hour intervals) ──────────────────
+    // Tracks when the last PASSIVE_STEPS transaction was logged
+    lastPassiveCoinTime: { type: Date, default: null },
+    // Steps count at the time of the last PASSIVE_STEPS transaction
+    lastPassiveCoinSteps: { type: Number, default: 0 },
+
     // ─── Dynamic badges array (keys match BadgeDefinition.key) ──────────────
     // Replaces the old fixed-key object { starter, consistent, finisher, elite }
     badgeList: [

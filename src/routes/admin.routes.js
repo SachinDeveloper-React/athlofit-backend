@@ -153,4 +153,16 @@ router.delete('/foods/:id', deleteFood);
 router.patch('/foods/:id/toggle', toggleFood);
 router.post('/foods/bulk-upload', csvUpload.single('file'), bulkUpload);
 
+// ── Migrations ──────────────────────────────────────────────────────────────
+const { consolidatePassiveStepCoins } = require('../migrations/consolidatePassiveStepCoins');
+router.post('/consolidate-passive-coins', async (req, res, next) => {
+  try {
+    const userId = req.body.userId || null; // optional: run for a specific user
+    const result = await consolidatePassiveStepCoins(userId);
+    return res.json({ success: true, message: 'Duplicate PASSIVE_STEPS entries consolidated', data: result });
+  } catch (err) {
+    next(err);
+  }
+});
+
 module.exports = router;

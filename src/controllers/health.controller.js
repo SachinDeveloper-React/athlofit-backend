@@ -231,14 +231,13 @@ const syncHealthData = async (req, res, next) => {
       });
     } else if (!isGoalMet) {
       // Passive step-based coins: Math.floor(steps / 100) * rate_per_100_steps
-      // Same formula the frontend uses — coins accumulate as the user walks.
-      // Only award when the goal has NOT been met — once the goal is met
-      // (and coins claimed), we stop adding passive coins to avoid double-counting.
+      // Coins accumulate as the user walks, but we only LOG a transaction
+      // every 3 hours (or at end-of-day 23:59:59) to avoid duplicate entries.
+      //
+      // The balance is still updated on every sync (so the user sees live coins),
+      // but the CoinTransaction is batched into 3-hour windows.
       //
       // IMPORTANT: Only update coinsEarnedToday/lastCoinDate for TODAY's date.
-      // Background syncs for past days must NOT overwrite the daily counter,
-      // otherwise the next foreground sync will see a stale lastCoinDate,
-      // reset coinsEarnedToday to 0, and re-add coins (double-counting bug).
       const isTodaySyncPassive = isTodaySync;
 
       if (isTodaySyncPassive) {
@@ -254,16 +253,49 @@ const syncHealthData = async (req, res, next) => {
           gam.lastCoinDate = actualToday;
           await gam.save();
 
-          // Log passive step coin transaction
-          logCoinTransaction({
-            userId: req.user._id,
-            type: 'EARNED',
-            amount: actualAdded,
-            balanceAfter: gam.coinsBalance,
-            source: 'PASSIVE_STEPS',
-            description: `Step Coins — ${(steps ?? 0).toLocaleString()} steps`,
-            metadata: { steps: steps ?? 0, date: today },
-          });
+          // ── 3-hour throttle for transaction logging ─────────────────────
+          // Only log a PASSIVE_STEPS CoinTransaction if:
+          //   1. At least 3 hours have passed since the last logged transaction, OR
+          //   2. It's near end-of-day (23:00+) and we haven't logged since 21:00
+          const THREE_HOURS_MS = 3 * 60 * 60 * 1000;
+          const now = new Date();
+          const lastLogTime = gam.lastPassiveCoinTime ? new Date(gam.lastPassiveCoinTime).getTime() : 0;
+          const timeSinceLastLog = now.getTime() - lastLogTime;
+          const currentHour = now.getHours();
+
+          // End-of-day check: if it's 23:xx, ensure we get a final entry
+          const isEndOfDay = currentHour >= 23;
+          const lastLogHour = gam.lastPassiveCoinTime ? new Date(gam.lastPassiveCoinTime).getHours() : -1;
+          const lastLogDate = gam.lastPassiveCoinTime
+            ? new Date(gam.lastPassiveCoinTime).toISOString().slice(0, 10)
+            : null;
+          const isNewDay = lastLogDate !== actualToday;
+
+          const shouldLogTransaction =
+            isNewDay ||                                    // First transaction of the day
+            timeSinceLastLog >= THREE_HOURS_MS ||          // 3 hours elapsed
+            (isEndOfDay && lastLogHour < 23);             // End-of-day final entry
+
+          if (shouldLogTransaction) {
+            const previousSteps = gam.lastPassiveCoinSteps || 0;
+            const currentSteps = steps ?? 0;
+            const stepDelta = currentSteps - previousSteps;
+
+            logCoinTransaction({
+              userId: req.user._id,
+              type: 'EARNED',
+              amount: actualAdded,
+              balanceAfter: gam.coinsBalance,
+              source: 'PASSIVE_STEPS',
+              description: `Step Coins — ${previousSteps.toLocaleString()} → ${currentSteps.toLocaleString()} = ${stepDelta.toLocaleString()} steps`,
+              metadata: { steps: currentSteps, previousSteps, stepDelta, date: today },
+            });
+
+            // Update throttle markers
+            gam.lastPassiveCoinTime = now;
+            gam.lastPassiveCoinSteps = currentSteps;
+            await gam.save();
+          }
         }
       }
     }
