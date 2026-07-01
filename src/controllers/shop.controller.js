@@ -1,5 +1,4 @@
 // src/controllers/shop.controller.js
-const mongoose = require('mongoose');
 const Product = require('../models/Product.model');
 const Category = require('../models/Category.model');
 const Order = require('../models/Order.model');
@@ -337,11 +336,10 @@ const buyWithCoins = async (req, res, next) => {
     }
 
     // Perform stock decrement, coin deduction, and order creation sequentially.
-    // Wrap stock decrement, coin deduction, coupon use, and order creation in a
-    // MongoDB transaction so any failure rolls back ALL changes atomically.
-    const session = await mongoose.startSession();
-    session.startTransaction();
+    // Note: MongoDB transactions require a replica set. For standalone deployments,
+    // we use sequential writes with manual rollback on failure.
     let order;
+    const stockDeducted = []; // track for rollback
     try {
       // Deduct stock (variant-aware, atomic with guard)
       for (const item of items) {
@@ -349,32 +347,32 @@ const buyWithCoins = async (req, res, next) => {
           const r = await Product.updateOne(
             { _id: item.productId, 'variants._id': item.variantId, 'variants.stock': { $gte: item.quantity } },
             { $inc: { 'variants.$.stock': -item.quantity, stock: -item.quantity } },
-            { session },
           );
           if (r.matchedCount === 0) throw new Error('Variant went out of stock');
+          stockDeducted.push(item);
         } else {
           const r = await Product.updateOne(
             { _id: item.productId, stock: { $gte: item.quantity } },
             { $inc: { stock: -item.quantity } },
-            { session },
           );
           if (r.matchedCount === 0) throw new Error('Product went out of stock');
+          stockDeducted.push(item);
         }
       }
 
       // BUG-030: Use Math.round to prevent floating-point drift in coin balance
       gamification.coinsBalance = Math.round(gamification.coinsBalance - finalCoinCost);
-      await gamification.save({ session });
+      await gamification.save();
 
       // Mark coupon as used
       if (appliedCoupon) {
         appliedCoupon.usageCount += 1;
         appliedCoupon.usedBy.push(req.user._id);
-        await appliedCoupon.save({ session });
+        await appliedCoupon.save();
       }
 
       // Create Order
-      [order] = await Order.create([{
+      order = await Order.create({
         user: req.user._id,
         items: orderItems,
         totalPrice: totalStandardPrice,
@@ -384,17 +382,26 @@ const buyWithCoins = async (req, res, next) => {
         paymentMethod: 'COIN_PURCHASE',
         status: 'PAID',
         shippingAddress: shippingAddress || {},
-      }], { session });
-
-      await session.commitTransaction();
+      });
     } catch (txErr) {
-      await session.abortTransaction();
+      // Manual rollback: restore stock for items already deducted
+      for (const item of stockDeducted) {
+        if (item.variantId) {
+          await Product.updateOne(
+            { _id: item.productId, 'variants._id': item.variantId },
+            { $inc: { 'variants.$.stock': item.quantity, stock: item.quantity } },
+          ).catch(() => {});
+        } else {
+          await Product.updateOne(
+            { _id: item.productId },
+            { $inc: { stock: item.quantity } },
+          ).catch(() => {});
+        }
+      }
       throw txErr;
-    } finally {
-      session.endSession();
     }
 
-    // Log coin transaction for purchase
+    // Log coin transaction for purchase (fire-and-forget)
     logCoinTransaction({
       userId: req.user._id,
       type: 'SPENT',
@@ -405,15 +412,19 @@ const buyWithCoins = async (req, res, next) => {
       metadata: { orderId: order._id },
     });
 
-    // ── Persist + push: order confirmed ──────────────────────────────────
-    const ordShortId = order._id.toString().slice(-6).toUpperCase();
-    const ordTpl = await resolveNotification('orderConfirmed', { orderId: ordShortId });
-    createNotification(req.user._id, {
-      type:    'PRODUCT',
-      title:   ordTpl?.title || '🛍️ Order Confirmed!',
-      message: ordTpl?.message || `Your order #${ordShortId} has been placed successfully.`,
-      data:    { screen: 'OrderHistory' },
-    });
+    // ── Persist + push: order confirmed (non-critical, fire-and-forget) ───
+    try {
+      const ordShortId = order._id.toString().slice(-6).toUpperCase();
+      const ordTpl = await resolveNotification('orderConfirmed', { orderId: ordShortId });
+      createNotification(req.user._id, {
+        type:    'PRODUCT',
+        title:   ordTpl?.title || '🛍️ Order Confirmed!',
+        message: ordTpl?.message || `Your order #${ordShortId} has been placed successfully.`,
+        data:    { screen: 'OrderHistory' },
+      });
+    } catch (pushErr) {
+      console.warn('[Shop] Push notification failed (non-critical):', pushErr.message);
+    }
 
     return success(res, 'Purchase successful using coins!', {
       order,
