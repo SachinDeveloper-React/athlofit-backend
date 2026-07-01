@@ -117,8 +117,8 @@ const updateStepGoal = async (req, res, next) => {
   try {
     const { dailyStepGoal } = req.body;
 
-    if (!dailyStepGoal || dailyStepGoal < 100) {
-      return error(res, "Step goal must be at least 100", 400);
+    if (!dailyStepGoal || dailyStepGoal < 5000) {
+      return error(res, "Step goal must be at least 5,000", 400);
     }
 
     const user = await User.findByIdAndUpdate(

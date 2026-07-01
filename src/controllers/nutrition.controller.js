@@ -144,11 +144,15 @@ const logMeal = async (req, res, next) => {
       foodRef:  foodRef  ?? null,
     });
 
-    // Sync challenge progress after logging a meal (fire-and-forget)
+    // Sync challenge progress BEFORE responding so the frontend gets updated state
     const { syncChallengeProgress } = require('./challenge.controller');
-    syncChallengeProgress(userId).catch(() => {});
+    const challengeResult = await syncChallengeProgress(userId).catch(() => ({ coinsAdded: 0, newlyCompleted: [] }));
 
-    return success(res, 'Meal logged successfully', log.toJSON(), 201);
+    return success(res, 'Meal logged successfully', {
+      ...log.toJSON(),
+      challengesCompleted: challengeResult.newlyCompleted,
+      coinsAdded: challengeResult.coinsAdded,
+    }, 201);
   } catch (err) {
     next(err);
   }
@@ -157,6 +161,8 @@ const logMeal = async (req, res, next) => {
 /**
  * DELETE /nutrition/log/:id
  * Removes a meal log entry — only the owner can delete their own entry.
+ * If removing this meal causes a previously-completed challenge to no longer
+ * be met, the earned coins are reversed and a debit transaction is logged.
  */
 const deleteMeal = async (req, res, next) => {
   try {
@@ -166,13 +172,186 @@ const deleteMeal = async (req, res, next) => {
     const log = await MealLog.findOne({ _id: id, user: userId });
     if (!log) return error(res, 'Meal log entry not found', 404);
 
+    const mealDate = log.date;
+
+    // ── Before deletion: find nutrition challenges that were rewarded this period ──
+    const Challenge     = require('../models/Challenge.model');
+    const UserChallenge = require('../models/UserChallenge.model');
+    const Gamification  = require('../models/Gamification.model');
+    const { logCoinTransaction } = require('../utils/logCoinTransaction');
+
+    const nutritionChallenges = await Challenge.find({
+      isActive: true,
+      criteriaType: { $in: ['MEALS_LOGGED', 'NUTRITION_CALORIES', 'NUTRITION_PROTEIN', 'NUTRITION_DAYS', 'SPECIFIC_FOOD'] },
+    });
+
+    // Get period keys for relevant challenges
+    const { syncChallengeProgress } = require('./challenge.controller');
+
+    // Collect rewarded nutrition challenges before deletion
+    const rewardedBefore = [];
+    for (const ch of nutritionChallenges) {
+      const periodKey = ch.type === 'daily' ? mealDate : getWeeklyPeriodKeyForDate(mealDate);
+      const uc = await UserChallenge.findOne({
+        user: userId,
+        challenge: ch._id,
+        periodKey,
+        isRewarded: true,
+      });
+      if (uc) {
+        rewardedBefore.push({ challenge: ch, userChallenge: uc, periodKey });
+      }
+    }
+
+    // ── Delete the meal log ───────────────────────────────────────────────────
     await log.deleteOne();
 
-    return success(res, 'Meal log entry deleted', { deleted: true });
+    // ── After deletion: re-compute progress for previously rewarded challenges ──
+    const reversedChallenges = [];
+
+    if (rewardedBefore.length > 0) {
+      // Re-fetch meal logs for the date (after deletion)
+      const remainingLogs = await MealLog.find({ user: userId, date: mealDate });
+      const totalCaloriesLogged = remainingLogs.reduce((s, m) => s + (m.calories || 0), 0);
+      const totalProteinLogged  = remainingLogs.reduce((s, m) => s + (m.protein  || 0), 0);
+      const mealsLoggedCount    = remainingLogs.length;
+
+      // For weekly challenges, also get the full week's data
+      const weekStartISO = getWeekStartISO(mealDate);
+      const today = todayISO();
+      const weeklyMealLogs = await MealLog.find({
+        user: userId,
+        date: { $gte: weekStartISO, $lte: today },
+      });
+      const weeklyCaloriesLogged = weeklyMealLogs.reduce((s, m) => s + (m.calories || 0), 0);
+      const weeklyProteinLogged  = weeklyMealLogs.reduce((s, m) => s + (m.protein  || 0), 0);
+      const weeklyNutritionDays  = new Set(weeklyMealLogs.map(m => m.date)).size;
+
+      const gam = await Gamification.findOne({ user: userId });
+
+      for (const { challenge, userChallenge, periodKey } of rewardedBefore) {
+        // Re-compute current value without the deleted meal
+        let newValue = 0;
+        if (challenge.type === 'daily') {
+          switch (challenge.criteriaType) {
+            case 'MEALS_LOGGED':        newValue = mealsLoggedCount;         break;
+            case 'NUTRITION_CALORIES':  newValue = totalCaloriesLogged;      break;
+            case 'NUTRITION_PROTEIN':   newValue = totalProteinLogged;       break;
+            case 'NUTRITION_DAYS':      newValue = mealsLoggedCount > 0 ? 1 : 0; break;
+            case 'SPECIFIC_FOOD': {
+              const foodName = (challenge.targetFood || '').toLowerCase();
+              newValue = remainingLogs.filter(m =>
+                m.name?.toLowerCase().includes(foodName)
+              ).length;
+              break;
+            }
+          }
+        } else {
+          // Weekly
+          switch (challenge.criteriaType) {
+            case 'MEALS_LOGGED':        newValue = weeklyMealLogs.length;    break;
+            case 'NUTRITION_CALORIES':  newValue = weeklyCaloriesLogged;     break;
+            case 'NUTRITION_PROTEIN':   newValue = weeklyProteinLogged;      break;
+            case 'NUTRITION_DAYS':      newValue = weeklyNutritionDays;      break;
+            case 'SPECIFIC_FOOD': {
+              const foodName = (challenge.targetFood || '').toLowerCase();
+              const daysWithFood = new Set(
+                weeklyMealLogs
+                  .filter(m => m.name?.toLowerCase().includes(foodName))
+                  .map(m => m.date)
+              ).size;
+              newValue = daysWithFood;
+              break;
+            }
+          }
+        }
+
+        const stillCompleted = newValue >= challenge.targetValue;
+
+        if (!stillCompleted) {
+          // ── Reverse the reward ─────────────────────────────────────────────
+          const deductAmount = challenge.coinReward;
+
+          // Deduct from balance
+          if (gam) {
+            gam.coinsBalance = Math.max(0, Math.round(gam.coinsBalance - deductAmount));
+            await gam.save();
+          }
+
+          // Reset UserChallenge progress
+          await UserChallenge.findByIdAndUpdate(userChallenge._id, {
+            $set: {
+              currentValue: newValue,
+              isCompleted: false,
+              completedAt: null,
+              isRewarded: false,
+              rewardedAt: null,
+            },
+          });
+
+          // Log reversal transaction
+          logCoinTransaction({
+            userId,
+            type: 'SPENT',
+            amount: deductAmount,
+            balanceAfter: gam ? gam.coinsBalance : 0,
+            source: 'CHALLENGE',
+            description: `Challenge reversed: ${challenge.title} — meal "${log.name}" removed`,
+            metadata: {
+              challengeId: challenge._id,
+              periodKey,
+              date: mealDate,
+              reason: 'meal_deleted',
+            },
+          });
+
+          reversedChallenges.push({
+            title: challenge.title,
+            coinsDeducted: deductAmount,
+          });
+        } else {
+          // Still completed — just update the currentValue
+          await UserChallenge.findByIdAndUpdate(userChallenge._id, {
+            $set: { currentValue: newValue },
+          });
+        }
+      }
+    }
+
+    // Also re-sync challenge progress to update non-rewarded challenges
+    const { syncChallengeProgress: syncProgress } = require('./challenge.controller');
+    syncProgress(userId).catch(() => {});
+
+    return success(res, 'Meal log entry deleted', {
+      deleted: true,
+      reversedChallenges,
+      coinsDeducted: reversedChallenges.reduce((s, r) => s + r.coinsDeducted, 0),
+    });
   } catch (err) {
     next(err);
   }
 };
+
+// Helper: get weekly period key for a specific date
+function getWeeklyPeriodKeyForDate(dateStr) {
+  const date = new Date(dateStr + 'T00:00:00Z');
+  const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
+  const dayNum = d.getUTCDay() || 7;
+  d.setUTCDate(d.getUTCDate() + 4 - dayNum);
+  const isoYear = d.getUTCFullYear();
+  const yearStart = new Date(Date.UTC(isoYear, 0, 1));
+  const week = Math.ceil((((d - yearStart) / 86400000) + 1) / 7);
+  return `${isoYear}-W${String(week).padStart(2, '0')}`;
+}
+
+// Helper: get the start of the ISO week (Monday) for a given date
+function getWeekStartISO(dateStr) {
+  const date = new Date(dateStr + 'T00:00:00Z');
+  const day = date.getUTCDay();
+  const diff = day === 0 ? -6 : 1 - day; // Monday is the start
+  date.setUTCDate(date.getUTCDate() + diff);
+  return date.toISOString().slice(0, 10);
+}
 
 // ═══════════════════════════════════════════════════════════════════════════════
 //  NUTRITION PREFERENCES
