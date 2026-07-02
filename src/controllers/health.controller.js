@@ -281,20 +281,29 @@ const syncHealthData = async (req, res, next) => {
             const currentSteps = steps ?? 0;
             const stepDelta = currentSteps - previousSteps;
 
-            logCoinTransaction({
-              userId: req.user._id,
-              type: 'EARNED',
-              amount: actualAdded,
-              balanceAfter: gam.coinsBalance,
-              source: 'PASSIVE_STEPS',
-              description: `Step Coins — ${previousSteps.toLocaleString()} → ${currentSteps.toLocaleString()} = ${stepDelta.toLocaleString()} steps`,
-              metadata: { steps: currentSteps, previousSteps, stepDelta, date: today },
-            });
+            // Skip logging if steps decreased (can happen when switching from
+            // inflated Health Connect value to accurate native sensor value).
+            // Just update the marker so the next log starts from the correct baseline.
+            if (stepDelta <= 0) {
+              gam.lastPassiveCoinSteps = currentSteps;
+              gam.lastPassiveCoinTime = now;
+              await gam.save();
+            } else {
+              logCoinTransaction({
+                userId: req.user._id,
+                type: 'EARNED',
+                amount: actualAdded,
+                balanceAfter: gam.coinsBalance,
+                source: 'PASSIVE_STEPS',
+                description: `Step Coins — ${previousSteps.toLocaleString()} → ${currentSteps.toLocaleString()} = ${stepDelta.toLocaleString()} steps`,
+                metadata: { steps: currentSteps, previousSteps, stepDelta, date: today },
+              });
 
-            // Update throttle markers
-            gam.lastPassiveCoinTime = now;
-            gam.lastPassiveCoinSteps = currentSteps;
-            await gam.save();
+              // Update throttle markers
+              gam.lastPassiveCoinTime = now;
+              gam.lastPassiveCoinSteps = currentSteps;
+              await gam.save();
+            }
           }
         }
       }
