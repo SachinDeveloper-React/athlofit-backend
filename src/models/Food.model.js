@@ -36,7 +36,7 @@ const foodSchema = new mongoose.Schema(
     // ── Classification ────────────────────────────────────────────────────────
     dietType: {
       type: String,
-      enum: ['veg', 'vegetarian', 'non-veg', 'vegan'],
+      enum: ['veg', 'vegetarian','eggetarian', 'non-veg', 'vegan'],
       required: true,
     },
     category: {
