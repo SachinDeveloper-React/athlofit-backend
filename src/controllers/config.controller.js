@@ -31,12 +31,15 @@ function toHtml(raw) {
     const { marked } = require('marked');
     html = marked.parse(html);
   }
-  // Strip PDF/Word paste artifacts
+  // Strip artifacts + empty paragraphs from Quill
   html = html
     .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
     .replace(/\s*class="[^"]*"/gi, '')
-    .replace(/\s*style="[^"]*"/gi, '');
-  return html;
+    .replace(/\s*style="[^"]*"/gi, '')
+    .replace(/<p>\s*<br\s*\/?>\s*<\/p>/gi, '')
+    .replace(/<p>\s*(&nbsp;\s*)*<\/p>/gi, '')
+    .replace(/<p>\s*<\/p>/gi, '');
+  return html.trim();
 }
 
 // ─── Internal: get or seed the single global config doc ──────────────────────
