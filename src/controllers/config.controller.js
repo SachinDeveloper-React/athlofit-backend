@@ -31,13 +31,13 @@ function toHtml(raw) {
     const { marked } = require('marked');
     html = marked.parse(html);
   }
-  // Strip artifacts + empty paragraphs from Quill
+  // Strip artifacts + empty paragraphs + nbsp
   html = html
+    .replace(/&nbsp;/g, ' ')
     .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
     .replace(/\s*class="[^"]*"/gi, '')
     .replace(/\s*style="[^"]*"/gi, '')
     .replace(/<p>\s*<br\s*\/?>\s*<\/p>/gi, '')
-    .replace(/<p>\s*(&nbsp;\s*)*<\/p>/gi, '')
     .replace(/<p>\s*<\/p>/gi, '');
   return html.trim();
 }
@@ -385,11 +385,11 @@ const updateLegalByType = async (req, res, next) => {
     }
     if (!content) return error(res, "content is required", 400);
 
-    // Clean up Quill/rich-editor HTML artifacts before saving
+    // Clean up rich-editor HTML artifacts before saving
     content = content
+      .replace(/&nbsp;/g, ' ')                          // replace all nbsp with spaces
       .replace(/<p>\s*<br\s*\/?>\s*<\/p>/gi, '')       // empty paragraphs
-      .replace(/<p>\s*(&nbsp;\s*)+<\/p>/gi, '')         // nbsp-only paragraphs
-      .replace(/(&nbsp;\s*)+<\/(p|li|h[1-6])>/gi, '</$2>') // trailing nbsp
+      .replace(/<p>\s*<\/p>/gi, '')                     // truly empty paragraphs
       .replace(/(<br\s*\/?>){3,}/gi, '<br><br>')        // excessive line breaks
       .trim();
 
