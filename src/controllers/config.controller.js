@@ -375,12 +375,20 @@ const getLegalByType = async (req, res, next) => {
 const updateLegalByType = async (req, res, next) => {
   try {
     const { type } = req.params;
-    const { title, content, version, isPublished } = req.body;
+    let { title, content, version, isPublished } = req.body;
 
     if (!LEGAL_TYPES.includes(type)) {
       return error(res, `Unknown legal document type: ${type}`, 400);
     }
     if (!content) return error(res, "content is required", 400);
+
+    // Clean up Quill/rich-editor HTML artifacts before saving
+    content = content
+      .replace(/<p>\s*<br\s*\/?>\s*<\/p>/gi, '')       // empty paragraphs
+      .replace(/<p>\s*(&nbsp;\s*)+<\/p>/gi, '')         // nbsp-only paragraphs
+      .replace(/(&nbsp;\s*)+<\/(p|li|h[1-6])>/gi, '</$2>') // trailing nbsp
+      .replace(/(<br\s*\/?>){3,}/gi, '<br><br>')        // excessive line breaks
+      .trim();
 
     const doc = await LegalContent.findOneAndUpdate(
       { type },
