@@ -172,7 +172,18 @@ const syncChallengeProgress = async (userId) => {
         switch (challenge.criteriaType) {
           case 'STEPS':               currentValue = activity?.steps         ?? 0; break;
           case 'CALORIES':            currentValue = activity?.calories      ?? 0; break;
-          case 'HYDRATION':           currentValue = activity?.hydration     ?? 0; break;
+          case 'HYDRATION': {
+            // Only count hydration if it was explicitly logged today.
+            // Check if the activity record has a hydration value AND was updated today.
+            // This prevents carry-over hydration from triggering challenges on a new day.
+            const hydrationVal = activity?.hydration ?? 0;
+            const actUpdatedAt = activity?.updatedAt ? new Date(activity.updatedAt) : null;
+            const todayStart = new Date();
+            todayStart.setHours(0, 0, 0, 0);
+            // Only use hydration if the record was updated after today's midnight
+            currentValue = (actUpdatedAt && actUpdatedAt >= todayStart) ? hydrationVal : 0;
+            break;
+          }
           case 'ACTIVE_MINUTES':      currentValue = activity?.activeMinutes ?? 0; break;
           case 'DISTANCE':            currentValue = activity?.distance      ?? 0; break;
           case 'MEALS_LOGGED':        currentValue = mealsLoggedCount;              break;
