@@ -31,12 +31,15 @@ function toHtml(raw) {
     const { marked } = require('marked');
     html = marked.parse(html);
   }
-  // Strip PDF/Word paste artifacts
+  // Strip artifacts + empty paragraphs + nbsp
   html = html
+    .replace(/&nbsp;/g, ' ')
     .replace(/<style[^>]*>[\s\S]*?<\/style>/gi, '')
     .replace(/\s*class="[^"]*"/gi, '')
-    .replace(/\s*style="[^"]*"/gi, '');
-  return html;
+    .replace(/\s*style="[^"]*"/gi, '')
+    .replace(/<p>\s*<br\s*\/?>\s*<\/p>/gi, '')
+    .replace(/<p>\s*<\/p>/gi, '');
+  return html.trim();
 }
 
 // ─── Internal: get or seed the single global config doc ──────────────────────
@@ -375,12 +378,20 @@ const getLegalByType = async (req, res, next) => {
 const updateLegalByType = async (req, res, next) => {
   try {
     const { type } = req.params;
-    const { title, content, version, isPublished } = req.body;
+    let { title, content, version, isPublished } = req.body;
 
     if (!LEGAL_TYPES.includes(type)) {
       return error(res, `Unknown legal document type: ${type}`, 400);
     }
     if (!content) return error(res, "content is required", 400);
+
+    // Clean up rich-editor HTML artifacts before saving
+    content = content
+      .replace(/&nbsp;/g, ' ')                          // replace all nbsp with spaces
+      .replace(/<p>\s*<br\s*\/?>\s*<\/p>/gi, '')       // empty paragraphs
+      .replace(/<p>\s*<\/p>/gi, '')                     // truly empty paragraphs
+      .replace(/(<br\s*\/?>){3,}/gi, '<br><br>')        // excessive line breaks
+      .trim();
 
     const doc = await LegalContent.findOneAndUpdate(
       { type },
