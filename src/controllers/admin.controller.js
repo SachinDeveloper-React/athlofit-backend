@@ -414,6 +414,81 @@ const adjustUserCoins = async (req, res, next) => {
     next(err);
   }
 };
+
+// ─── POST /admin/users/:id/add-steps ─────────────────────────────────────────
+// Credit bonus steps to a user's account. Body: { steps, reason, date?, source? }
+// Steps are added to the user's daily total and logged to BonusSteps history.
+const addBonusSteps = async (req, res, next) => {
+  try {
+    const BonusSteps = require('../models/BonusSteps.model');
+    const { steps, reason, date, source } = req.body;
+
+    const stepsNum = Number(steps);
+    if (!Number.isFinite(stepsNum) || stepsNum < 1) {
+      return error(res, 'steps must be a positive number (minimum 1)', 400);
+    }
+    if (!reason || reason.trim().length < 3) {
+      return error(res, 'reason is required (minimum 3 characters)', 400);
+    }
+
+    const targetUser = await User.findById(req.params.id);
+    if (!targetUser) return error(res, 'User not found', 404);
+
+    // Use provided date or today
+    const today = new Date();
+    const effectiveDate = date || `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+
+    // Create the bonus steps record
+    const bonus = await BonusSteps.create({
+      user: req.params.id,
+      steps: stepsNum,
+      date: effectiveDate,
+      reason: reason.trim(),
+      source: source || 'admin',
+      addedBy: req.user._id,
+    });
+
+    // Also add bonus steps to the HealthActivity record for that day
+    // so the daily total reflects them in challenges and goal checks.
+    const existing = await HealthActivity.findOne({ user: req.params.id, date: effectiveDate });
+    if (existing) {
+      existing.bonusSteps = (existing.bonusSteps || 0) + stepsNum;
+      existing.steps = (existing.steps || 0) + stepsNum;
+      existing.goalMet = existing.steps >= (targetUser.dailyStepGoal || 10000);
+      await existing.save();
+    } else {
+      await HealthActivity.create({
+        user: req.params.id,
+        date: effectiveDate,
+        steps: stepsNum,
+        bonusSteps: stepsNum,
+        goalMet: stepsNum >= (targetUser.dailyStepGoal || 10000),
+        goalSnapshot: targetUser.dailyStepGoal || 10000,
+      });
+    }
+
+    // Send a notification to the user
+    const { createNotification } = require('../utils/createNotification');
+    createNotification(req.params.id, {
+      type: 'GENERAL',
+      title: '🎁 Bonus Steps Credited!',
+      message: `${stepsNum.toLocaleString()} steps were added to your account: "${reason.trim()}"`,
+      data: { screen: 'Tracker' },
+    });
+
+    await logAdminAction(req, req.params.id, 'BONUS_STEPS', reason.trim(), { steps: stepsNum, date: effectiveDate });
+
+    return success(res, 'Bonus steps added successfully', {
+      bonusId: bonus._id,
+      steps: stepsNum,
+      date: effectiveDate,
+      reason: reason.trim(),
+      totalStepsForDay: existing ? existing.steps : stepsNum,
+    });
+  } catch (err) {
+    next(err);
+  }
+};
 const resetUserStreak = async (req, res, next) => {
   try {
     const gam = await Gamification.findOneAndUpdate(
@@ -580,6 +655,7 @@ module.exports = {
   updateUserRole,
   updateUserAccount,
   adjustUserCoins,
+  addBonusSteps,
   resetUserStreak,
   banUser,
   unbanUser,

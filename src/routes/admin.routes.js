@@ -12,6 +12,7 @@ const {
   updateUserRole,
   updateUserAccount,
   adjustUserCoins,
+  addBonusSteps,
   resetUserStreak,
   banUser,
   unbanUser,
@@ -77,6 +78,12 @@ router.post('/users/:id/coins',
     .custom((v) => Number(v) !== 0).withMessage('amount cannot be zero'),
   body('reason').optional().isString().isLength({ max: 300 }),
   validate, adjustUserCoins);
+router.post('/users/:id/add-steps',
+  body('steps').isInt({ min: 1 }).withMessage('steps must be a positive integer'),
+  body('reason').isString().trim().notEmpty().withMessage('reason is required').isLength({ max: 200 }),
+  body('date').optional().matches(/^\d{4}-\d{2}-\d{2}$/).withMessage('date must be YYYY-MM-DD format'),
+  body('source').optional().isIn(['admin', 'system', 'reward', 'challenge']),
+  validate, addBonusSteps);
 router.post('/users/:id/reset-streak', resetUserStreak);
 router.post('/users/:id/ban',
   body('reason').isString().trim().notEmpty().withMessage('A ban reason is required').isLength({ max: 300 }),

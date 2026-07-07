@@ -117,17 +117,31 @@ const updateStepGoal = async (req, res, next) => {
   try {
     const { dailyStepGoal } = req.body;
 
-    if (!dailyStepGoal || dailyStepGoal < 5000) {
-      return error(res, "Step goal must be at least 5,000", 400);
+    if (!dailyStepGoal || dailyStepGoal < 3000) {
+      return error(res, "Step goal must be at least 3,000", 400);
     }
+
+    // Calculate tomorrow's date (IST-safe: use UTC day + 1)
+    const now = new Date();
+    const tomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
+    const effectiveDate = `${tomorrow.getFullYear()}-${String(tomorrow.getMonth() + 1).padStart(2, '0')}-${String(tomorrow.getDate()).padStart(2, '0')}`;
 
     const user = await User.findByIdAndUpdate(
       req.user._id,
-      { $set: { dailyStepGoal } },
+      {
+        $set: {
+          pendingStepGoal: dailyStepGoal,
+          pendingGoalEffectiveDate: effectiveDate,
+        },
+      },
       { new: true },
     );
 
-    return success(res, "Step goal updated", user);
+    return success(res, "Step goal updated — takes effect tomorrow", {
+      dailyStepGoal: user.dailyStepGoal,
+      pendingStepGoal: user.pendingStepGoal,
+      pendingGoalEffectiveDate: user.pendingGoalEffectiveDate,
+    });
   } catch (err) {
     next(err);
   }
@@ -519,6 +533,48 @@ const getDeletionStatus = async (req, res, next) => {
   }
 };
 
+// ─── GET /user/bonus-steps ────────────────────────────────────────────────────
+// Returns the user's bonus step history (admin/system credited steps).
+const getBonusStepsHistory = async (req, res, next) => {
+  try {
+    const BonusSteps = require("../models/BonusSteps.model");
+
+    const limit = Math.min(50, parseInt(req.query.limit || "20", 10));
+    const skip = parseInt(req.query.skip || "0", 10);
+
+    const [entries, total] = await Promise.all([
+      BonusSteps.find({ user: req.user._id })
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .select("steps date reason source createdAt"),
+      BonusSteps.countDocuments({ user: req.user._id }),
+    ]);
+
+    // Also get today's total bonus steps for quick reference
+    const today = todayISO();
+    const todayBonus = await BonusSteps.aggregate([
+      { $match: { user: req.user._id, date: today } },
+      { $group: { _id: null, total: { $sum: "$steps" } } },
+    ]);
+
+    return success(res, "Bonus steps history fetched", {
+      entries: entries.map(e => ({
+        _id: e._id,
+        steps: e.steps,
+        date: e.date,
+        reason: e.reason,
+        source: e.source,
+        createdAt: e.createdAt,
+      })),
+      total,
+      todayBonusSteps: todayBonus[0]?.total || 0,
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
 module.exports = {
   getProfile,
   updateProfile,
@@ -538,4 +594,5 @@ module.exports = {
   requestAccountDeletion,
   cancelAccountDeletion,
   getDeletionStatus,
+  getBonusStepsHistory,
 };

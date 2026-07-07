@@ -40,17 +40,18 @@ const getWeeklySteps = async (req, res, next) => {
     const records = await HealthActivity.find({
       user: req.user._id,
       date: { $gte: from, $lte: to },
-    }).select('date steps goalSnapshot');
+    }).select('date steps bonusSteps goalSnapshot');
 
     // Map to lookup
     const recordMap = {};
-    records.forEach(r => { recordMap[r.date] = { steps: r.steps, goalSnapshot: r.goalSnapshot }; });
+    records.forEach(r => { recordMap[r.date] = { steps: r.steps, bonusSteps: r.bonusSteps || 0, goalSnapshot: r.goalSnapshot }; });
 
     // Build response matching WeeklyStepEntry[] in app
     const data = dates.map(date => ({
       date: toDayLabel(date),       // "Mon", "Tue" etc.
       fullDate: date,
       steps: recordMap[date]?.steps ?? 0,
+      bonusSteps: recordMap[date]?.bonusSteps ?? 0,
       // Use the goal that was active on that day; fall back to current goal
       // for days that have no record yet (future/unsynced days).
       goalSnapshot: recordMap[date]?.goalSnapshot || req.user.dailyStepGoal || 10000,
@@ -86,6 +87,24 @@ const syncHealthData = async (req, res, next) => {
 
     const today = date || todayISO();
 
+    // ── Apply pending step goal if effective date has arrived ─────────────────
+    // When a user changes their goal, it's stored as pending and only becomes
+    // the active dailyStepGoal on or after the effective date.
+    if (
+      req.user.pendingStepGoal &&
+      req.user.pendingGoalEffectiveDate &&
+      today >= req.user.pendingGoalEffectiveDate
+    ) {
+      await User.findByIdAndUpdate(req.user._id, {
+        $set: { dailyStepGoal: req.user.pendingStepGoal },
+        $unset: { pendingStepGoal: 1, pendingGoalEffectiveDate: 1 },
+      });
+      // Use the newly applied goal for today's sync
+      req.user.dailyStepGoal = req.user.pendingStepGoal;
+      req.user.pendingStepGoal = null;
+      req.user.pendingGoalEffectiveDate = null;
+    }
+
     // ── Guard: reject syncs for dates before the user's account was created ──
     // This prevents historical Health Connect / HealthKit data from leaking
     // into a newly created account (the background sync always pushes yesterday,
@@ -113,10 +132,19 @@ const syncHealthData = async (req, res, next) => {
         ? incoming
         : (stored ?? 0);
 
+    // Preserve bonus steps — device only knows about walked steps, so
+    // total = device steps + bonus steps credited by admin/system.
+    const bonusSteps = existing?.bonusSteps || 0;
+    const deviceSteps = merge(steps, (existing?.steps || 0) - bonusSteps);
+    const totalSteps = deviceSteps + bonusSteps;
+
+    // Re-evaluate goal met with total steps (walked + bonus)
+    const totalGoalMet = goalMet ?? (totalSteps >= dailyGoal);
+
     const updateFields = {
-      // Steps, calories, distance, activeMinutes — always take the latest
-      // non-zero value (background sync derives these from steps)
-      steps:                  merge(steps,                  existing?.steps),
+      // Steps = walked (from device) + bonus (from admin/system)
+      steps:                  totalSteps,
+      bonusSteps:             bonusSteps, // preserve, don't overwrite
       distance:               merge(distance,               existing?.distance),
       calories:               merge(calories,               existing?.calories),
       activeMinutes:          merge(activeMinutes,          existing?.activeMinutes),
@@ -131,7 +159,7 @@ const syncHealthData = async (req, res, next) => {
       sleepHours:             merge(sleepHours,             existing?.sleepHours),
       bloodGlucose:           merge(bloodGlucose,           existing?.bloodGlucose),
       weight:                 merge(weight,                 existing?.weight),
-      goalMet: isGoalMet,
+      goalMet: totalGoalMet,
       // Snapshot the goal that was active on this day — only set once so that
       // changing the goal later does NOT retroactively alter past days.
       goalSnapshot: existing?.goalSnapshot > 0 ? existing.goalSnapshot : dailyGoal,
@@ -144,7 +172,7 @@ const syncHealthData = async (req, res, next) => {
     );
 
     // Update streak if goal was met
-    if (isGoalMet) {
+    if (totalGoalMet) {
       await _updateStreak(req.user._id, today);
     }
 
@@ -321,6 +349,8 @@ const syncHealthData = async (req, res, next) => {
       goalCoinsAwarded,
       coinsBalance: gam.coinsBalance,
       stepGoalCoins: awardedGoalCoins,
+      bonusSteps,       // bonus steps credited for today (so app can show total)
+      totalSteps,       // walked + bonus combined
       newlyCompleted,   // array of { title, emoji, coinReward }
     });
   } catch (err) {

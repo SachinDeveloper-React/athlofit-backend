@@ -4,6 +4,7 @@
 // open the app. Without this, a missed day is only processed on the next sync.
 
 const Gamification = require('../models/Gamification.model');
+const User = require('../models/User.model');
 const { success, error } = require('../utils/response');
 const { todayISO, daysBetween } = require('../utils/date');
 const { getStreakConfig, attemptProtect } = require('../utils/streak');
@@ -127,4 +128,38 @@ const grantWeeklyLives = async (req, res, next) => {
   }
 };
 
-module.exports = { evaluateStreaks, grantWeeklyLives };
+// ─── GET/POST /cron/apply-pending-goals ──────────────────────────────────────
+// Applies pending step goal changes whose effective date has arrived.
+// This ensures the goal flips even if the user doesn't open the app today.
+const applyPendingGoals = async (req, res, next) => {
+  try {
+    if (!isAuthorized(req)) return error(res, 'Unauthorized', 401);
+
+    const today = todayISO();
+
+    const result = await User.updateMany(
+      {
+        pendingStepGoal: { $ne: null },
+        pendingGoalEffectiveDate: { $lte: today },
+      },
+      [
+        {
+          $set: {
+            dailyStepGoal: '$pendingStepGoal',
+            pendingStepGoal: null,
+            pendingGoalEffectiveDate: null,
+          },
+        },
+      ],
+    );
+
+    return success(res, 'Pending goals applied', {
+      date: today,
+      applied: result.modifiedCount || 0,
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+module.exports = { evaluateStreaks, grantWeeklyLives, applyPendingGoals };

@@ -75,6 +75,10 @@ const userSchema = new mongoose.Schema(
 
     // Health goal
     dailyStepGoal: { type: Number, default: 10000 },
+    // Pending goal — applied on the effective date so today's challenges
+    // continue using the current goal until midnight.
+    pendingStepGoal: { type: Number, default: null },
+    pendingGoalEffectiveDate: { type: String, default: null }, // ISO "YYYY-MM-DD"
 
     // Saved delivery addresses
     savedAddresses: [

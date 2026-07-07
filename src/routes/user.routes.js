@@ -21,6 +21,7 @@ const {
   requestAccountDeletion,
   cancelAccountDeletion,
   getDeletionStatus,
+  getBonusStepsHistory,
 } = require("../controllers/user.controller");
 const {
   getAnalyticsDashboard,
@@ -65,6 +66,9 @@ router.post(
   completeProfile,
 );
 router.patch("/step-goal", updateStepGoal);
+
+// ─── Bonus steps history ──────────────────────────────────────────────────────
+router.get("/bonus-steps", getBonusStepsHistory);
 
 // ─── Avatar upload ────────────────────────────────────────────────────────────
 router.post("/upload-avatar", avatarUpload.single("avatar"), uploadAvatar);

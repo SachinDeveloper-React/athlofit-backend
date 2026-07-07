@@ -423,37 +423,87 @@ const updatePreferences = async (req, res, next) => {
 
 /**
  * GET /nutrition/foods
- * Query: ?dietType=veg&category=lunch&search=chicken&page=1&limit=20
+ * Query: ?dietType=veg&category=lunch&search=chicken&goal=muscle_gain&page=1&limit=20
+ * If no dietType is specified, auto-filters by the user's saved diet preference.
+ * If goal is specified, sorts results to prioritize foods matching that goal.
  */
 const getFoods = async (req, res, next) => {
   try {
     const userId = req.user._id;
 
-    const { dietType, category, search, page = 1, limit = 20 } = req.query;
+    const { dietType, category, search, goal, page = 1, limit = 20 } = req.query;
 
     const pageNum  = Math.max(1, parseInt(page, 10));
     const limitNum = Math.min(50, Math.max(1, parseInt(limit, 10)));
     const skip     = (pageNum - 1) * limitNum;
 
+    // Load user preferences for auto-filter and favourites
+    const prefs = await NutritionPref.findOne({ user: userId }).select('dietPreference dietaryGoal favourites');
+
     // Build filter
     const filter = { isActive: true };
-    if (dietType && dietType !== 'all')    filter.dietType = dietType;
+
+    // Diet type filter: use explicit param, or fall back to user's saved preference
+    if (dietType && dietType !== 'all') {
+      filter.dietType = dietType;
+    } else if (!dietType && prefs?.dietPreference) {
+      filter.dietType = prefs.dietPreference;
+    }
+
     if (category && category !== 'all')    filter.category = category;
     if (search && search.trim().length >= 2) {
       const resolved = await resolveSearchTerm(search);
       filter.$text = { $search: resolved };
     }
 
-    const [foods, total] = await Promise.all([
+    // ── Goal-based filtering & sorting ──────────────────────────────────────
+    // If a goal is active, first try to filter foods explicitly tagged with
+    // that goal. If no tagged foods exist (e.g. not yet migrated), fall back
+    // to nutritional-value-based sorting as a heuristic.
+    const activeGoal = goal || prefs?.dietaryGoal || null;
+    let sortCriteria;
+
+    if (activeGoal) {
+      // Add goal filter — shows foods tagged for this goal first.
+      // Use $or so foods without any tags also appear (sorted lower).
+      filter.goals = activeGoal;
+    }
+
+    if (search) {
+      sortCriteria = { score: { $meta: 'textScore' } };
+    } else if (activeGoal === 'weight_loss') {
+      sortCriteria = { calories: 1, fiber: -1, name: 1 };
+    } else if (activeGoal === 'muscle_gain') {
+      sortCriteria = { protein: -1, calories: -1, name: 1 };
+    } else if (activeGoal === 'endurance') {
+      sortCriteria = { carbs: -1, calories: -1, name: 1 };
+    } else {
+      sortCriteria = { name: 1 };
+    }
+
+    // First try with goal filter
+    let [foods, total] = await Promise.all([
       Food.find(filter)
-        .sort(search ? { score: { $meta: 'textScore' } } : { name: 1 })
+        .sort(sortCriteria)
         .skip(skip)
         .limit(limitNum),
       Food.countDocuments(filter),
     ]);
 
-    // Load user favourites to inject isFavourite
-    const prefs = await NutritionPref.findOne({ user: userId }).select('favourites');
+    // Fallback: if goal filter yields no results (foods not yet tagged),
+    // remove the goal filter and use nutritional sorting only.
+    if (total === 0 && activeGoal && filter.goals) {
+      delete filter.goals;
+      [foods, total] = await Promise.all([
+        Food.find(filter)
+          .sort(sortCriteria)
+          .skip(skip)
+          .limit(limitNum),
+        Food.countDocuments(filter),
+      ]);
+    }
+
+    // Use already-loaded favourites
     const favIds = prefs?.favourites ?? [];
 
     const serialised = foods.map(f => serialiseFood(f, favIds));

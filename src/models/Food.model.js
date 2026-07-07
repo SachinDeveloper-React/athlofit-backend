@@ -48,6 +48,14 @@ const foodSchema = new mongoose.Schema(
         message: 'At least one meal category is required',
       },
     },
+    // ── Goal suitability tags ─────────────────────────────────────────────────
+    // Each food can be tagged with one or more dietary goals it supports.
+    // Admin-seeded or auto-tagged based on nutritional profile.
+    goals: {
+      type: [String],
+      enum: ['weight_loss', 'muscle_gain', 'maintenance', 'endurance'],
+      default: [],
+    },
 
     // ── Optional media ────────────────────────────────────────────────────────
     imageUrl: { type: String, default: null },
@@ -71,5 +79,6 @@ foodSchema.index({ name: 'text', description: 'text' });
 // Compound index for the most common filter combinations
 foodSchema.index({ dietType: 1, category: 1, isActive: 1 });
 foodSchema.index({ category: 1, isActive: 1 });
+foodSchema.index({ goals: 1, dietType: 1, isActive: 1 });
 
 module.exports = mongoose.model('Food', foodSchema);

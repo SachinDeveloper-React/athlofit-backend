@@ -14,6 +14,7 @@ const healthActivitySchema = new mongoose.Schema(
       required: true,
     },
     steps: { type: Number, default: 0 },
+    bonusSteps: { type: Number, default: 0 }, // steps credited by admin/system (not from device)
     distance: { type: Number, default: 0 },   // km
     calories: { type: Number, default: 0 },   // kcal
     activeMinutes: { type: Number, default: 0 },
