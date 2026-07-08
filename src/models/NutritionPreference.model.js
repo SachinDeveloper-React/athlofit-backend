@@ -12,17 +12,17 @@ const nutritionPreferenceSchema = new mongoose.Schema(
       unique: true,   // one record per user
     },
 
-    // 'veg' | 'non-veg' | 'vegan'
+    // 'all' | 'veg' | 'non-veg' | 'vegan'
     dietPreference: {
       type: String,
-      enum: ['veg', 'non-veg', 'vegan'],
-      default: 'non-veg',
+      enum: ['all', 'veg', 'non-veg', 'vegan', 'eggetarian'],
+      default: 'all',
     },
 
-    // 'weight_loss' | 'muscle_gain' | 'maintenance' | 'endurance'
+    // 'weight_loss' | 'muscle_gain' | 'maintenance' | 'endurance' | 'weight_gain'
     dietaryGoal: {
       type: String,
-      enum: ['weight_loss', 'muscle_gain', 'maintenance', 'endurance'],
+      enum: ['weight_loss', 'muscle_gain', 'maintenance', 'endurance', 'weight_gain'],
       default: 'maintenance',
     },
 

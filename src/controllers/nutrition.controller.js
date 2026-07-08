@@ -383,8 +383,8 @@ const updatePreferences = async (req, res, next) => {
   try {
     const { dietPreference, dietaryGoal, calorieGoal } = req.body;
 
-    const VALID_DIET  = ['veg', 'non-veg', 'vegan'];
-    const VALID_GOALS = ['weight_loss', 'muscle_gain', 'maintenance', 'endurance'];
+    const VALID_DIET  = ['all', 'veg', 'non-veg', 'vegan', 'eggetarian'];
+    const VALID_GOALS = ['weight_loss', 'muscle_gain', 'maintenance', 'endurance', 'weight_gain'];
 
     if (dietPreference && !VALID_DIET.includes(dietPreference)) {
       return error(res, `Invalid dietPreference. Must be one of: ${VALID_DIET.join(', ')}`, 400);
@@ -444,9 +444,10 @@ const getFoods = async (req, res, next) => {
     const filter = { isActive: true };
 
     // Diet type filter: use explicit param, or fall back to user's saved preference
+    // 'all' means show everything — no diet type filter applied
     if (dietType && dietType !== 'all') {
       filter.dietType = dietType;
-    } else if (!dietType && prefs?.dietPreference) {
+    } else if (!dietType && prefs?.dietPreference && prefs.dietPreference !== 'all') {
       filter.dietType = prefs.dietPreference;
     }
 
@@ -477,6 +478,8 @@ const getFoods = async (req, res, next) => {
       sortCriteria = { protein: -1, calories: -1, name: 1 };
     } else if (activeGoal === 'endurance') {
       sortCriteria = { carbs: -1, calories: -1, name: 1 };
+    } else if (activeGoal === 'weight_gain') {
+      sortCriteria = { calories: -1, carbs: -1, protein: -1, name: 1 };
     } else {
       sortCriteria = { name: 1 };
     }
@@ -611,15 +614,77 @@ const getFavourites = async (req, res, next) => {
  * Returns the configurable diet preference chips and dietary goal chips.
  * Admins can update these via PATCH /config/app (nutrition.dietPreferences / nutrition.dietaryGoals).
  */
+
+// Map display values from AppConfig to the enum keys stored in NutritionPreference
+const DIET_VALUE_MAP = {
+  'vegetarian': 'veg',
+  'veg':        'veg',
+  'non-veg':    'non-veg',
+  'non-vegetarian': 'non-veg',
+  'nonveg':     'non-veg',
+  'vegan':      'vegan',
+  'egg':        'eggetarian',
+  'eggetarian': 'eggetarian',
+  'all':        'all',
+};
+
+const GOAL_VALUE_MAP = {
+  'fat loss':     'weight_loss',
+  'weight loss':  'weight_loss',
+  'weight_loss':  'weight_loss',
+  'muscle gain':  'muscle_gain',
+  'muscle_gain':  'muscle_gain',
+  'weight gain':  'weight_gain',
+  'weight_gain':  'weight_gain',
+  'maintenance':  'maintenance',
+  'endurance':    'endurance',
+};
+
+function normalizeDietValue(raw) {
+  const key = (raw || '').trim().toLowerCase();
+  return DIET_VALUE_MAP[key] || key;
+}
+
+function normalizeGoalValue(raw) {
+  const key = (raw || '').trim().toLowerCase();
+  return GOAL_VALUE_MAP[key] || key;
+}
+
 const getNutritionOptions = async (req, res, next) => {
   try {
     let cfg = await AppConfig.findOne({ key: 'global' });
     if (!cfg) cfg = await AppConfig.create({ key: 'global' });
 
+    // Normalize diet preferences — map display values to enum keys
+    let dietPreferences = (cfg.nutrition?.dietPreferences ?? []).map(p => ({
+      value: normalizeDietValue(p.value),
+      label: p.label || p.value,
+      emoji: p.emoji || '',
+    }));
+
+    // Ensure 'all' option exists
+    if (dietPreferences.length === 0) {
+      dietPreferences = [
+        { value: 'all',        label: 'All',        emoji: '🍽️' },
+        { value: 'veg',        label: 'Vegetarian', emoji: '🥦' },
+        { value: 'non-veg',    label: 'Non-Veg',    emoji: '🍗' },
+        { value: 'vegan',      label: 'Vegan',      emoji: '🌱' },
+      ];
+    } else if (!dietPreferences.some(p => p.value === 'all')) {
+      dietPreferences = [{ value: 'all', label: 'All', emoji: '🍽️' }, ...dietPreferences];
+    }
+
+    // Normalize dietary goals — map display values to enum keys
+    const dietaryGoals = (cfg.nutrition?.dietaryGoals ?? []).map(g => ({
+      value: normalizeGoalValue(g.value),
+      label: g.label || g.value,
+      emoji: g.emoji || '',
+    }));
+
     return success(res, 'Nutrition options fetched', {
-      dietPreferences: cfg.nutrition.dietPreferences,
-      dietaryGoals:    cfg.nutrition.dietaryGoals,
-      catalogFilters:  cfg.nutrition.catalogFilters,
+      dietPreferences,
+      dietaryGoals,
+      catalogFilters:  cfg.nutrition?.catalogFilters ?? [],
     });
   } catch (err) {
     next(err);

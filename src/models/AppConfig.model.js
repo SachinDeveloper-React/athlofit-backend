@@ -42,12 +42,14 @@ const appConfigSchema = new mongoose.Schema(
       dietPreferences: {
         type: [
           {
+            _id: false,
             value: { type: String, required: true },
             label: { type: String, required: true },
             emoji: { type: String, default: '' },
           },
         ],
         default: [
+          { value: 'all',     label: 'All',        emoji: '🍽️' },
           { value: 'veg',     label: 'Vegetarian', emoji: '🥦' },
           { value: 'non-veg', label: 'Non-Veg',    emoji: '🍗' },
           { value: 'vegan',   label: 'Vegan',       emoji: '🌱' },
@@ -56,6 +58,7 @@ const appConfigSchema = new mongoose.Schema(
       dietaryGoals: {
         type: [
           {
+            _id: false,
             value: { type: String, required: true },
             label: { type: String, required: true },
             emoji: { type: String, default: '' },
@@ -71,6 +74,7 @@ const appConfigSchema = new mongoose.Schema(
       catalogFilters: {
         type: [
           {
+            _id: false,
             id:    { type: String, required: true },
             label: { type: String, required: true },
             emoji: { type: String, default: '' },

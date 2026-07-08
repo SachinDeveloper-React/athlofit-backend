@@ -53,7 +53,7 @@ const foodSchema = new mongoose.Schema(
     // Admin-seeded or auto-tagged based on nutritional profile.
     goals: {
       type: [String],
-      enum: ['weight_loss', 'muscle_gain', 'maintenance', 'endurance'],
+      enum: ['weight_loss', 'muscle_gain', 'maintenance', 'endurance', 'weight_gain'],
       default: [],
     },
 
