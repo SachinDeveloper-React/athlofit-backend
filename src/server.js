@@ -6,6 +6,7 @@ const { connectDB } = require('./config/db');
 const app = require('./app');
 const { startScheduler } = require('./services/scheduler');
 const { startCronJobs } = require('./cron');
+const { startPassiveCoinCron } = require('./crons/passiveCoinDistribution');
 
 const PORT = process.env.PORT || 5001;
 
@@ -17,5 +18,7 @@ connectDB().then(() => {
     startScheduler();
     // Start streak evaluation + weekly lives cron
     startCronJobs();
+    // Start passive coin distribution (every 3h + EOD)
+    startPassiveCoinCron();
   });
 });
