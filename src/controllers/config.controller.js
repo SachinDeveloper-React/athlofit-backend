@@ -169,10 +169,10 @@ const updateAppConfig = async (req, res, next) => {
     // ─── Validate coin_config fields before persisting ──────────────────────────
     if (setMap["coin_config.steps.rate_per_100_steps"] !== undefined) {
       const rate = setMap["coin_config.steps.rate_per_100_steps"];
-      if (typeof rate !== "number" || rate <= 0 || rate > 1.0) {
+      if (typeof rate !== "number" || rate <= 0 || rate > 1000) {
         return error(
           res,
-          "rate_per_100_steps must be a positive number <= 1.0",
+          "rate_per_100_steps must be a positive number (max 1000)",
           400,
         );
       }
