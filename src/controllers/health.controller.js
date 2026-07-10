@@ -132,6 +132,14 @@ const syncHealthData = async (req, res, next) => {
         ? incoming
         : (stored ?? 0);
 
+    // Hydration supports explicit reset to 0 — unlike other fields where 0
+    // means "no data from device this sync cycle", hydration 0 is a deliberate
+    // user action (undo/reset). So we bypass the merge guard for it.
+    const resolveHydration = (incoming, stored) =>
+      (incoming !== undefined && incoming !== null && incoming === 0)
+        ? 0 // explicit reset
+        : merge(incoming, stored);
+
     // Preserve bonus steps — device only knows about walked steps, so
     // total = device steps + bonus steps credited by admin/system.
     const bonusSteps = existing?.bonusSteps || 0;
@@ -155,7 +163,7 @@ const syncHealthData = async (req, res, next) => {
       heartRateMax:           merge(heartRateMax,           existing?.heartRateMax),
       bloodPressureSystolic:  merge(bloodPressureSystolic,  existing?.bloodPressureSystolic),
       bloodPressureDiastolic: merge(bloodPressureDiastolic, existing?.bloodPressureDiastolic),
-      hydration:              merge(hydration,              existing?.hydration),
+      hydration:              resolveHydration(hydration, existing?.hydration),
       sleepHours:             merge(sleepHours,             existing?.sleepHours),
       bloodGlucose:           merge(bloodGlucose,           existing?.bloodGlucose),
       weight:                 merge(weight,                 existing?.weight),
@@ -210,6 +218,38 @@ const syncHealthData = async (req, res, next) => {
 
     let goalCoinsAwarded = false;
     let awardedGoalCoins = 0;
+
+    // ── Revert hydration reward if water was reset below goal ─────────────────
+    // When the user explicitly resets hydration (sends 0), and they had already
+    // claimed the daily water coins, un-claim them so the Earn Coins card
+    // reflects the reverted state.
+    const resolvedHydration = updateFields.hydration;
+    const hydrationGoalMl = cfg.rewards?.hydrationGoalMl ?? 2000;
+
+    if (
+      isTodaySync &&
+      resolvedHydration < hydrationGoalMl &&
+      gam.lastWaterCoinDate === today
+    ) {
+      // Deduct the hydration reward coins that were previously awarded
+      const hydrationCoins = cfg.rewards?.hydrationGoalCoins ?? 20;
+      gam.coinsBalance = Math.max(0, Math.round(gam.coinsBalance - hydrationCoins));
+      gam.coinsEarnedToday = Math.max(0, Math.round((gam.coinsEarnedToday || 0) - hydrationCoins));
+      gam.lastWaterCoinDate = null; // allow re-claim when goal is met again
+
+      // Log the reversal transaction
+      logCoinTransaction({
+        userId: req.user._id,
+        type: 'DEDUCTED',
+        amount: hydrationCoins,
+        balanceAfter: gam.coinsBalance,
+        source: 'HYDRATION_GOAL_REVERTED',
+        description: 'Water intake reset — hydration reward reversed',
+        metadata: { date: today, rewardId: 'hydration_daily' },
+      });
+
+      await gam.save();
+    }
 
     if (isGoalMet && gam.stepGoalCoinDate !== today && isTodaySync) {
       // Award step goal coins automatically (subject to daily cap)

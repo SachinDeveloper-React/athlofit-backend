@@ -73,13 +73,28 @@ const getDailySummary = async (req, res, next) => {
 
     const meals = { breakfast: [], lunch: [], dinner: [], snacks: [] };
 
+    // Per-food intake aggregation (for foods from catalog with a foodRef)
+    const foodIntakeMap = {};
+
     for (const log of logs) {
       totalCaloriesIn += log.calories || 0;
       totalProtein    += log.protein  || 0;
       totalCarbs      += log.carbs    || 0;
       totalFat        += log.fat      || 0;
       meals[log.mealType].push(log.toJSON());
+
+      // Aggregate per-food intake for catalog items
+      if (log.foodRef) {
+        const refId = log.foodRef.toString();
+        if (!foodIntakeMap[refId]) {
+          foodIntakeMap[refId] = { foodRef: refId, name: log.name, totalQuantity: 0, totalCalories: 0 };
+        }
+        foodIntakeMap[refId].totalQuantity += log.quantity || 1;
+        foodIntakeMap[refId].totalCalories += log.calories || 0;
+      }
     }
+
+    const foodIntakeSummary = Object.values(foodIntakeMap);
 
     return success(res, 'Daily summary fetched', {
       date,
@@ -90,6 +105,7 @@ const getDailySummary = async (req, res, next) => {
       totalCarbs:    Math.round(totalCarbs),
       totalFat:      Math.round(totalFat),
       meals,
+      foodIntakeSummary,
     });
   } catch (err) {
     next(err);
