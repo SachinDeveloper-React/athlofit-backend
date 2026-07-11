@@ -82,28 +82,46 @@ async function distributePassiveCoins() {
       // Skip if no new steps since last payout
       if (stepDelta <= 0) continue;
 
-      // Calculate coins for this delta
-      const rawCoins = parseFloat((Math.floor(stepDelta / 100) * rate).toFixed(4));
-      if (rawCoins <= 0) continue;
+      // Skip if a health sync recently processed coins (within the last minute)
+      // to avoid race conditions where both cron and sync award the same steps.
+      if (gam.lastPassiveCoinTime) {
+        const timeSinceLastAward = Date.now() - new Date(gam.lastPassiveCoinTime).getTime();
+        if (timeSinceLastAward < 60 * 1000) continue; // skip, sync just handled it
+      }
 
-      // Apply daily cap
+      // Determine the user's effective passive daily cap
       const user = userMap.get(userId.toString());
       const isVerified = user?.emailVerified ?? false;
       const effectiveCap = isVerified
         ? dailyEarnLimit
         : Math.min(unverifiedDailyCap, dailyEarnLimit);
 
+      // Calculate coins using the same formula as health sync:
+      // Total passive coins earned today = min(dailyEarnLimit, floor(totalSteps/100) * rate)
+      // Only award the difference between what should be earned and what's already in coinsEarnedToday.
+      const totalPassiveCoinsForToday = parseFloat(
+        Math.min(effectiveCap, Math.max(0, Math.floor(currentSteps / 100) * rate)).toFixed(4)
+      );
+
       const currentEarned = gam.coinsEarnedToday || 0;
-      const remainingAllowance = Math.max(0, effectiveCap - currentEarned);
+      // coinsEarnedToday may include goal/hydration coins, so use lastPassiveCoinSteps as base
+      const passiveAlreadyAwarded = parseFloat(
+        Math.min(effectiveCap, Math.max(0, Math.floor(previousSteps / 100) * rate)).toFixed(4)
+      );
+      const actualCoins = parseFloat(
+        Math.max(0, totalPassiveCoinsForToday - passiveAlreadyAwarded).toFixed(4)
+      );
 
-      if (remainingAllowance <= 0) continue; // Already maxed out for today
+      // Also check we don't exceed the overall daily cap
+      const overallCap = cfg.coin?.maxDailyRewards ?? 250;
+      const overallRemaining = Math.max(0, overallCap - currentEarned);
+      const finalCoins = parseFloat(Math.min(actualCoins, overallRemaining).toFixed(4));
 
-      const actualCoins = parseFloat(Math.min(rawCoins, remainingAllowance).toFixed(4));
-      if (actualCoins <= 0) continue;
+      if (finalCoins <= 0) continue;
 
       // Award coins
-      gam.coinsBalance = parseFloat((gam.coinsBalance + actualCoins).toFixed(4));
-      gam.coinsEarnedToday = parseFloat((currentEarned + actualCoins).toFixed(4));
+      gam.coinsBalance = parseFloat((gam.coinsBalance + finalCoins).toFixed(4));
+      gam.coinsEarnedToday = parseFloat(((gam.coinsEarnedToday || 0) + finalCoins).toFixed(4));
       gam.lastCoinDate = today;
       gam.lastPassiveCoinSteps = currentSteps;
       gam.lastPassiveCoinTime = now;
@@ -113,7 +131,7 @@ async function distributePassiveCoins() {
       logCoinTransaction({
         userId,
         type: 'EARNED',
-        amount: actualCoins,
+        amount: finalCoins,
         balanceAfter: gam.coinsBalance,
         source: 'PASSIVE_STEPS',
         description: `Auto Step Coins — ${previousSteps.toLocaleString()} → ${currentSteps.toLocaleString()} (+${stepDelta.toLocaleString()} steps)`,
@@ -127,7 +145,7 @@ async function distributePassiveCoins() {
       });
 
       awarded++;
-      totalCoinsAwarded += actualCoins;
+      totalCoinsAwarded += finalCoins;
     } catch (err) {
       console.error(`[CRON:PassiveCoins] Error processing user ${userId}:`, err.message);
     }
