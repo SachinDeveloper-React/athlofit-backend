@@ -121,6 +121,11 @@ const updateStepGoal = async (req, res, next) => {
       return error(res, "Step goal must be at least 3,000", 400);
     }
 
+    // FIX #11: Upper bound validation — no one walks 100k+ steps in a day
+    if (dailyStepGoal > 100000) {
+      return error(res, "Step goal cannot exceed 100,000", 400);
+    }
+
     // Calculate tomorrow's date (IST-safe: use UTC day + 1)
     const now = new Date();
     const tomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);

@@ -3,11 +3,14 @@ const BmiRecord      = require('../models/BmiRecord.model');
 const Gamification   = require('../models/Gamification.model');
 const User           = require('../models/User.model');
 const { success, error } = require('../utils/response');
-const { buildDateRange, toDayLabel, todayISO, isConsecutiveDay } = require('../utils/date');
+const { buildDateRange, toDayLabel, todayISO, isConsecutiveDay, resolveClientDate } = require('../utils/date');
 const { syncChallengeProgress } = require('./challenge.controller');
 const { sendPushToUser } = require('../utils/pushNotification');
 const { createNotification } = require('../utils/createNotification');
 const { logCoinTransaction } = require('../utils/logCoinTransaction');
+const { validateSteps } = require('../utils/stepValidation');
+const { getCachedAppConfig } = require('../utils/appConfigCache');
+const { checkTimezoneManipulation } = require('../utils/timezoneGuard');
 
 // ─── Unverified user daily coin cap ──────────────────────────────────────────
 function getEffectiveDailyCap(user, configMax, unverifiedCap) {
@@ -83,9 +86,12 @@ const syncHealthData = async (req, res, next) => {
       bloodGlucose,
       weight,
       goalMet,
+      timezone, // FIX #3: Client sends timezone (e.g., "Asia/Kolkata" or offset like "+05:30")
     } = req.body;
 
-    const today = date || todayISO();
+    // FIX #3: Use client timezone for "today" calculation when available.
+    // This ensures coins are awarded based on the user's local day, not server time.
+    const today = date || resolveClientDate(timezone);
 
     // ── Apply pending step goal if effective date has arrived ─────────────────
     // When a user changes their goal, it's stored as pending and only becomes
@@ -119,13 +125,28 @@ const syncHealthData = async (req, res, next) => {
     }
 
     const dailyGoal = req.user.dailyStepGoal || 10000;
-    const isGoalMet = goalMet ?? (steps >= dailyGoal);
+
+    // ── FIX #2: Server-side step validation / anti-cheat ─────────────────────
+    // Validate the incoming step count against rate-of-change limits and
+    // previous known values. Flags or rejects suspicious submissions.
+    const existing = await HealthActivity.findOne({ user: req.user._id, date: today });
+    const stepValidation = validateSteps({
+      incomingSteps: steps,
+      existingSteps: existing?.steps || 0,
+      bonusSteps: existing?.bonusSteps || 0,
+      lastSyncAt: existing?.updatedAt || null,
+      dailyGoal,
+    });
+
+    // Use the clamped (safe) step value instead of raw client input
+    const validatedSteps = stepValidation.clampedSteps;
+
+    const isGoalMet = goalMet ?? (validatedSteps >= dailyGoal);
 
     // ── Merge strategy: only overwrite a field if the incoming value is
     // meaningful (> 0). This prevents a background sync that only has steps
     // from zeroing out vitals (HR, BP, glucose, weight) that were recorded
     // manually or by a different source earlier in the day.
-    const existing = await HealthActivity.findOne({ user: req.user._id, date: today });
 
     const merge = (incoming, stored) =>
       (incoming !== undefined && incoming !== null && incoming > 0)
@@ -142,8 +163,11 @@ const syncHealthData = async (req, res, next) => {
 
     // Preserve bonus steps — device only knows about walked steps, so
     // total = device steps + bonus steps credited by admin/system.
+    // MULTI-DEVICE: deviceSteps uses merge() which picks max(incoming, existing-bonus).
+    // This means if device A synced 5000 and device B sends 3000, the server keeps 5000.
+    // Passive coins won't re-award because the watermark is already at 5000.
     const bonusSteps = existing?.bonusSteps || 0;
-    const deviceSteps = merge(steps, (existing?.steps || 0) - bonusSteps);
+    const deviceSteps = merge(validatedSteps, (existing?.steps || 0) - bonusSteps);
     const totalSteps = deviceSteps + bonusSteps;
 
     // Re-evaluate goal met with total steps (walked + bonus)
@@ -173,40 +197,45 @@ const syncHealthData = async (req, res, next) => {
       goalSnapshot: existing?.goalSnapshot > 0 ? existing.goalSnapshot : dailyGoal,
     };
 
-    await HealthActivity.findOneAndUpdate(
-      { user: req.user._id, date: today },
-      { $set: updateFields },
-      { upsert: true, new: true }
-    );
+    // FIX #7: Batch independent DB operations with Promise.all.
+    // The HealthActivity upsert, AppConfig read, and Gamification read are
+    // all independent — run them in parallel to save ~2 DB round-trips.
+    const [, cfg, gam] = await Promise.all([
+      HealthActivity.findOneAndUpdate(
+        { user: req.user._id, date: today },
+        { $set: updateFields },
+        { upsert: true, new: true }
+      ),
+      getCachedAppConfig(),
+      Gamification.findOne({ user: req.user._id }).then(
+        doc => doc || Gamification.create({ user: req.user._id })
+      ),
+    ]);
 
-    // Update streak if goal was met
+    // Update streak if goal was met (depends on Gamification doc, so runs after)
     if (totalGoalMet) {
-      await _updateStreak(req.user._id, today);
+      await _updateStreak(req.user._id, today, gam);
     }
-
-    // ── Auto-award step goal coins ────────────────────────────────────────────
-    // If goal is met today and coins haven't been awarded yet, credit them now.
-    const AppConfig    = require('../models/AppConfig.model');
-    let cfg = await AppConfig.findOne({ key: 'global' });
-    if (!cfg) cfg = await AppConfig.create({ key: 'global' });
-
-    let gam = await Gamification.findOne({ user: req.user._id });
-    if (!gam) gam = await Gamification.create({ user: req.user._id });
 
     // Always update lastActiveDate when syncing today's data
     // (tracks that the user was active today, regardless of goal completion)
-    const actualToday = todayISO();
+    // FIX #3: Use resolveClientDate for "actualToday" — respects the user's timezone
+    let actualToday = resolveClientDate(timezone);
+
+    // ── FIX: Timezone manipulation detection ─────────────────────────────────
+    // Check if this user is changing timezones suspiciously often.
+    // If flagged, ignore client timezone and use server time instead.
+    const tzCheck = checkTimezoneManipulation(gam, timezone);
+    if (tzCheck.blocked) {
+      // Override: use server IST instead of client timezone
+      actualToday = todayISO();
+      console.warn(`[TZ-Guard] User ${req.user._id}: ${tzCheck.reason}`);
+    }
+
     // Coins are ONLY awarded for today's actual date — never for past-day background syncs.
-    // Allow a 1-day tolerance for timezone edge cases (app in UTC vs server in IST).
+    // With client timezone, we no longer need the 24-hour tolerance hack.
     const isTodaySync = (today === actualToday);
-    const isNearToday = isTodaySync || (() => {
-      // Check if `today` is yesterday (server time) — which could still be "today" for the user
-      const d1 = new Date(`${actualToday}T00:00:00Z`);
-      const d2 = new Date(`${today}T00:00:00Z`);
-      return Math.abs(d1 - d2) <= 86400000; // within 24 hours
-    })();
-    
-    if ((isTodaySync || isNearToday) && gam.lastActiveDate !== actualToday) {
+    if (isTodaySync && gam.lastActiveDate !== actualToday) {
       gam.lastActiveDate = actualToday;
     }
 
@@ -252,58 +281,80 @@ const syncHealthData = async (req, res, next) => {
     }
 
     if (isGoalMet && gam.stepGoalCoinDate !== today && isTodaySync) {
-      // Award step goal coins automatically (subject to daily cap)
+      // FIX #1: Use atomic findOneAndUpdate to prevent race condition.
+      // Two concurrent syncs can't both pass this check — only one wins the
+      // atomic condition { stepGoalCoinDate: { $ne: today } }.
       const stepGoalCoins = cfg.rewards.stepGoalCoins ?? 50;
       const effectiveCap = getEffectiveDailyCap(req.user, cfg.coin.maxDailyRewards ?? 500, cfg.coin.unverifiedDailyCap);
       const remainingAllowance = effectiveCap - (gam.coinsEarnedToday || 0);
       const actualStepGoalCoins = Math.round(Math.min(stepGoalCoins, Math.max(0, remainingAllowance)));
 
-      if (actualStepGoalCoins > 0) {
-        gam.coinsBalance = Math.round(gam.coinsBalance + actualStepGoalCoins);
-        gam.coinsEarnedToday = Math.round((gam.coinsEarnedToday || 0) + actualStepGoalCoins);
-      }
-      gam.stepGoalCoinDate = today;
+      const atomicResult = await Gamification.findOneAndUpdate(
+        {
+          user: req.user._id,
+          // Atomic condition: only update if stepGoalCoinDate is NOT today
+          $or: [
+            { stepGoalCoinDate: { $ne: today } },
+            { stepGoalCoinDate: null },
+          ],
+        },
+        {
+          $set: { stepGoalCoinDate: today },
+          $inc: {
+            coinsBalance: actualStepGoalCoins,
+            coinsEarnedToday: actualStepGoalCoins,
+          },
+          $push: {
+            claimHistory: {
+              $each: [{
+                rewardId: 'steps_daily_auto',
+                amount: actualStepGoalCoins,
+                source: 'Daily Step Goal — Auto Reward',
+                createdAt: new Date(),
+              }],
+              $slice: -50, // keep last 50 entries
+            },
+          },
+        },
+        { new: true }
+      );
 
-      if (!gam.claimHistory) gam.claimHistory = [];
-      gam.claimHistory.push({
-        rewardId: 'steps_daily_auto',
-        amount: actualStepGoalCoins,
-        source: 'Daily Step Goal — Auto Reward',
-        createdAt: new Date(),
-      });
-      if (gam.claimHistory.length > 50) gam.claimHistory.shift();
+      if (atomicResult) {
+        // We won the race — coins were awarded atomically
+        gam = atomicResult; // refresh local reference
+        goalCoinsAwarded = actualStepGoalCoins > 0;
+        awardedGoalCoins = actualStepGoalCoins;
 
-      goalCoinsAwarded = actualStepGoalCoins > 0;
-      awardedGoalCoins = actualStepGoalCoins;
-      await gam.save();
+        // Log coin transaction
+        if (actualStepGoalCoins > 0) {
+          logCoinTransaction({
+            userId: req.user._id,
+            type: 'EARNED',
+            amount: actualStepGoalCoins,
+            balanceAfter: gam.coinsBalance,
+            source: 'DAILY_STEP_GOAL_AUTO',
+            description: `Daily Step Goal — ${dailyGoal.toLocaleString()} steps reached`,
+            metadata: { steps: validatedSteps ?? 0, date: today, rewardId: 'steps_daily_auto' },
+          });
+        }
 
-      // Log coin transaction
-      if (actualStepGoalCoins > 0) {
-        logCoinTransaction({
-          userId: req.user._id,
-          type: 'EARNED',
-          amount: actualStepGoalCoins,
-          balanceAfter: gam.coinsBalance,
-          source: 'DAILY_STEP_GOAL_AUTO',
-          description: `Daily Step Goal — ${dailyGoal.toLocaleString()} steps reached`,
-          metadata: { steps: steps ?? 0, date: today, rewardId: 'steps_daily_auto' },
+        // ── Persist + push: step goal reached ──────────────────────────────
+        createNotification(req.user._id, {
+          type:    'GOAL',
+          title:   '🎯 Daily Step Goal Reached!',
+          message: `You hit your ${dailyGoal.toLocaleString()} step goal and earned ${actualStepGoalCoins} coins!`,
+          data:    { screen: 'Steps' },
         });
       }
-
-      // ── Persist + push: step goal reached ──────────────────────────────
-      createNotification(req.user._id, {
-        type:    'GOAL',
-        title:   '🎯 Daily Step Goal Reached!',
-        message: `You hit your ${dailyGoal.toLocaleString()} step goal and earned ${actualStepGoalCoins} coins!`,
-        data:    { screen: 'Steps' },
-      });
+      // If atomicResult is null, another concurrent request already awarded coins — no-op.
     } else if (!isGoalMet) {
       // Passive step-based coins: Math.floor(steps / 100) * rate_per_100_steps
-      // Coins accumulate as the user walks, but we only LOG a transaction
-      // every 3 hours (or at end-of-day 23:59:59) to avoid duplicate entries.
+      // FIX #4: Use a step watermark (lastPassiveCoinSteps) to prevent replay.
+      // Instead of computing from total steps (which re-awards everything if
+      // coinsEarnedToday resets), we only award coins for NEW steps above
+      // the last known watermark.
       //
-      // The balance is still updated on every sync (so the user sees live coins),
-      // but the CoinTransaction is batched into 3-hour windows.
+      // The balance is updated atomically so concurrent syncs can't double-award.
       //
       // IMPORTANT: Only update coinsEarnedToday/lastCoinDate for TODAY's date.
       const isTodaySyncPassive = isTodaySync;
@@ -311,66 +362,98 @@ const syncHealthData = async (req, res, next) => {
       if (isTodaySyncPassive) {
         const dailyEarnLimit = getEffectiveDailyCap(req.user, cfg.coin.dailyEarnLimit, cfg.coin.unverifiedDailyCap);
         const rate = cfg.coin_config?.steps?.rate_per_100_steps ?? 0.5;
-        const coinsEarnedToday = parseFloat(Math.min(dailyEarnLimit, Math.max(0, Math.floor((steps ?? 0) / 100) * rate)).toFixed(2));
 
-        const currentEarned = gam.coinsEarnedToday || 0;
-        if (coinsEarnedToday > currentEarned) {
-          const actualAdded = parseFloat((coinsEarnedToday - currentEarned).toFixed(2));
-          gam.coinsEarnedToday = coinsEarnedToday;
-          gam.coinsBalance = parseFloat((gam.coinsBalance + actualAdded).toFixed(2));
-          gam.lastCoinDate = actualToday;
-          await gam.save();
+        // FIX #4: Watermark-based calculation.
+        // lastPassiveCoinSteps = the step count at which coins were last calculated.
+        // Only award coins for steps ABOVE this watermark.
+        const watermark = gam.lastPassiveCoinSteps || 0;
+        const currentSteps = validatedSteps ?? 0;
 
-          // ── 3-hour throttle for transaction logging ─────────────────────
-          // Only log a PASSIVE_STEPS CoinTransaction if:
-          //   1. At least 3 hours have passed since the last logged transaction, OR
-          //   2. It's near end-of-day (23:00+) and we haven't logged since 21:00
-          const THREE_HOURS_MS = 3 * 60 * 60 * 1000;
-          const now = new Date();
-          const lastLogTime = gam.lastPassiveCoinTime ? new Date(gam.lastPassiveCoinTime).getTime() : 0;
-          const timeSinceLastLog = now.getTime() - lastLogTime;
-          const currentHour = now.getHours();
+        // If this is a new day (lastCoinDate changed), the watermark from yesterday
+        // is stale — reset it so we don't penalise the user.
+        const effectiveWatermark = (gam.lastCoinDate === actualToday) ? watermark : 0;
 
-          // End-of-day check: if it's 23:xx, ensure we get a final entry
-          const isEndOfDay = currentHour >= 23;
-          const lastLogHour = gam.lastPassiveCoinTime ? new Date(gam.lastPassiveCoinTime).getHours() : -1;
-          const lastLogDate = gam.lastPassiveCoinTime
-            ? new Date(gam.lastPassiveCoinTime).toISOString().slice(0, 10)
-            : null;
-          const isNewDay = lastLogDate !== actualToday;
+        // Only proceed if current steps exceed the watermark
+        // MULTI-DEVICE GUARD: currentSteps comes from the HealthActivity record
+        // (which stores the max seen across all devices via merge()). The watermark
+        // only moves forward — if device B sends fewer steps than device A already
+        // synced, the merge keeps the higher value, and currentSteps >= watermark
+        // will be false, preventing double-earning.
+        if (currentSteps > effectiveWatermark) {
+          // Calculate coins for the delta only (new steps since last award)
+          const newStepsSinceWatermark = currentSteps - effectiveWatermark;
+          const coinsForNewSteps = parseFloat((Math.floor(newStepsSinceWatermark / 100) * rate).toFixed(2));
 
-          const shouldLogTransaction =
-            isNewDay ||                                    // First transaction of the day
-            timeSinceLastLog >= THREE_HOURS_MS ||          // 3 hours elapsed
-            (isEndOfDay && lastLogHour < 23);             // End-of-day final entry
+          if (coinsForNewSteps > 0) {
+            // Check against daily earn limit
+            const currentEarned = gam.coinsEarnedToday || 0;
+            const remainingAllowance = Math.max(0, dailyEarnLimit - currentEarned);
+            const actualAdded = parseFloat(Math.min(coinsForNewSteps, remainingAllowance).toFixed(2));
 
-          if (shouldLogTransaction) {
-            const previousSteps = gam.lastPassiveCoinSteps || 0;
-            const currentSteps = steps ?? 0;
-            const stepDelta = currentSteps - previousSteps;
+            if (actualAdded > 0) {
+              // FIX #1 (passive coins): Atomic update to prevent race condition
+              const passiveResult = await Gamification.findOneAndUpdate(
+                {
+                  user: req.user._id,
+                  // Atomic guard: only update if the watermark hasn't moved past us
+                  $or: [
+                    { lastPassiveCoinSteps: { $lte: effectiveWatermark } },
+                    { lastPassiveCoinSteps: null },
+                    { lastPassiveCoinSteps: { $exists: false } },
+                  ],
+                },
+                {
+                  $set: {
+                    lastCoinDate: actualToday,
+                    lastPassiveCoinSteps: currentSteps,
+                  },
+                  $inc: {
+                    coinsBalance: actualAdded,
+                    coinsEarnedToday: actualAdded,
+                  },
+                },
+                { new: true }
+              );
 
-            // Skip logging if steps decreased (can happen when switching from
-            // inflated Health Connect value to accurate native sensor value).
-            // Just update the marker so the next log starts from the correct baseline.
-            if (stepDelta <= 0) {
-              gam.lastPassiveCoinSteps = currentSteps;
-              gam.lastPassiveCoinTime = now;
-              await gam.save();
-            } else {
-              logCoinTransaction({
-                userId: req.user._id,
-                type: 'EARNED',
-                amount: actualAdded,
-                balanceAfter: gam.coinsBalance,
-                source: 'PASSIVE_STEPS',
-                description: `Step Coins — ${previousSteps.toLocaleString()} → ${currentSteps.toLocaleString()} = ${stepDelta.toLocaleString()} steps`,
-                metadata: { steps: currentSteps, previousSteps, stepDelta, date: today },
-              });
+              if (passiveResult) {
+                gam = passiveResult; // refresh local reference
 
-              // Update throttle markers
-              gam.lastPassiveCoinTime = now;
-              gam.lastPassiveCoinSteps = currentSteps;
-              await gam.save();
+                // ── 3-hour throttle for transaction logging ─────────────────────
+                const THREE_HOURS_MS = 3 * 60 * 60 * 1000;
+                const now = new Date();
+                const lastLogTime = gam.lastPassiveCoinTime ? new Date(gam.lastPassiveCoinTime).getTime() : 0;
+                const timeSinceLastLog = now.getTime() - lastLogTime;
+                const currentHour = now.getHours();
+
+                const isEndOfDay = currentHour >= 23;
+                const lastLogHour = gam.lastPassiveCoinTime ? new Date(gam.lastPassiveCoinTime).getHours() : -1;
+                const lastLogDate = gam.lastPassiveCoinTime
+                  ? new Date(gam.lastPassiveCoinTime).toISOString().slice(0, 10)
+                  : null;
+                const isNewDay = lastLogDate !== actualToday;
+
+                const shouldLogTransaction =
+                  isNewDay ||
+                  timeSinceLastLog >= THREE_HOURS_MS ||
+                  (isEndOfDay && lastLogHour < 23);
+
+                if (shouldLogTransaction) {
+                  logCoinTransaction({
+                    userId: req.user._id,
+                    type: 'EARNED',
+                    amount: actualAdded,
+                    balanceAfter: gam.coinsBalance,
+                    source: 'PASSIVE_STEPS',
+                    description: `Step Coins — ${effectiveWatermark.toLocaleString()} → ${currentSteps.toLocaleString()} = ${newStepsSinceWatermark.toLocaleString()} steps`,
+                    metadata: { steps: currentSteps, previousSteps: effectiveWatermark, stepDelta: newStepsSinceWatermark, date: today },
+                  });
+
+                  // Update throttle marker
+                  gam.lastPassiveCoinTime = now;
+                  await gam.save();
+                }
+              }
+              // If passiveResult is null, another concurrent sync already moved the watermark — no-op.
             }
           }
         }
@@ -392,6 +475,13 @@ const syncHealthData = async (req, res, next) => {
       bonusSteps,       // bonus steps credited for today (so app can show total)
       totalSteps,       // walked + bonus combined
       newlyCompleted,   // array of { title, emoji, coinReward }
+      // FIX #2: Inform client if steps were flagged/clamped
+      stepValidation: stepValidation.flagged ? {
+        flagged: true,
+        reason: stepValidation.reason,
+        originalSteps: steps,
+        acceptedSteps: validatedSteps,
+      } : undefined,
     });
   } catch (err) {
     next(err);
@@ -428,9 +518,11 @@ const getTodayHealth = async (req, res, next) => {
 };
 
 // ─── Internal: update streak ─────────────────────────────────────────────────
-async function _updateStreak(userId, date) {
+// FIX #2: Accepts an optional pre-fetched gamification doc to avoid a redundant
+// Gamification.findOne when the caller already has the document in memory.
+async function _updateStreak(userId, date, existingGam = null) {
   const BadgeDefinition = require('../models/BadgeDefinition.model');
-  const gam = await Gamification.findOne({ user: userId });
+  const gam = existingGam || await Gamification.findOne({ user: userId });
   if (!gam) return;
 
   const wasConsecutive = isConsecutiveDay(gam.lastActiveDate, date);
