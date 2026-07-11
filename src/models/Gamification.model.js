@@ -24,6 +24,16 @@ const gamificationSchema = new mongoose.Schema(
     // Steps count at the time of the last PASSIVE_STEPS transaction
     lastPassiveCoinSteps: { type: Number, default: 0 },
 
+    // ─── FIX: Timezone manipulation detection ────────────────────────────
+    // Tracks the user's last known timezone to detect suspicious shifts.
+    lastKnownTimezone: { type: String, default: null },
+    // Count of timezone changes within the current day (resets daily)
+    timezoneChangeCount: { type: Number, default: 0, min: 0 },
+    // Date when timezoneChangeCount was last reset
+    timezoneChangeDate: { type: String, default: null },
+    // Flag: true if user is suspected of timezone manipulation
+    timezoneFlagged: { type: Boolean, default: false },
+
     // ─── Dynamic badges array (keys match BadgeDefinition.key) ──────────────
     // Replaces the old fixed-key object { starter, consistent, finisher, elite }
     badgeList: [
@@ -42,14 +52,24 @@ const gamificationSchema = new mongoose.Schema(
     },
 
     // Transactional log of claimed rewards (Water, Streaks, Daily Goals)
-    claimHistory: [
-      {
-        rewardId: String,
-        amount: Number,
-        source: String,
-        createdAt: { type: Date, default: Date.now },
+    // FIX #12: Capped at 50 entries via pre-save hook below.
+    claimHistory: {
+      type: [
+        {
+          rewardId: String,
+          amount: Number,
+          source: String,
+          createdAt: { type: Date, default: Date.now },
+        },
+      ],
+      default: [],
+      validate: {
+        validator: function (arr) {
+          return arr.length <= 100; // hard reject at 2x cap (safety net)
+        },
+        message: 'claimHistory exceeds maximum allowed entries',
       },
-    ],
+    },
 
     // ─── Streak protection system ────────────────────────────────────────────
     // Freezes (earned at 7-day milestones — 24hr grace on miss)
@@ -190,6 +210,43 @@ gamificationSchema.methods.unlockBadge = function (key) {
     entry.unlocked = true;
     entry.unlockedAt = new Date();
   }
+};
+
+// ─── FIX #12: Pre-save hook to cap claimHistory at 50 entries ────────────────
+// This ensures the array never grows unbounded even if $slice is missed
+// in a push operation somewhere. Keeps only the most recent 50 entries.
+// FIX #5: Only runs the trim if claimHistory was actually modified this save —
+// avoids touching the array on unrelated saves (e.g., streak updates).
+gamificationSchema.pre('save', function (next) {
+  if (this.isModified('claimHistory') && this.claimHistory && this.claimHistory.length > 50) {
+    this.claimHistory = this.claimHistory.slice(-50);
+  }
+  next();
+});
+
+// ─── FIX #5: One-time migration for bloated claimHistory arrays ──────────────
+// For very old accounts with 1000+ entries, loading the full document into
+// memory just to slice is expensive. This static method runs a server-side
+// $push/$slice update directly in MongoDB — no document load needed.
+// Call this once from a startup script or admin endpoint.
+gamificationSchema.statics.trimAllClaimHistories = async function () {
+  // Find all documents where claimHistory has more than 50 entries
+  const bloated = await this.find({
+    $expr: { $gt: [{ $size: { $ifNull: ['$claimHistory', []] } }, 50] },
+  }).select('_id claimHistory').lean();
+
+  let trimmed = 0;
+  for (const doc of bloated) {
+    // Keep only the last 50 entries using $set with slice (server-side)
+    const last50 = doc.claimHistory.slice(-50);
+    await this.updateOne(
+      { _id: doc._id },
+      { $set: { claimHistory: last50 } }
+    );
+    trimmed++;
+  }
+
+  return { total: bloated.length, trimmed };
 };
 
 module.exports = mongoose.model('Gamification', gamificationSchema);

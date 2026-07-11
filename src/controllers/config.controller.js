@@ -199,6 +199,9 @@ const updateAppConfig = async (req, res, next) => {
     try {
       require('../utils/configCache').invalidateConfigCache();
     } catch (_) { /* cache module optional */ }
+    try {
+      require('../utils/appConfigCache').invalidateAppConfigCache();
+    } catch (_) { /* cache module optional */ }
 
     return success(res, "App config updated", cfg);
   } catch (err) {

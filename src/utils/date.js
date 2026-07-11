@@ -18,6 +18,59 @@ const todayISO = () => {
 };
 
 /**
+ * FIX #3: Resolves today's date using the client-provided timezone.
+ * Falls back to server IST (todayISO) if no timezone is provided.
+ *
+ * @param {string|null|undefined} timezone - IANA timezone string (e.g., "America/New_York")
+ *   or UTC offset string (e.g., "+05:30", "-08:00").
+ * @returns {string} "YYYY-MM-DD" in the client's timezone.
+ */
+const resolveClientDate = (timezone) => {
+  if (!timezone) return todayISO();
+
+  const now = new Date();
+
+  // If timezone is an IANA name (e.g., "Asia/Kolkata", "America/New_York")
+  // use Intl.DateTimeFormat directly.
+  if (timezone.includes('/') || timezone === 'UTC') {
+    try {
+      return new Intl.DateTimeFormat('en-CA', {
+        timeZone: timezone,
+        year: 'numeric',
+        month: '2-digit',
+        day: '2-digit',
+      }).format(now);
+    } catch (e) {
+      // Invalid timezone name — fall back to server time
+      return todayISO();
+    }
+  }
+
+  // If timezone is a numeric offset like "+05:30" or "-08:00" or minutes like "330"
+  // Convert to milliseconds and compute the date.
+  let offsetMinutes;
+  if (/^[+-]\d{2}:\d{2}$/.test(timezone)) {
+    // Parse "+05:30" or "-08:00"
+    const sign = timezone[0] === '-' ? -1 : 1;
+    const [h, m] = timezone.slice(1).split(':').map(Number);
+    offsetMinutes = sign * (h * 60 + m);
+  } else if (/^-?\d+$/.test(timezone)) {
+    // Raw minutes offset (e.g., "330" for IST, "-480" for PST)
+    offsetMinutes = parseInt(timezone, 10);
+  } else {
+    // Unrecognized format — fall back
+    return todayISO();
+  }
+
+  // Apply the offset: UTC time + client offset = client local time
+  const clientTime = new Date(now.getTime() + offsetMinutes * 60_000);
+  const y = clientTime.getUTCFullYear();
+  const m = String(clientTime.getUTCMonth() + 1).padStart(2, '0');
+  const d = String(clientTime.getUTCDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+};
+
+/**
  * Returns whether two ISO date strings are consecutive days.
  * Uses date-part arithmetic only (no time/timezone math) to avoid
  * DST-related float precision issues with diffMs / 86400000.
@@ -77,4 +130,4 @@ const daysBetween = (prevDate, currDate) => {
   return Math.round((curr.getTime() - prev.getTime()) / (1000 * 60 * 60 * 24));
 };
 
-module.exports = { todayISO, isConsecutiveDay, buildDateRange, toDayLabel, daysBetween };
+module.exports = { todayISO, resolveClientDate, isConsecutiveDay, buildDateRange, toDayLabel, daysBetween };

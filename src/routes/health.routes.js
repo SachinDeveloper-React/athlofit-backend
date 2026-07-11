@@ -1,5 +1,6 @@
 const express = require('express');
 const router = express.Router();
+const rateLimit = require('express-rate-limit');
 const {
   getWeeklySteps,
   syncHealthData,
@@ -14,6 +15,19 @@ const {
   getBmiHistory,
 } = require('../controllers/health.controller');
 const { protect } = require('../middleware/auth.middleware');
+
+// FIX #4: Per-user rate limiter for POST /health/sync.
+// 20 requests per minute per user — prevents API flooding while allowing
+// normal usage (native service every 15 min + app sync on foreground + background fetch).
+const syncRateLimiter = rateLimit({
+  windowMs: 60 * 1000, // 1 minute
+  max: 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  // Key by authenticated user ID (set by protect middleware)
+  keyGenerator: (req) => req.user?._id?.toString() || req.ip,
+  message: { success: false, message: 'Too many sync requests. Please wait a moment.' },
+});
 
 // All routes require auth
 router.use(protect);
@@ -43,7 +57,7 @@ router.get('/today', getTodayHealth);
 router.get('/history', getHealthHistory);
 
 // POST /health/sync  — push daily snapshot from device
-router.post('/sync', syncHealthData);
+router.post('/sync', syncRateLimiter, syncHealthData);
 
 // GET  /health/bmi        — fetch BMI history
 // POST /health/bmi        — save a new BMI reading
