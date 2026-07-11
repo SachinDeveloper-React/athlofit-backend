@@ -35,9 +35,14 @@ function isoWeekKey(date = new Date()) {
  * Mutates `gam` in place but does NOT save — caller must save.
  */
 function grantProtections(gam, cfg) {
-  // Freeze: grant 1 each time streak crosses a multiple of freezeEarnEvery
-  // that hasn't been granted yet (tracked by lastFreezeGrantStreak).
+  // Freeze: grant 1 each time streak crosses a multiple of freezeEarnEvery.
+  // After a streak break, lastFreezeGrantStreak may be higher than the current
+  // streak — reset it so the user can earn freezes on the new streak too.
   if (cfg.freezeEarnEvery > 0) {
+    // Reset tracking if the streak was broken and restarted
+    if ((gam.lastFreezeGrantStreak || 0) > gam.streakDays) {
+      gam.lastFreezeGrantStreak = 0;
+    }
     const milestonesReached = Math.floor(gam.streakDays / cfg.freezeEarnEvery);
     const lastGranted = Math.floor((gam.lastFreezeGrantStreak || 0) / cfg.freezeEarnEvery);
     if (milestonesReached > lastGranted) {
@@ -87,6 +92,7 @@ function attemptProtect(gam, cfg) {
   gam.streakBrokenAt = now;
   gam.streakDays = 0;
   gam.freezeActiveUntil = null;
+  gam.lastFreezeGrantStreak = 0; // reset so new streak can earn freezes
   return { protected: false };
 }
 
