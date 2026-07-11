@@ -745,6 +745,83 @@ const adminUpdateTicket = async (req, res, next) => {
   }
 };
 
+// ─── GET /config/check-version?platform=android&version=0.0.25 ───────────────
+// Public endpoint. Returns update status for the given client version & platform.
+// Response shape:
+//   { updateRequired: boolean, updateType: 'force' | 'soft' | 'none', ... }
+const checkVersion = async (req, res, next) => {
+  try {
+    const { platform, version } = req.query;
+
+    if (!platform || !version) {
+      return error(res, "platform and version query params are required", 400);
+    }
+
+    const validPlatforms = ["android", "ios"];
+    if (!validPlatforms.includes(platform.toLowerCase())) {
+      return error(res, "platform must be 'android' or 'ios'", 400);
+    }
+
+    const cfg = await getOrCreateConfig();
+    const forceUpdateCfg = cfg.forceUpdate;
+
+    // If the feature is disabled, always return no update
+    if (!forceUpdateCfg || !forceUpdateCfg.enabled) {
+      return success(res, "Version check passed", {
+        updateRequired: false,
+        updateType: "none",
+      });
+    }
+
+    const platformCfg = forceUpdateCfg[platform.toLowerCase()];
+    const minVersion = platformCfg?.minVersion || "0.0.1";
+    const latestVersion = platformCfg?.latestVersion || "0.0.1";
+    const updateUrl = platformCfg?.updateUrl || "";
+
+    const clientVersion = version.trim();
+
+    // Semver comparison helper
+    const compareVersions = (a, b) => {
+      const pa = a.split(".").map(Number);
+      const pb = b.split(".").map(Number);
+      for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
+        const na = pa[i] || 0;
+        const nb = pb[i] || 0;
+        if (na < nb) return -1;
+        if (na > nb) return 1;
+      }
+      return 0;
+    };
+
+    let updateType = "none";
+    let updateRequired = false;
+
+    if (compareVersions(clientVersion, minVersion) < 0) {
+      // Client is below the hard minimum → force update (mandatory)
+      updateType = "force";
+      updateRequired = true;
+    } else if (compareVersions(clientVersion, latestVersion) < 0) {
+      // Client is above minimum but below latest → soft update (optional)
+      updateType = "soft";
+      updateRequired = true;
+    }
+
+    return success(res, "Version check completed", {
+      updateRequired,
+      updateType,
+      latestVersion,
+      minVersion,
+      updateUrl,
+      title: forceUpdateCfg.title || "Update Available",
+      message:
+        forceUpdateCfg.message ||
+        "A new version of Athlofit is available. Please update for the best experience.",
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
 module.exports = {
   getAppConfig,
   updateAppConfig,
@@ -762,4 +839,5 @@ module.exports = {
   adminDeleteFaq,
   adminGetTickets,
   adminUpdateTicket,
+  checkVersion,
 };

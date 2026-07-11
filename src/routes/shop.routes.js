@@ -13,7 +13,9 @@ const {
   validateCoupon,
   getAvailableCoupons,
   getOrders,
+  getOrderById,
   cancelOrder,
+  confirmDelivery,
 } = require('../controllers/shop.controller');
 const { protect } = require('../middleware/auth.middleware');
 
@@ -31,6 +33,8 @@ router.post('/cart/buy-with-coins', protect, buyWithCoins);
 router.get('/coupons', protect, getAvailableCoupons);
 router.post('/coupons/validate', protect, validateCoupon);
 router.get('/orders', protect, getOrders);
+router.get('/orders/:orderId', protect, getOrderById);
 router.patch('/orders/:orderId/cancel', protect, cancelOrder);
+router.patch('/orders/:orderId/confirm-delivery', protect, confirmDelivery);
 
 module.exports = router;

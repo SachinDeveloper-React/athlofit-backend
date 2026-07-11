@@ -4,11 +4,13 @@ const UserChallenge = require('../models/UserChallenge.model');
 const Gamification  = require('../models/Gamification.model');
 const HealthActivity = require('../models/HealthActivity.model');
 const MealLog       = require('../models/MealLog.model');
+const User          = require('../models/User.model');
 const { success, error } = require('../utils/response');
 const { todayISO } = require('../utils/date');
 const { sendPushToUser } = require('../utils/pushNotification');
 const { createNotification } = require('../utils/createNotification');
 const { logCoinTransaction } = require('../utils/logCoinTransaction');
+const { isCoinBlocked } = require('../utils/cheatPenalty');
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -250,6 +252,25 @@ const syncChallengeProgress = async (userId) => {
 
       // Auto-award coins if just completed and not yet rewarded
       if (isCompleted && !existing?.isRewarded) {
+        // ── Anti-cheat: skip coin award if user is penalized ─────────────────
+        const user = await User.findById(userId).select('coinBlockedUntil');
+        const coinBlockStatus = isCoinBlocked(user || {});
+        if (coinBlockStatus.isBlocked) {
+          // Challenge is marked complete but coins are NOT awarded due to penalty.
+          // Still mark as rewarded to prevent retry — user forfeits this reward.
+          await UserChallenge.findOneAndUpdate(
+            { user: userId, challenge: challenge._id, periodKey },
+            { $set: { isRewarded: true, rewardedAt: new Date() } },
+            { new: true },
+          );
+          newlyCompleted.push({
+            title:      challenge.title,
+            emoji:      challenge.emoji,
+            coinReward: 0, // blocked
+          });
+          continue;
+        }
+
         // BUG-023 fix: save gam (coins) BEFORE marking isRewarded on UserChallenge.
         // If gam.save() fails, isRewarded stays false so the user can retry.
         // If we marked isRewarded first and gam.save() failed, coins would never be credited.
