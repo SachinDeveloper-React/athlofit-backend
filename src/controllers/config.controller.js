@@ -168,24 +168,25 @@ const updateAppConfig = async (req, res, next) => {
 
     // ─── Validate coin_config fields before persisting ──────────────────────────
     if (setMap["coin_config.steps.rate_per_100_steps"] !== undefined) {
-      const rate = setMap["coin_config.steps.rate_per_100_steps"];
-      if (typeof rate !== "number" || rate <= 0 || rate > 1000) {
+      const rate = Number(setMap["coin_config.steps.rate_per_100_steps"]);
+      if (isNaN(rate) || rate <= 0 || rate > 1000) {
         return error(
           res,
           "rate_per_100_steps must be a positive number (max 1000)",
           400,
         );
       }
+      setMap["coin_config.steps.rate_per_100_steps"] = rate;
     }
     if (
       setMap["coin_config.rewards.daily_step_goal_reached.coin_value"] !==
       undefined
     ) {
-      const val =
-        setMap["coin_config.rewards.daily_step_goal_reached.coin_value"];
-      if (!Number.isInteger(val) || val < 0) {
+      const val = Number(setMap["coin_config.rewards.daily_step_goal_reached.coin_value"]);
+      if (isNaN(val) || val < 0 || !Number.isInteger(val)) {
         return error(res, "coin_value must be a non-negative integer", 400);
       }
+      setMap["coin_config.rewards.daily_step_goal_reached.coin_value"] = val;
     }
 
     const cfg = await AppConfig.findOneAndUpdate(
