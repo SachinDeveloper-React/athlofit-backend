@@ -4,6 +4,7 @@
 
 const cron = require('node-cron');
 const Gamification = require('./models/Gamification.model');
+const User = require('./models/User.model');
 const { todayISO, daysBetween } = require('./utils/date');
 const { getStreakConfig, attemptProtect, isoWeekKey } = require('./utils/streak');
 const { createNotification } = require('./utils/createNotification');
@@ -82,19 +83,45 @@ async function grantWeeklyLives() {
   console.log(`[CRON] Weekly lives granted: ${granted} users (week ${thisWeek})`);
 }
 
+// ─── 3. Apply pending step goals — daily at 00:05 IST ────────────────────────
+async function applyPendingGoals() {
+  const today = todayISO();
+  const result = await User.updateMany(
+    {
+      pendingStepGoal: { $ne: null },
+      pendingGoalEffectiveDate: { $lte: today },
+    },
+    [
+      {
+        $set: {
+          dailyStepGoal: '$pendingStepGoal',
+          pendingStepGoal: null,
+          pendingGoalEffectiveDate: null,
+        },
+      },
+    ],
+  );
+  console.log(`[CRON] Pending goals applied: ${result.modifiedCount || 0} users (date ${today})`);
+}
+
 // ─── Start the schedules ─────────────────────────────────────────────────────
 function startCronJobs() {
-  // Daily at 00:30 IST
+  // Daily at 00:30 IST — evaluate streaks
   cron.schedule('30 0 * * *', () => {
     evaluateStreaks().catch((err) => console.error('[CRON] evaluateStreaks failed:', err.message));
   }, { timezone: 'Asia/Kolkata' });
 
-  // Weekly Monday at 00:45 IST
+  // Weekly Monday at 00:45 IST — grant weekly lives
   cron.schedule('45 0 * * 1', () => {
     grantWeeklyLives().catch((err) => console.error('[CRON] grantWeeklyLives failed:', err.message));
   }, { timezone: 'Asia/Kolkata' });
 
-  console.log('⏰ Cron jobs scheduled (IST): streak evaluation @00:30 daily, weekly lives @00:45 Monday');
+  // Daily at 00:05 IST — apply pending step goal changes
+  cron.schedule('5 0 * * *', () => {
+    applyPendingGoals().catch((err) => console.error('[CRON] applyPendingGoals failed:', err.message));
+  }, { timezone: 'Asia/Kolkata' });
+
+  console.log('⏰ Cron jobs scheduled (IST): streaks @00:30, lives @Mon 00:45, goals @00:05');
 }
 
-module.exports = { startCronJobs, evaluateStreaks, grantWeeklyLives };
+module.exports = { startCronJobs, evaluateStreaks, grantWeeklyLives, applyPendingGoals };
