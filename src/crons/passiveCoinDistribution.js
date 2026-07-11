@@ -92,7 +92,6 @@ async function distributePassiveCoins() {
       if (rawCoins <= 0) continue;
 
       // Apply daily cap
-      const user = userMap.get(userId.toString());
       const isVerified = user?.emailVerified ?? false;
       const effectiveCap = isVerified
         ? dailyEarnLimit
