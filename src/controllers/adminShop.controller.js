@@ -309,17 +309,50 @@ const getOrders = async (req, res, next) => {
 
 const updateOrderStatus = async (req, res, next) => {
   try {
-    const { status } = req.body;
+    const { status, trackingNumber, trackingUrl, carrier, estimatedDelivery, description } = req.body;
     const valid = ['PENDING', 'PAID', 'SHIPPED', 'DELIVERED', 'CANCELLED'];
     if (!valid.includes(status)) {
       return error(res, `status must be one of: ${valid.join(', ')}`, 400);
     }
-    const order = await Order.findByIdAndUpdate(
-      req.params.id,
-      { $set: { status } },
-      { new: true },
-    );
+
+    const order = await Order.findById(req.params.id);
     if (!order) return error(res, 'Order not found', 404);
+
+    // Build tracking event title based on status
+    const statusTitles = {
+      PENDING:   'Order Placed',
+      PAID:      'Payment Confirmed',
+      SHIPPED:   'Order Shipped',
+      DELIVERED: 'Order Delivered',
+      CANCELLED: 'Order Cancelled',
+    };
+
+    const now = new Date();
+
+    // Update status
+    order.status = status;
+
+    // Push tracking history entry
+    order.trackingHistory.push({
+      status,
+      title: statusTitles[status],
+      description: description || '',
+      timestamp: now,
+    });
+
+    // Set timestamp fields
+    if (status === 'PAID')      order.paidAt = now;
+    if (status === 'SHIPPED')   order.shippedAt = now;
+    if (status === 'DELIVERED') order.deliveredAt = now;
+    if (status === 'CANCELLED') order.cancelledAt = now;
+
+    // Shipping details (usually set when status = SHIPPED)
+    if (trackingNumber) order.trackingNumber = trackingNumber;
+    if (trackingUrl)    order.trackingUrl = trackingUrl;
+    if (carrier)        order.carrier = carrier;
+    if (estimatedDelivery) order.estimatedDelivery = new Date(estimatedDelivery);
+
+    await order.save();
     return success(res, 'Order status updated', order);
   } catch (err) {
     next(err);

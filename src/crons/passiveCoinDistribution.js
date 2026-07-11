@@ -4,12 +4,17 @@
 // Runs every 3 hours (00:00, 03:00, 06:00, 09:00, 12:00, 15:00, 18:00, 21:00)
 // and once at 23:59 (EOD) to award remaining coins.
 //
+// This cron acts as a SAFETY NET for users whose app hasn't synced recently.
+// The primary coin-awarding + logging now happens in the health sync endpoint
+// (every sync logs a transaction). The cron skips users who synced within 5 min.
+//
 // Logic:
 //   1. For each user with HealthActivity today, calculate current steps.
-//   2. Compare against lastPassiveCoinSteps (steps at last payout).
-//   3. Compute coins = Math.floor(stepDelta / 100) * rate_per_100_steps.
-//   4. Cap at remaining daily allowance (dailyEarnLimit - coinsEarnedToday).
-//   5. Award coins, log transaction, update markers.
+//   2. Skip if health sync already handled this user recently (within 5 min).
+//   3. Compare against lastPassiveCoinSteps (steps at last payout).
+//   4. Compute coins = Math.floor(stepDelta / 100) * rate_per_100_steps.
+//   5. Cap at remaining daily allowance (dailyEarnLimit - coinsEarnedToday).
+//   6. Award coins, log transaction, update markers.
 
 const cron = require('node-cron');
 const Gamification = require('../models/Gamification.model');
@@ -18,6 +23,7 @@ const AppConfig = require('../models/AppConfig.model');
 const User = require('../models/User.model');
 const { todayISO } = require('../utils/date');
 const { logCoinTransaction } = require('../utils/logCoinTransaction');
+const { isCoinBlocked } = require('../utils/cheatPenalty');
 
 // ─── Core distribution function ──────────────────────────────────────────────
 
@@ -67,6 +73,10 @@ async function distributePassiveCoins() {
 
       processed++;
 
+      // ── Anti-cheat: skip if user is blocked from earning coins ─────────────
+      const userDoc = await User.findById(userId).select('coinBlockedUntil').lean();
+      if (userDoc && isCoinBlocked(userDoc).isBlocked) continue;
+
       // Reset coinsEarnedToday if it's a new day
       const lastCoinDate = gam.lastCoinDate;
       if (lastCoinDate && lastCoinDate !== today) {
@@ -82,11 +92,12 @@ async function distributePassiveCoins() {
       // Skip if no new steps since last payout
       if (stepDelta <= 0) continue;
 
-      // Skip if a health sync recently processed coins (within the last minute)
-      // to avoid race conditions where both cron and sync award the same steps.
+      // Skip if a health sync recently processed and logged coins (within 5 min).
+      // Since the health sync now logs every transaction (no throttle), the cron
+      // only needs to act as a safety net for users whose app hasn't synced recently.
       if (gam.lastPassiveCoinTime) {
         const timeSinceLastAward = Date.now() - new Date(gam.lastPassiveCoinTime).getTime();
-        if (timeSinceLastAward < 60 * 1000) continue; // skip, sync just handled it
+        if (timeSinceLastAward < 5 * 60 * 1000) continue; // skip, sync just handled it
       }
 
       // Determine the user's effective passive daily cap

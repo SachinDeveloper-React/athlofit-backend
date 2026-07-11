@@ -15,6 +15,21 @@ const orderItemSchema = new mongoose.Schema({
   },
 });
 
+// ── Tracking history entry ──────────────────────────────────────────────────
+const trackingEventSchema = new mongoose.Schema(
+  {
+    status: {
+      type: String,
+      enum: ['PENDING', 'PAID', 'SHIPPED', 'DELIVERED', 'CANCELLED'],
+      required: true,
+    },
+    title: { type: String, required: true },
+    description: { type: String, default: '' },
+    timestamp: { type: Date, default: Date.now },
+  },
+  { _id: false },
+);
+
 const orderSchema = new mongoose.Schema(
   {
     user: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
@@ -31,6 +46,25 @@ const orderSchema = new mongoose.Schema(
       enum: ['PENDING', 'PAID', 'SHIPPED', 'DELIVERED', 'CANCELLED'],
       default: 'PAID', // Default PAID since coins are deducted instantly
     },
+    // ── Order tracking history ───────────────────────────────────────────────
+    trackingHistory: {
+      type: [trackingEventSchema],
+      default: [],
+    },
+    // ── Delivery & shipping timestamps ───────────────────────────────────────
+    paidAt:      { type: Date, default: null },
+    shippedAt:   { type: Date, default: null },
+    deliveredAt: { type: Date, default: null },
+    cancelledAt: { type: Date, default: null },
+    // ── Estimated delivery ───────────────────────────────────────────────────
+    estimatedDelivery: { type: Date, default: null },
+    // ── Shipping tracking ────────────────────────────────────────────────────
+    trackingNumber: { type: String, default: null },
+    trackingUrl:    { type: String, default: null },
+    carrier:        { type: String, default: null },
+    // ── Cancellation reason ──────────────────────────────────────────────────
+    cancellationReason: { type: String, default: null },
+    cancellationNote:   { type: String, default: null }, // user's custom note
     // ── Razorpay payment fields ──────────────────────────────────────────────
     payment: {
       razorpayOrderId:   { type: String, default: null, index: true },
