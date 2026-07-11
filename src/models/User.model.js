@@ -117,6 +117,11 @@ const userSchema = new mongoose.Schema(
       bannedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
     },
 
+    // ─── Anti-cheat: coin earning block ─────────────────────────────────────
+    // Set by cheatPenalty.js when 3+ flags occur in a day. Coins cannot be
+    // earned (passive or claimed) until this date passes.
+    coinBlockedUntil: { type: Date, default: null },
+
     // FCM push notification token
     fcmToken: { type: String, default: null },
     notificationsEnabled: { type: Boolean, default: true },

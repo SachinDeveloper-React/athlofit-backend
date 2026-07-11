@@ -18,6 +18,7 @@ const AppConfig = require('../models/AppConfig.model');
 const User = require('../models/User.model');
 const { todayISO } = require('../utils/date');
 const { logCoinTransaction } = require('../utils/logCoinTransaction');
+const { isCoinBlocked } = require('../utils/cheatPenalty');
 
 // ─── Core distribution function ──────────────────────────────────────────────
 
@@ -46,7 +47,7 @@ async function distributePassiveCoins() {
   // Batch-load user verification status
   const userIds = activities.map(a => a.user);
   const users = await User.find({ _id: { $in: userIds } })
-    .select('_id emailVerified')
+    .select('_id emailVerified coinBlockedUntil')
     .lean();
   const userMap = new Map(users.map(u => [u._id.toString(), u]));
 
@@ -66,6 +67,10 @@ async function distributePassiveCoins() {
       }
 
       processed++;
+
+      // Skip if user is coin-blocked (anti-cheat penalty)
+      const user = userMap.get(userId.toString());
+      if (user && isCoinBlocked(user).isBlocked) continue;
 
       // Reset coinsEarnedToday if it's a new day
       const lastCoinDate = gam.lastCoinDate;

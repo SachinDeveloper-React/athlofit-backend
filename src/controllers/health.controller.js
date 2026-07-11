@@ -11,6 +11,7 @@ const { logCoinTransaction } = require('../utils/logCoinTransaction');
 const { validateSteps } = require('../utils/stepValidation');
 const { getCachedAppConfig } = require('../utils/appConfigCache');
 const { checkTimezoneManipulation } = require('../utils/timezoneGuard');
+const { recordCheatFlag, isCoinBlocked } = require('../utils/cheatPenalty');
 
 // ─── Unverified user daily coin cap ──────────────────────────────────────────
 function getEffectiveDailyCap(user, configMax, unverifiedCap) {
@@ -141,6 +142,19 @@ const syncHealthData = async (req, res, next) => {
     // Use the clamped (safe) step value instead of raw client input
     const validatedSteps = stepValidation.clampedSteps;
 
+    // ── Record cheat flag if validation flagged the submission ────────────────
+    if (stepValidation.flagged && stepValidation.reason) {
+      // Fire-and-forget: don't block the sync response
+      recordCheatFlag({
+        userId: req.user._id,
+        reason: stepValidation.reason,
+        incomingSteps: steps ?? 0,
+        clampedSteps: stepValidation.clampedSteps,
+        existingSteps: existing?.steps || 0,
+        date: today,
+      }).catch(() => {}); // non-fatal
+    }
+
     const isGoalMet = goalMet ?? (validatedSteps >= dailyGoal);
 
     // ── Merge strategy: only overwrite a field if the incoming value is
@@ -248,6 +262,10 @@ const syncHealthData = async (req, res, next) => {
     let goalCoinsAwarded = false;
     let awardedGoalCoins = 0;
 
+    // ── Anti-cheat: Check if user is coin-blocked ────────────────────────────
+    const coinBlockStatus = isCoinBlocked(req.user);
+    const userIsCoinBlocked = coinBlockStatus.isBlocked;
+
     // ── Revert hydration reward if water was reset below goal ─────────────────
     // When the user explicitly resets hydration (sends 0), and they had already
     // claimed the daily water coins, un-claim them so the Earn Coins card
@@ -280,7 +298,7 @@ const syncHealthData = async (req, res, next) => {
       await gam.save();
     }
 
-    if (isGoalMet && gam.stepGoalCoinDate !== today && isTodaySync) {
+    if (isGoalMet && gam.stepGoalCoinDate !== today && isTodaySync && !userIsCoinBlocked) {
       // FIX #1: Use atomic findOneAndUpdate to prevent race condition.
       // Two concurrent syncs can't both pass this check — only one wins the
       // atomic condition { stepGoalCoinDate: { $ne: today } }.
@@ -347,7 +365,7 @@ const syncHealthData = async (req, res, next) => {
         });
       }
       // If atomicResult is null, another concurrent request already awarded coins — no-op.
-    } else if (!isGoalMet) {
+    } else if (!isGoalMet && !userIsCoinBlocked) {
       // Passive step-based coins: Math.floor(steps / 100) * rate_per_100_steps
       // FIX #4: Use a step watermark (lastPassiveCoinSteps) to prevent replay.
       // Instead of computing from total steps (which re-awards everything if

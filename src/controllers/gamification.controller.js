@@ -386,6 +386,13 @@ const claimReward = async (req, res, next) => {
 
     if (!rewardId) return error(res, 'rewardId is required', 400);
 
+    // Anti-cheat: reject claim if user is coin-blocked
+    const { isCoinBlocked } = require('../utils/cheatPenalty');
+    const blockStatus = isCoinBlocked(req.user);
+    if (blockStatus.isBlocked) {
+      return error(res, `Coin earnings are blocked until ${blockStatus.blockedUntil.toISOString().slice(0, 10)} due to suspicious activity. ${blockStatus.daysRemaining} days remaining.`, 403);
+    }
+
     const [gam, badgeDefs, cfg] = await Promise.all([
       ensureGamDoc(userId),
       loadBadgeDefs(),
