@@ -232,10 +232,10 @@ describe('Config Flow Integration: GET → PATCH → GET', () => {
       expect(AppConfig.findOneAndUpdate).not.toHaveBeenCalled();
     });
 
-    it('rejects invalid rate_per_100_steps (> 1.0)', async () => {
+    it('rejects invalid rate_per_100_steps (> 1000)', async () => {
       const req = {
         body: {
-          coin_config: { steps: { rate_per_100_steps: 1.5 } },
+          coin_config: { steps: { rate_per_100_steps: 1500 } },
         },
       };
       const res = mockRes();
