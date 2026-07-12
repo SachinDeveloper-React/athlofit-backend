@@ -64,7 +64,19 @@ function validateSteps({ incomingSteps, existingSteps, bonusSteps, lastSyncAt, d
     const elapsedHours = elapsedMs / 3_600_000;
     const stepDelta = steps - existingWalked;
 
-    if (elapsedMinutes > 0) {
+    // Skip per-minute rate validation if elapsed time is too short (< 2 minutes).
+    // Very short intervals between syncs produce unreliable rate calculations
+    // because dividing by a tiny denominator amplifies any step delta. This
+    // prevents false flags when:
+    //   - The user opens/closes the app rapidly
+    //   - Both the background service and app sync within seconds
+    //   - The step count jumps after seeding from Health Connect on service restart
+    //
+    // The rapid-jump rule (Rule 4) still applies for large absolute jumps
+    // regardless of elapsed time.
+    const MIN_ELAPSED_FOR_RATE_CHECK = 2; // minutes
+
+    if (elapsedMinutes >= MIN_ELAPSED_FOR_RATE_CHECK) {
       const stepsPerMinute = stepDelta / elapsedMinutes;
 
       // Check burst rate (per-minute)
