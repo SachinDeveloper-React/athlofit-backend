@@ -128,7 +128,7 @@ const bulkUpload = async (req, res, next) => {
 
     if (!records || !records.length) return error(res, 'File is empty or has no valid rows', 400);
 
-    const VALID_DIET = ['veg', 'vegetarian', 'non-veg', 'vegan'];
+    const VALID_DIET = ['veg', 'vegetarian', 'eggetarian', 'non-veg', 'vegan'];
     const VALID_CAT = ['breakfast', 'lunch', 'dinner', 'snacks'];
     const VALID_UNIT = ['g', 'ml', 'serving', 'piece', 'tbsp'];
 
@@ -147,7 +147,8 @@ const bulkUpload = async (req, res, next) => {
       const protein = parseFloat(row.protein);
       const carbs = parseFloat(row.carbs);
       const fat = parseFloat(row.fat);
-      const dietType = (row.dietType || row.diet_type || '').trim().toLowerCase();
+      const dietTypeRaw = (row.dietType || row.diet_type || '').trim().toLowerCase();
+      const dietTypes = dietTypeRaw.split(',').map((d) => d.trim()).filter(Boolean);
       const categoryRaw = (row.category || '').trim().toLowerCase();
       const categories = categoryRaw.split(',').map((c) => c.trim()).filter(Boolean);
 
@@ -156,9 +157,9 @@ const bulkUpload = async (req, res, next) => {
         errors.push(`Row ${rowNum}: missing required field (name/calories/protein/carbs/fat)`);
         continue;
       }
-      if (!VALID_DIET.includes(dietType)) {
+      if (dietTypes.length === 0 || !dietTypes.every((d) => VALID_DIET.includes(d))) {
         skipped++;
-        errors.push(`Row ${rowNum}: invalid dietType "${dietType}" (must be veg/vegetarian/non-veg/vegan)`);
+        errors.push(`Row ${rowNum}: invalid dietType "${dietTypeRaw}" (must be veg/vegetarian/eggetarian/non-veg/vegan, comma-separated for multiple)`);
         continue;
       }
       if (categories.length === 0 || !categories.every((c) => VALID_CAT.includes(c))) {
@@ -181,7 +182,7 @@ const bulkUpload = async (req, res, next) => {
           if (u === 'tablespoon') u = 'tbsp';
           return VALID_UNIT.includes(u) ? u : 'g';
         })(),
-        dietType,
+        dietType: dietTypes,
         category: categories,
         description: (row.description || '').trim() || null,
         imageUrl: (row.imageUrl || row.image_url || '').trim() || null,

@@ -35,9 +35,13 @@ const foodSchema = new mongoose.Schema(
 
     // ── Classification ────────────────────────────────────────────────────────
     dietType: {
-      type: String,
-      enum: ['veg', 'vegetarian','eggetarian', 'non-veg', 'vegan'],
+      type: [String],
+      enum: ['veg', 'vegetarian', 'eggetarian', 'non-veg', 'vegan'],
       required: true,
+      validate: {
+        validator: (v) => Array.isArray(v) && v.length > 0,
+        message: 'At least one diet type is required',
+      },
     },
     category: {
       type: [String],

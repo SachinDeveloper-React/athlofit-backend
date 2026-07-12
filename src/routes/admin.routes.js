@@ -153,7 +153,7 @@ router.post('/foods',
   body('protein').isFloat({ min: 0 }),
   body('carbs').isFloat({ min: 0 }),
   body('fat').isFloat({ min: 0 }),
-  body('dietType').isIn(['veg', 'vegetarian', 'non-veg', 'vegan']).withMessage('invalid dietType'),
+  body('dietType').isArray({ min: 1 }).withMessage('at least one dietType is required'),
   validate, createFood);
 router.put('/foods/:id', updateFood);
 router.delete('/foods/:id', deleteFood);
