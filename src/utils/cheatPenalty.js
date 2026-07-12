@@ -4,13 +4,13 @@
 //
 // When a user submits fake/manipulated device steps and the stepValidation
 // flags the submission, this module:
-// 1. Records the flag in CheatFlag collection.
-// 2. Counts how many flags the user has received TODAY.
-// 3. If count >= 3 in a single day, sets coinBlockedUntil = today + 10 days.
-// 4. Sends push notifications to warn the user on each flag and on block.
+//   1. Records the flag in CheatFlag collection.
+//   2. Counts how many flags the user has received TODAY.
+//   3. If count >= 3 in a single day, sets coinBlockedUntil = today + 10 days.
+//   4. Sends push notifications to warn the user on each flag and on block.
 //
 // IMPORTANT: This only applies to DEVICE step cheats.
-// Bonus steps (admin/agent credited) are NOT flagged here.
+//            Bonus steps (admin/agent credited) are NOT flagged here.
 
 const CheatFlag = require('../models/CheatFlag.model');
 const User = require('../models/User.model');
@@ -72,17 +72,19 @@ async function recordCheatFlag({ userId, reason, incomingSteps, clampedSteps, ex
     // Update user with the block date (only extend if new block is later)
     await User.findByIdAndUpdate(
       userId,
-      [{
-        $set: {
-          coinBlockedUntil: {
-            $cond: {
-              if: { $gt: [blockUntil, { $ifNull: ['$coinBlockedUntil', new Date(0)] }] },
-              then: blockUntil,
-              else: '$coinBlockedUntil',
+      [
+        {
+          $set: {
+            coinBlockedUntil: {
+              $cond: {
+                if: { $gt: [blockUntil, { $ifNull: ['$coinBlockedUntil', new Date(0)] }] },
+                then: blockUntil,
+                else: '$coinBlockedUntil',
+              },
             },
           },
         },
-      }]
+      ]
     );
 
     // Mark the triggering flag
@@ -95,8 +97,8 @@ async function recordCheatFlag({ userId, reason, incomingSteps, clampedSteps, ex
     // 5. Send block notification
     createNotification(userId, {
       type: 'SECURITY',
-      title: '🚫 Coin Earnings Blocked',
-      message: `You submitted suspicious step data ${flagCount} times today. Your coin earnings are blocked for ${BLOCK_DURATION_DAYS} days until ${blockUntil.toISOString().slice(0, 10)}. Please use the app honestly.`,
+      title: '🚫 Coin Earnings Blocked — Fake Steps Detected',
+      message: `You submitted suspicious step data ${flagCount} times today. Your coin earnings (including automatic coins) are now blocked for ${BLOCK_DURATION_DAYS} days until ${blockUntil.toISOString().slice(0, 10)}. Please use the app honestly.`,
       data: { screen: 'Tracker', alert: 'cheat_blocked', blockedUntil: blockUntil.toISOString() },
     });
 

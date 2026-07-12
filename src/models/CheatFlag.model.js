@@ -5,7 +5,7 @@
 // Used to enforce the penalty rule: 3+ flags in a single day => coin block for 10 days.
 //
 // NOTE: Only device-originated step cheats are recorded here.
-// Bonus steps (admin/agent credited) are excluded.
+//       Bonus steps (admin/agent credited) are excluded.
 
 const mongoose = require('mongoose');
 

@@ -468,12 +468,25 @@ const getOrders = async (req, res, next) => {
   }
 };
 
+// ─── GET /shop/orders/:orderId ───────────────────────────────────────────────
+const getOrderById = async (req, res, next) => {
+  try {
+    const order = await Order.findOne({ _id: req.params.orderId, user: req.user._id })
+      .populate('items.product', 'name images');
+    if (!order) return error(res, 'Order not found', 404);
+    return success(res, 'Order fetched', order);
+  } catch (err) {
+    next(err);
+  }
+};
+
 // ─── PATCH /shop/orders/:orderId/cancel ──────────────────────────────────────
 // Cancels a PENDING or PAID order. Refunds coins for COIN_PURCHASE orders
 // and restores product stock.
 const cancelOrder = async (req, res, next) => {
   try {
     const { orderId } = req.params;
+    const { reason, note } = req.body; // cancellation reason + optional custom note
 
     const order = await Order.findOne({ _id: orderId, user: req.user._id });
 
@@ -490,7 +503,20 @@ const cancelOrder = async (req, res, next) => {
       );
     }
 
+    const now = new Date();
     order.status = 'CANCELLED';
+    order.cancelledAt = now;
+    order.cancellationReason = reason || null;
+    order.cancellationNote = note || null;
+
+    // Push tracking history entry
+    order.trackingHistory.push({
+      status: 'CANCELLED',
+      title: 'Order Cancelled',
+      description: reason ? `Reason: ${reason}${note ? ` - ${note}` : ''}` : 'Cancelled by user',
+      timestamp: now,
+    });
+
     await order.save();
 
     // ── Refund coins if it was a coin purchase ───────────────────────────────
@@ -636,6 +662,52 @@ const getAvailableCoupons = async (req, res, next) => {
   }
 };
 
+// ─── PATCH /shop/orders/:orderId/confirm-delivery ────────────────────────────
+// User confirms they received the package (SHIPPED → DELIVERED)
+const confirmDelivery = async (req, res, next) => {
+  try {
+    const { orderId } = req.params;
+
+    const order = await Order.findOne({ _id: orderId, user: req.user._id });
+    if (!order) return error(res, 'Order not found', 404);
+
+    if (order.status !== 'SHIPPED') {
+      return error(res, `Cannot confirm delivery. Current status: ${order.status}`, 400);
+    }
+
+    const now = new Date();
+    order.status = 'DELIVERED';
+    order.deliveredAt = now;
+
+    // Push tracking history entry
+    order.trackingHistory.push({
+      status: 'DELIVERED',
+      title: 'Order Delivered',
+      description: 'Delivery confirmed by customer',
+      timestamp: now,
+    });
+
+    await order.save();
+
+    // Send notification
+    const shortId = order._id.toString().slice(-6).toUpperCase();
+    createNotification(req.user._id, {
+      type:    'PRODUCT',
+      title:   '📦 Order Delivered',
+      message: `Order #${shortId} has been delivered. Enjoy your purchase!`,
+      data:    { screen: 'OrderHistory' },
+    });
+
+    return success(res, 'Delivery confirmed', {
+      orderId: order._id,
+      status: order.status,
+      deliveredAt: order.deliveredAt,
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
 module.exports = {
   getCategories,
   getProducts,
@@ -648,6 +720,8 @@ module.exports = {
   validateCoupon,
   getAvailableCoupons,
   getOrders,
+  getOrderById,
   cancelOrder,
+  confirmDelivery,
 };
 

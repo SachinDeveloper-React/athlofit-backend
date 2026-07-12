@@ -146,6 +146,31 @@ const appConfigSchema = new mongoose.Schema(
       },
     },
 
+    // ─── Force Update / Version Control ─────────────────────────────────────────
+    // Backend-driven app version gating. When the installed app version is below
+    // the configured minimum, the client shows an update modal.
+    forceUpdate: {
+      // Minimum version the user MUST install (hard block — no dismiss).
+      android: {
+        minVersion:    { type: String, default: '0.0.1' },
+        latestVersion: { type: String, default: '0.0.1' },
+        updateUrl:     { type: String, default: '' },
+      },
+      ios: {
+        minVersion:    { type: String, default: '0.0.1' },
+        latestVersion: { type: String, default: '0.0.1' },
+        updateUrl:     { type: String, default: '' },
+      },
+      // 'force' = mandatory (can't dismiss), 'soft' = optional (user can skip)
+      // This is determined dynamically: if app version < minVersion → force,
+      // if app version >= minVersion but < latestVersion → soft.
+      // Custom message shown in the update modal.
+      title:   { type: String, default: 'Update Available' },
+      message: { type: String, default: 'A new version of Athlofit is available. Please update for the best experience.' },
+      // Toggle to enable/disable the version check entirely
+      enabled: { type: Boolean, default: true },
+    },
+
     // ─── Streak protection settings (admin-controlled) ───────────────────────
     streak: {
       // Freeze: earned every N consecutive streak days (milestone).

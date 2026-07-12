@@ -18,11 +18,13 @@ const {
   adminDeleteFaq,
   adminGetTickets,
   adminUpdateTicket,
+  checkVersion,
 } = require('../controllers/config.controller');
 const { protect, adminOnly } = require('../middleware/auth.middleware');
 
 // ── Public ────────────────────────────────────────────────────────────────────
 router.get('/app',     getAppConfig);
+router.get('/check-version', checkVersion);
 router.get('/terms',   getTerms);
 router.get('/privacy', getPrivacy);
 router.get('/faqs',    getFaqs);

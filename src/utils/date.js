@@ -118,6 +118,17 @@ const toDayLabel = (isoDate) => {
 };
 
 /**
+ * Returns a formatted label like "10 (Fri)" from "YYYY-MM-DD".
+ * This includes the day-of-month number and abbreviated day name.
+ */
+const toDateWithDayLabel = (isoDate) => {
+  const days = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+  const [y, m, d] = isoDate.split('-').map(Number);
+  const dayName = days[new Date(y, m - 1, d).getDay()];
+  return `${d} (${dayName})`;
+};
+
+/**
  * Number of whole days between two ISO date strings (currDate - prevDate).
  * Positive if currDate is after prevDate.
  */
@@ -130,4 +141,4 @@ const daysBetween = (prevDate, currDate) => {
   return Math.round((curr.getTime() - prev.getTime()) / (1000 * 60 * 60 * 24));
 };
 
-module.exports = { todayISO, resolveClientDate, isConsecutiveDay, buildDateRange, toDayLabel, daysBetween };
+module.exports = { todayISO, resolveClientDate, isConsecutiveDay, buildDateRange, toDayLabel, toDateWithDayLabel, daysBetween };

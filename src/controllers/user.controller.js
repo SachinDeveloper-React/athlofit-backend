@@ -5,7 +5,7 @@ const Gamification = require("../models/Gamification.model");
 const HealthActivity = require("../models/HealthActivity.model");
 const Notification = require("../models/Notification.model");
 const { success, error } = require("../utils/response");
-const { todayISO } = require("../utils/date");
+const { todayISO, daysBetween } = require("../utils/date");
 const { uploadImage } = require("../utils/uploadImage");
 const { createNotification } = require("../utils/createNotification");
 
@@ -126,9 +126,26 @@ const updateStepGoal = async (req, res, next) => {
       return error(res, "Step goal cannot exceed 100,000", 400);
     }
 
-    // Calculate tomorrow's date (IST-safe: use UTC day + 1)
-    const now = new Date();
-    const tomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
+    // ── 90-day cooldown check ─────────────────────────────────────────────────
+    // After changing the step goal, users must wait 90 days before changing again.
+    const todayStr = todayISO();
+    const lastChangeDate = req.user.lastStepGoalChangeDate;
+    if (lastChangeDate) {
+      const daysSinceLastChange = daysBetween(lastChangeDate, todayStr);
+      if (daysSinceLastChange !== null && daysSinceLastChange < 90) {
+        const daysRemaining = 90 - daysSinceLastChange;
+        return error(
+          res,
+          `You can change your step goal again after ${daysRemaining} day${daysRemaining === 1 ? '' : 's'}`,
+          429,
+        );
+      }
+    }
+
+    // Calculate tomorrow's date using IST-aware todayISO() for consistency
+    // with the sync endpoint that applies pending goals.
+    const [y, m, d] = todayStr.split('-').map(Number);
+    const tomorrow = new Date(y, m - 1, d + 1);
     const effectiveDate = `${tomorrow.getFullYear()}-${String(tomorrow.getMonth() + 1).padStart(2, '0')}-${String(tomorrow.getDate()).padStart(2, '0')}`;
 
     const user = await User.findByIdAndUpdate(
@@ -137,6 +154,7 @@ const updateStepGoal = async (req, res, next) => {
         $set: {
           pendingStepGoal: dailyStepGoal,
           pendingGoalEffectiveDate: effectiveDate,
+          lastStepGoalChangeDate: todayStr,
         },
       },
       { new: true },
@@ -146,6 +164,7 @@ const updateStepGoal = async (req, res, next) => {
       dailyStepGoal: user.dailyStepGoal,
       pendingStepGoal: user.pendingStepGoal,
       pendingGoalEffectiveDate: user.pendingGoalEffectiveDate,
+      lastStepGoalChangeDate: user.lastStepGoalChangeDate,
     });
   } catch (err) {
     next(err);
