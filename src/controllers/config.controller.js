@@ -181,11 +181,11 @@ const updateAppConfig = async (req, res, next) => {
       setMap["coin_config.rewards.daily_step_goal_reached.coin_value"] !==
       undefined
     ) {
-      const val =
-        setMap["coin_config.rewards.daily_step_goal_reached.coin_value"];
-      if (!Number.isInteger(val) || val < 0) {
-        return error(res, "coin_value must be a non-negative integer", 400);
+      const val = Number(setMap["coin_config.rewards.daily_step_goal_reached.coin_value"]);
+      if (isNaN(val) || val < 0) {
+        return error(res, "coin_value must be a non-negative number", 400);
       }
+      setMap["coin_config.rewards.daily_step_goal_reached.coin_value"] = val;
     }
 
     const cfg = await AppConfig.findOneAndUpdate(
