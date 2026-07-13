@@ -234,8 +234,6 @@ const syncHealthData = async (req, res, next) => {
       await _updateStreak(req.user._id, today, gam);
     }
 
-    // Always update lastActiveDate when syncing today's data
-    // (tracks that the user was active today, regardless of goal completion)
     // FIX #3: Use resolveClientDate for "actualToday" — respects the user's timezone
     let actualToday = resolveClientDate(timezone);
 
@@ -252,9 +250,12 @@ const syncHealthData = async (req, res, next) => {
     // Coins are ONLY awarded for today's actual date — never for past-day background syncs.
     // With client timezone, we no longer need the 24-hour tolerance hack.
     const isTodaySync = (today === actualToday);
-    if (isTodaySync && gam.lastActiveDate !== actualToday) {
-      gam.lastActiveDate = actualToday;
-    }
+    // BUG-FIX: Do NOT set lastActiveDate here unconditionally.
+    // lastActiveDate must only be set when the step goal is met (handled by
+    // _updateStreak above). Setting it on every sync — even when the goal hasn't
+    // been reached — causes _updateStreak to see isSameDay=true on the later
+    // sync that DOES meet the goal, skipping the streak increment entirely.
+    // This was the root cause of streaks staying at 0 despite completing goals.
 
     // Reset daily coins counter ONLY when we're sure it's a new server-day.
     // Use lastCoinDate (which is set to the server's actualToday) to avoid double-resets.
@@ -531,7 +532,7 @@ const syncHealthData = async (req, res, next) => {
       }
     }
 
-    // Ensure lastActiveDate is persisted even if no coins were added this sync
+    // Ensure lastActiveDate is persisted if _updateStreak or other code modified it
     if (isTodaySync && gam.isModified('lastActiveDate')) {
       await gam.save();
     }
@@ -592,7 +593,11 @@ const getHealthHistory = async (req, res, next) => {
 // ─── GET /health/today ────────────────────────────────────────────────────────
 const getTodayHealth = async (req, res, next) => {
   try {
-    const today = todayISO();
+    // Use client timezone (query param) to determine "today" in the user's local time.
+    // This ensures the correct day's health record is returned regardless of the
+    // server's timezone. Falls back to server IST if no timezone is provided.
+    const timezone = req.query.timezone || req.headers['x-timezone'] || null;
+    const today = resolveClientDate(timezone);
     const record = await HealthActivity.findOne({ user: req.user._id, date: today });
     return success(res, 'Today health data fetched', record);
   } catch (err) {
