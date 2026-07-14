@@ -20,13 +20,10 @@ async function getStreakConfig() {
   };
 }
 
-// ISO week key (e.g. "2026-W25")
-function isoWeekKey(date = new Date()) {
-  const d = new Date(Date.UTC(date.getFullYear(), date.getMonth(), date.getDate()));
-  d.setUTCDate(d.getUTCDate() + 4 - (d.getUTCDay() || 7));
-  const yearStart = new Date(Date.UTC(d.getUTCFullYear(), 0, 1));
-  const weekNo = Math.ceil(((d - yearStart) / 86400000 + 1) / 7);
-  return `${d.getUTCFullYear()}-W${String(weekNo).padStart(2, '0')}`;
+// ISO week key in IST (e.g. "2026-W25")
+function isoWeekKey() {
+  const { isoWeekKeyIST } = require('./date');
+  return isoWeekKeyIST();
 }
 
 /**

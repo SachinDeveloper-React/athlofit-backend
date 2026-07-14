@@ -267,11 +267,11 @@ describe('Config Flow Integration: GET → PATCH → GET', () => {
       expect(AppConfig.findOneAndUpdate).not.toHaveBeenCalled();
     });
 
-    it('rejects non-integer coin_value', async () => {
+    it('rejects invalid coin_value (NaN)', async () => {
       const req = {
         body: {
           coin_config: {
-            rewards: { daily_step_goal_reached: { coin_value: 50.5 } },
+            rewards: { daily_step_goal_reached: { coin_value: 'abc' } },
           },
         },
       };

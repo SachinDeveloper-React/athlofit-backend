@@ -401,7 +401,7 @@ const adjustUserCoins = async (req, res, next) => {
       balanceAfter: newBalance,
       source: 'MANUAL',
       description: reason?.trim() || `Admin ${amt > 0 ? 'credit' : 'debit'} by ${req.user.name}`,
-      metadata: { date: new Date().toISOString().slice(0, 10) },
+      metadata: { date: require('../utils/date').todayISO() },
     });
 
     await logAdminAction(req, req.params.id, amt > 0 ? 'COIN_CREDIT' : 'COIN_DEBIT', reason?.trim() || '', { amount: amt });

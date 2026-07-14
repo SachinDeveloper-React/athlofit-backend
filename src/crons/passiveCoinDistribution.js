@@ -77,16 +77,13 @@ async function distributePassiveCoins() {
       const userDoc = await User.findById(userId).select('coinBlockedUntil').lean();
       if (userDoc && isCoinBlocked(userDoc).isBlocked) continue;
 
-      // Reset coinsEarnedToday if it's a new day
+      // Reset coinsEarnedToday if it's a new day (read-only check — the atomic
+      // update below handles the actual state transition safely)
       const lastCoinDate = gam.lastCoinDate;
-      if (lastCoinDate && lastCoinDate !== today) {
-        gam.coinsEarnedToday = 0;
-        gam.lastPassiveCoinSteps = 0;
-        gam.lastPassiveCoinTime = null;
-      }
-
-      // Calculate step delta since last payout
-      const previousSteps = gam.lastPassiveCoinSteps || 0;
+      const isNewDay = !lastCoinDate || lastCoinDate !== today;
+      
+      // Use the correct baseline: if new day, watermark resets to 0
+      const previousSteps = isNewDay ? 0 : (gam.lastPassiveCoinSteps || 0);
       const stepDelta = currentSteps - previousSteps;
 
       // Skip if no new steps since last payout
@@ -114,7 +111,7 @@ async function distributePassiveCoins() {
         Math.min(effectiveCap, Math.max(0, Math.floor(currentSteps / 100) * rate)).toFixed(4)
       );
 
-      const currentEarned = gam.coinsEarnedToday || 0;
+      const currentEarned = isNewDay ? 0 : (gam.coinsEarnedToday || 0);
       // coinsEarnedToday may include goal/hydration coins, so use lastPassiveCoinSteps as base
       const passiveAlreadyAwarded = parseFloat(
         Math.min(effectiveCap, Math.max(0, Math.floor(previousSteps / 100) * rate)).toFixed(4)
@@ -130,20 +127,39 @@ async function distributePassiveCoins() {
 
       if (finalCoins <= 0) continue;
 
-      // Award coins
-      gam.coinsBalance = parseFloat((gam.coinsBalance + finalCoins).toFixed(4));
-      gam.coinsEarnedToday = parseFloat(((gam.coinsEarnedToday || 0) + finalCoins).toFixed(4));
-      gam.lastCoinDate = today;
-      gam.lastPassiveCoinSteps = currentSteps;
-      gam.lastPassiveCoinTime = now;
-      await gam.save();
+      // Award coins ATOMICALLY — prevents race with concurrent health syncs.
+      // Only updates if lastPassiveCoinSteps hasn't moved past our baseline.
+      const atomicResult = await Gamification.findOneAndUpdate(
+        {
+          user: userId,
+          $or: [
+            { lastPassiveCoinSteps: { $lte: previousSteps } },
+            { lastPassiveCoinSteps: null },
+            { lastPassiveCoinSteps: { $exists: false } },
+          ],
+        },
+        {
+          $set: {
+            lastCoinDate: today,
+            lastPassiveCoinSteps: currentSteps,
+            lastPassiveCoinTime: now,
+          },
+          $inc: {
+            coinsBalance: finalCoins,
+            coinsEarnedToday: finalCoins,
+          },
+        },
+        { new: true }
+      );
+
+      if (!atomicResult) continue; // another process already moved the watermark
 
       // Log transaction
       logCoinTransaction({
         userId,
         type: 'EARNED',
         amount: finalCoins,
-        balanceAfter: gam.coinsBalance,
+        balanceAfter: atomicResult.coinsBalance,
         source: 'PASSIVE_STEPS',
         description: `Auto Step Coins — ${previousSteps.toLocaleString()} → ${currentSteps.toLocaleString()} (+${stepDelta.toLocaleString()} steps)`,
         metadata: {

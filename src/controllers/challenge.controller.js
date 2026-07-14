@@ -135,11 +135,14 @@ const syncChallengeProgress = async (userId) => {
     const totalProteinLogged  = mealLogs.reduce((s, m) => s + (m.protein  || 0), 0);
     const mealsLoggedCount    = mealLogs.length;
 
-    // Weekly data for weekly challenges
+    // Weekly data for weekly challenges (IST-based)
     const weekKey = getWeeklyPeriodKey();
-    const weekStart = new Date();
-    weekStart.setDate(weekStart.getDate() - weekStart.getDay()); // Sunday
-    const weekStartISO = weekStart.toISOString().split('T')[0];
+    const todayParts = today.split('-').map(Number);
+    const todayDate = new Date(todayParts[0], todayParts[1] - 1, todayParts[2]);
+    const dayOfWeek = todayDate.getDay(); // 0=Sun
+    const weekStartDate = new Date(todayDate);
+    weekStartDate.setDate(weekStartDate.getDate() - dayOfWeek);
+    const weekStartISO = `${weekStartDate.getFullYear()}-${String(weekStartDate.getMonth() + 1).padStart(2, '0')}-${String(weekStartDate.getDate()).padStart(2, '0')}`;
     const weekActivities = await HealthActivity.find({
       user: userId,
       date: { $gte: weekStartISO, $lte: today },
