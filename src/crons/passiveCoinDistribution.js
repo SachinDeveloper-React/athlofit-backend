@@ -49,10 +49,10 @@ async function distributePassiveCoins() {
     return { processed: 0, awarded: 0, totalCoins: 0 };
   }
 
-  // Batch-load user verification status
+  // Batch-load user verification + cheat-block status in one query
   const userIds = activities.map(a => a.user);
   const users = await User.find({ _id: { $in: userIds } })
-    .select('_id emailVerified')
+    .select('_id emailVerified coinBlockedUntil')
     .lean();
   const userMap = new Map(users.map(u => [u._id.toString(), u]));
 
@@ -74,7 +74,7 @@ async function distributePassiveCoins() {
       processed++;
 
       // ── Anti-cheat: skip if user is blocked from earning coins ─────────────
-      const userDoc = await User.findById(userId).select('coinBlockedUntil').lean();
+      const userDoc = userMap.get(userId.toString());
       if (userDoc && isCoinBlocked(userDoc).isBlocked) continue;
 
       // Reset coinsEarnedToday if it's a new day (read-only check — the atomic
@@ -98,8 +98,7 @@ async function distributePassiveCoins() {
       }
 
       // Determine the user's effective passive daily cap
-      const user = userMap.get(userId.toString());
-      const isVerified = user?.emailVerified ?? false;
+      const isVerified = userDoc?.emailVerified ?? false;
       const effectiveCap = isVerified
         ? dailyEarnLimit
         : Math.min(unverifiedDailyCap, dailyEarnLimit);
@@ -129,6 +128,34 @@ async function distributePassiveCoins() {
 
       // Award coins ATOMICALLY — prevents race with concurrent health syncs.
       // Only updates if lastPassiveCoinSteps hasn't moved past our baseline.
+      //
+      // If it's a new day, reset coinsEarnedToday to finalCoins instead of
+      // incrementing a stale yesterday value. Use $set for the new-day case,
+      // $inc for same-day case.
+      const updateOp = isNewDay
+        ? {
+            $set: {
+              lastCoinDate: today,
+              lastPassiveCoinSteps: currentSteps,
+              lastPassiveCoinTime: now,
+              coinsEarnedToday: finalCoins,
+            },
+            $inc: {
+              coinsBalance: finalCoins,
+            },
+          }
+        : {
+            $set: {
+              lastCoinDate: today,
+              lastPassiveCoinSteps: currentSteps,
+              lastPassiveCoinTime: now,
+            },
+            $inc: {
+              coinsBalance: finalCoins,
+              coinsEarnedToday: finalCoins,
+            },
+          };
+
       const atomicResult = await Gamification.findOneAndUpdate(
         {
           user: userId,
@@ -138,17 +165,7 @@ async function distributePassiveCoins() {
             { lastPassiveCoinSteps: { $exists: false } },
           ],
         },
-        {
-          $set: {
-            lastCoinDate: today,
-            lastPassiveCoinSteps: currentSteps,
-            lastPassiveCoinTime: now,
-          },
-          $inc: {
-            coinsBalance: finalCoins,
-            coinsEarnedToday: finalCoins,
-          },
-        },
+        updateOp,
         { new: true }
       );
 
