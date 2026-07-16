@@ -127,6 +127,41 @@ const syncHealthData = async (req, res, next) => {
       });
     }
 
+    // ── Guard: reject stale background syncs after DB reset / fresh login ────
+    // When the DB is wiped (no HealthActivity record for today) and a background
+    // sync arrives with a high step count shortly after login, it's almost certainly
+    // stale Health Connect data from a previous session. Reject if:
+    //   1. No existing record for today (fresh start)
+    //   2. The sync is from a background source (X-Sync-Source header)
+    //   3. The user's last login was recent (within 10 minutes)
+    //   4. Steps are unreasonably high for the time elapsed since login
+    const syncSource = req.headers['x-sync-source'] || 'foreground';
+    const isBackgroundSync = syncSource === 'background';
+    const existingForGuard = await HealthActivity.findOne({ user: req.user._id, date: today });
+
+    if (!existingForGuard && isBackgroundSync && steps > 0) {
+      // No record exists for today — this is a fresh start.
+      // Check if steps are plausible given time since last login.
+      const lastLoginAt = req.user.lastLoginAt || req.user.updatedAt || req.user.createdAt;
+      const msSinceLogin = Date.now() - new Date(lastLoginAt).getTime();
+      const minutesSinceLogin = msSinceLogin / 60000;
+
+      // A person walks ~100-150 steps/min max. If the incoming steps exceed
+      // what's physically possible since login, it's stale data.
+      const maxPlausibleSteps = Math.max(500, Math.ceil(minutesSinceLogin * 180));
+
+      if (steps > maxPlausibleSteps) {
+        console.warn(
+          `[HealthSync] Rejected stale background sync for user ${req.user._id}: ` +
+          `${steps} steps, only ${Math.round(minutesSinceLogin)}min since login (max plausible: ${maxPlausibleSteps})`
+        );
+        return success(res, 'Skipped — stale background sync after fresh login', {
+          skipped: true,
+          reason: 'stale_background_sync',
+        });
+      }
+    }
+
     const dailyGoal = req.user.dailyStepGoal || 10000;
 
     // ── FIX #2: Server-side step validation / anti-cheat ─────────────────────

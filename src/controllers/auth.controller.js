@@ -254,6 +254,9 @@ const login = async (req, res, next) => {
       req.headers['user-agent']
     );
 
+    // Track login timestamp for anti-stale-sync guard
+    await User.updateOne({ _id: user._id }, { $set: { lastLoginAt: new Date() } });
+
     // Remove password from response by running toJSON transform
     const userObj = user.toJSON();
 
@@ -613,6 +616,9 @@ const googleLogin = async (req, res, next) => {
 
     const accessToken  = generateAccessToken(user._id.toString(), user.tokenVersion);
     const refreshToken = await saveRefreshToken(user._id, req.ip, req.headers['user-agent']);
+
+    // Track login timestamp for anti-stale-sync guard
+    await User.updateOne({ _id: user._id }, { $set: { lastLoginAt: new Date() } });
 
     return success(res, 'Google login successful', {
       status: 'success',

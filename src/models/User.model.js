@@ -133,6 +133,8 @@ const userSchema = new mongoose.Schema(
 
     // Activity tracking (for inactivity expiry)
     lastActiveAt: { type: Date, default: Date.now },
+    // Timestamp of the most recent successful login (used by anti-stale-sync guard)
+    lastLoginAt: { type: Date, default: null },
     // Terms & Conditions acceptance
     termsAccepted: { type: Boolean, default: false },
     termsAcceptedAt: { type: Date, default: null },
