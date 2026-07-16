@@ -137,17 +137,21 @@ const syncHealthData = async (req, res, next) => {
     //   4. Steps are unreasonably high for the time elapsed since login
     const syncSource = req.headers['x-sync-source'] || 'foreground';
     const isBackgroundSync = syncSource === 'background';
-    const existingForGuard = await HealthActivity.findOne({ user: req.user._id, date: today });
 
-    if (!existingForGuard && isBackgroundSync && steps > 0) {
-      // No record exists for today — this is a fresh start.
-      // Check if steps are plausible given time since last login.
+    const dailyGoal = req.user.dailyStepGoal || 10000;
+
+    // ── FIX #2: Server-side step validation / anti-cheat ─────────────────────
+    // Validate the incoming step count against rate-of-change limits and
+    // previous known values. Flags or rejects suspicious submissions.
+    const existing = await HealthActivity.findOne({ user: req.user._id, date: today });
+
+    // ── Guard: reject stale background syncs after DB reset / fresh login ────
+    // When no record exists for today and a background sync arrives with
+    // implausibly high steps, reject it as stale Health Connect data.
+    if (!existing && isBackgroundSync && steps > 0) {
       const lastLoginAt = req.user.lastLoginAt || req.user.updatedAt || req.user.createdAt;
       const msSinceLogin = Date.now() - new Date(lastLoginAt).getTime();
       const minutesSinceLogin = msSinceLogin / 60000;
-
-      // A person walks ~100-150 steps/min max. If the incoming steps exceed
-      // what's physically possible since login, it's stale data.
       const maxPlausibleSteps = Math.max(500, Math.ceil(minutesSinceLogin * 180));
 
       if (steps > maxPlausibleSteps) {
@@ -162,12 +166,6 @@ const syncHealthData = async (req, res, next) => {
       }
     }
 
-    const dailyGoal = req.user.dailyStepGoal || 10000;
-
-    // ── FIX #2: Server-side step validation / anti-cheat ─────────────────────
-    // Validate the incoming step count against rate-of-change limits and
-    // previous known values. Flags or rejects suspicious submissions.
-    const existing = await HealthActivity.findOne({ user: req.user._id, date: today });
     const stepValidation = validateSteps({
       incomingSteps: steps,
       existingSteps: existing?.steps || 0,
