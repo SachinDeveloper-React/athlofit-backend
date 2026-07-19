@@ -468,39 +468,26 @@ const syncHealthData = async (req, res, next) => {
         });
       }
       // If atomicResult is null, another concurrent request already awarded coins — no-op.
-    } else if (!isGoalMet && !userCoinBlocked) {
-      // Passive step-based coins: Math.floor(steps / 100) * rate_per_100_steps
-      // FIX #4: Use a step watermark (lastPassiveCoinSteps) to prevent replay.
-      // Instead of computing from total steps (which re-awards everything if
-      // coinsEarnedToday resets), we only award coins for NEW steps above
-      // the last known watermark.
-      //
-      // The balance is updated atomically so concurrent syncs can't double-award.
-      //
-      // IMPORTANT: Only update coinsEarnedToday/lastCoinDate for TODAY's date.
-      const isTodaySyncPassive = isTodaySync;
+    }
 
-      if (isTodaySyncPassive) {
-        const dailyEarnLimit = getEffectiveDailyCap(req.user, cfg.coin.dailyEarnLimit, cfg.coin.unverifiedDailyCap);
-        const rate = cfg.coin_config?.steps?.rate_per_100_steps ?? 0.5;
+    // Passive step-based coins — awarded for ALL steps regardless of goal status.
+    // Uses a watermark (lastPassiveCoinSteps) to only award coins for NEW steps.
+    // The daily cap (dailyEarnLimit) prevents over-earning.
+    if (!userCoinBlocked && isTodaySync) {
+      const dailyEarnLimit = getEffectiveDailyCap(req.user, cfg.coin.dailyEarnLimit, cfg.coin.unverifiedDailyCap);
+      const rate = cfg.coin_config?.steps?.rate_per_100_steps ?? 0.5;
 
-        // FIX #4: Watermark-based calculation.
-        // lastPassiveCoinSteps = the step count at which coins were last calculated.
-        // Only award coins for steps ABOVE this watermark.
-        const watermark = gam.lastPassiveCoinSteps || 0;
-        const currentSteps = validatedSteps ?? 0;
+      // Watermark-based calculation.
+      // lastPassiveCoinSteps = the step count at which coins were last calculated.
+      // Only award coins for steps ABOVE this watermark.
+      const watermark = gam.lastPassiveCoinSteps || 0;
+      const currentSteps = validatedSteps ?? 0;
 
-        // If this is a new day (lastCoinDate changed), the watermark from yesterday
-        // is stale — reset it so we don't penalise the user.
-        const effectiveWatermark = (gam.lastCoinDate === actualToday) ? watermark : 0;
+      // If this is a new day (lastCoinDate changed), the watermark from yesterday
+      // is stale — reset it so we don't penalise the user.
+      const effectiveWatermark = (gam.lastCoinDate === actualToday) ? watermark : 0;
 
-        // Only proceed if current steps exceed the watermark
-        // MULTI-DEVICE GUARD: currentSteps comes from the HealthActivity record
-        // (which stores the max seen across all devices via merge()). The watermark
-        // only moves forward — if device B sends fewer steps than device A already
-        // synced, the merge keeps the higher value, and currentSteps >= watermark
-        // will be false, preventing double-earning.
-        if (currentSteps > effectiveWatermark) {
+      if (currentSteps > effectiveWatermark) {
           // Calculate coins for the delta only (new steps since last award)
           const newStepsSinceWatermark = currentSteps - effectiveWatermark;
           const coinsForNewSteps = parseFloat((Math.floor(newStepsSinceWatermark / 100) * rate).toFixed(2));
@@ -563,7 +550,6 @@ const syncHealthData = async (req, res, next) => {
           }
         }
       }
-    }
 
     // Ensure lastActiveDate is persisted if _updateStreak or other code modified it
     if (isTodaySync && gam.isModified('lastActiveDate')) {
