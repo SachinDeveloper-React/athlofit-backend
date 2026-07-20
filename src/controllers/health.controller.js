@@ -146,21 +146,34 @@ const syncHealthData = async (req, res, next) => {
     // previous known values. Flags or rejects suspicious submissions.
     const existing = await HealthActivity.findOne({ user: req.user._id, date: today });
 
-    // ── Guard: reject stale background syncs after DB reset / fresh login ────
-    // When no record exists for today and a background sync arrives with
-    // implausibly high steps, reject it as stale Health Connect data.
-    if (!existing && isBackgroundSync && steps > 0) {
-      const lastLoginAt = req.user.lastLoginAt || req.user.updatedAt || req.user.createdAt;
-      const msSinceLogin = Date.now() - new Date(lastLoginAt).getTime();
-      const minutesSinceLogin = msSinceLogin / 60000;
-      const maxPlausibleSteps = Math.max(500, Math.ceil(minutesSinceLogin * 180));
+    // ── Guard: reject stale background syncs on a FRESH account only ─────────
+    // Purpose: stop historical Health Connect / HealthKit data from flooding a
+    // brand-new account (fresh install or DB wipe), where a background sync can
+    // arrive seconds after signup carrying a previous device session's steps.
+    //
+    // IMPORTANT: This must NOT run for established users. `!existing` is true on
+    // the FIRST sync of every new day for everyone, so without the account-age
+    // scope below this rejected legitimate morning steps daily (steps the user
+    // walked before opening the app), which in turn blocked their step coins.
+    //
+    // The rate check (steps ≈ 180/min since account creation) only makes sense
+    // right after signup; we cap the window to the account's first hour.
+    const NEW_ACCOUNT_GUARD_MINUTES = 60;
+    const accountAgeMinutes =
+      (Date.now() - new Date(req.user.createdAt).getTime()) / 60000;
+    const isFreshAccount = accountAgeMinutes <= NEW_ACCOUNT_GUARD_MINUTES;
+
+    if (!existing && isBackgroundSync && steps > 0 && isFreshAccount) {
+      // Plausibility is measured from account creation (not login), since a
+      // fresh account genuinely started at 0 steps at signup time.
+      const maxPlausibleSteps = Math.max(2000, Math.ceil(accountAgeMinutes * 180));
 
       if (steps > maxPlausibleSteps) {
         console.warn(
-          `[HealthSync] Rejected stale background sync for user ${req.user._id}: ` +
-          `${steps} steps, only ${Math.round(minutesSinceLogin)}min since login (max plausible: ${maxPlausibleSteps})`
+          `[HealthSync] Rejected stale background sync for NEW user ${req.user._id}: ` +
+          `${steps} steps, account only ${Math.round(accountAgeMinutes)}min old (max plausible: ${maxPlausibleSteps})`
         );
-        return success(res, 'Skipped — stale background sync after fresh login', {
+        return success(res, 'Skipped — stale background sync on fresh account', {
           skipped: true,
           reason: 'stale_background_sync',
         });
