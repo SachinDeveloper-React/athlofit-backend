@@ -450,7 +450,7 @@ async function seedAppConfig() {
     key: 'global',
     coin: {
       conversionRate: 10,
-      dailyEarnLimit: 10,
+      dailyEarnLimit: 200,
       maxDailyRewards: 250,
       coinsPerStepKm: 1,
       purchaseEnabled: true,

@@ -287,10 +287,12 @@ const getCoinData = async (req, res, next) => {
     let total;
 
     if (coinTxnTotal > 0) {
-      // Use the new CoinTransaction collection
+      // Use the new CoinTransaction collection.
+      // Normalise types for the app UI: REFUND shows as a credit (EARNED),
+      // DEDUCTED shows as a debit (SPENT).
       transactions = coinTxns.map(t => ({
         id: t._id.toString(),
-        type: t.type === 'REFUND' ? 'EARNED' : t.type,
+        type: t.type === 'REFUND' ? 'EARNED' : (t.type === 'DEDUCTED' ? 'SPENT' : t.type),
         amount: t.amount,
         source: t.description,
         createdAt: t.createdAt.toISOString(),
@@ -826,7 +828,7 @@ const getCoinHistory = async (req, res, next) => {
 
     const formatted = transactions.map(t => ({
       id: t._id.toString(),
-      type: t.type === 'REFUND' ? 'EARNED' : t.type,
+      type: t.type === 'REFUND' ? 'EARNED' : (t.type === 'DEDUCTED' ? 'SPENT' : t.type),
       amount: t.amount,
       source: t.description,
       createdAt: t.createdAt.toISOString(),

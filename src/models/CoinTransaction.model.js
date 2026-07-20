@@ -14,7 +14,11 @@ const coinTransactionSchema = new mongoose.Schema(
     },
     type: {
       type: String,
-      enum: ['EARNED', 'SPENT', 'REFUND'],
+      // EARNED  — coins added
+      // SPENT   — coins spent by the user (shop purchase, streak restore)
+      // REFUND  — coins returned to the user (order cancellation)
+      // DEDUCTED — coins reversed by the system (reward clawed back, e.g. water reset)
+      enum: ['EARNED', 'SPENT', 'REFUND', 'DEDUCTED'],
       required: true,
     },
     amount: {
@@ -36,9 +40,11 @@ const coinTransactionSchema = new mongoose.Schema(
         'DAILY_STEP_GOAL',       // Daily step goal reached (manual claim)
         'DAILY_STEP_GOAL_AUTO',  // Auto-awarded on health sync
         'HYDRATION_GOAL',        // Daily water goal
+        'HYDRATION_GOAL_REVERTED', // Water reset — hydration reward clawed back
         'STREAK_BADGE',          // Streak milestone badge
         'ACHIEVEMENT',           // Advanced achievement claimed
         'CHALLENGE',             // Challenge completed
+        'CHALLENGE_REVERTED',    // Challenge progress reverted — reward clawed back
         'REFERRAL_BONUS',        // Referral bonus
         'SHOP_PURCHASE',         // Spent on shop
         'SHOP_REFUND',           // Refund from order cancellation

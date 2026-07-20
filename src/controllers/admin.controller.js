@@ -649,6 +649,67 @@ const getDashboardStats = async (req, res, next) => {
   }
 };
 
+// ─── GET /admin/users/:id/coins ──────────────────────────────────────────────
+// Full per-transaction coin ledger for a user (every earn/spend/refund/deduct).
+// Query: ?page=1&limit=25&type=EARNED&source=PASSIVE_STEPS
+const getUserCoinLedger = async (req, res, next) => {
+  try {
+    const mongoose = require('mongoose');
+    const userOid = new mongoose.Types.ObjectId(req.params.id);
+
+    const page  = Math.max(1, parseInt(req.query.page ?? '1', 10));
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit ?? '25', 10)));
+    const skip  = (page - 1) * limit;
+
+    const filter = { user: userOid };
+    if (req.query.type)   filter.type = req.query.type;
+    if (req.query.source) filter.source = req.query.source;
+
+    const [transactions, total, earnedAgg, spentAgg] = await Promise.all([
+      CoinTransaction.find(filter)
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      CoinTransaction.countDocuments(filter),
+      CoinTransaction.aggregate([
+        { $match: { user: userOid, type: 'EARNED' } },
+        { $group: { _id: null, total: { $sum: '$amount' } } },
+      ]),
+      CoinTransaction.aggregate([
+        { $match: { user: userOid, type: { $in: ['SPENT', 'DEDUCTED'] } } },
+        { $group: { _id: null, total: { $sum: '$amount' } } },
+      ]),
+    ]);
+
+    const totalPages = Math.ceil(total / limit) || 1;
+
+    const formatted = transactions.map((t) => ({
+      id: t._id.toString(),
+      type: t.type,
+      // Signed amount for easy display: credits positive, debits negative.
+      signedAmount: (t.type === 'SPENT' || t.type === 'DEDUCTED') ? -t.amount : t.amount,
+      amount: t.amount,
+      source: t.source,
+      description: t.description,
+      balanceAfter: t.balanceAfter,
+      metadata: t.metadata || {},
+      createdAt: t.createdAt,
+    }));
+
+    return success(res, 'User coin ledger fetched', {
+      transactions: formatted,
+      summary: {
+        totalEarned: parseFloat((earnedAgg[0]?.total || 0).toFixed(2)),
+        totalSpent: parseFloat((spentAgg[0]?.total || 0).toFixed(2)),
+      },
+      pagination: { page, limit, total, totalPages, hasMore: page < totalPages },
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
 module.exports = {
   getUsers,
   getUserById,
@@ -668,5 +729,6 @@ module.exports = {
   getUserGamification,
   getUserAchievements,
   getUserOrders,
+  getUserCoinLedger,
   getDashboardStats,
 };

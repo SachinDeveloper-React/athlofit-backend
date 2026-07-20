@@ -14,6 +14,7 @@ const { validateSteps } = require('../utils/stepValidation');
 const { getCachedAppConfig } = require('../utils/appConfigCache');
 const { checkTimezoneManipulation } = require('../utils/timezoneGuard');
 const { recordCheatFlag, isCoinBlocked } = require('../utils/cheatPenalty');
+const { computePassiveCoinDelta } = require('../utils/passiveCoins');
 
 // ─── Unverified user daily coin cap ──────────────────────────────────────────
 function getEffectiveDailyCap(user, configMax, unverifiedCap) {
@@ -488,17 +489,22 @@ const syncHealthData = async (req, res, next) => {
       const effectiveWatermark = (gam.lastCoinDate === actualToday) ? watermark : 0;
 
       if (currentSteps > effectiveWatermark) {
-          // Calculate coins for the delta only (new steps since last award)
           const newStepsSinceWatermark = currentSteps - effectiveWatermark;
-          const coinsForNewSteps = parseFloat((Math.floor(newStepsSinceWatermark / 100) * rate).toFixed(2));
 
-          if (coinsForNewSteps > 0) {
-            // Check against daily earn limit
-            const currentEarned = gam.coinsEarnedToday || 0;
-            const remainingAllowance = Math.max(0, dailyEarnLimit - currentEarned);
-            const actualAdded = parseFloat(Math.min(coinsForNewSteps, remainingAllowance).toFixed(2));
+          // Passive cap is STEP-DERIVED and independent of goal/hydration coins.
+          // Award = passiveCoinsFor(currentSteps) - passiveCoinsFor(watermark),
+          // each clamped to dailyEarnLimit. Using coinsEarnedToday here was a bug:
+          // it includes goal (+50) and hydration coins, so hitting the step goal
+          // instantly exceeded the small passive cap and blocked all step coins.
+          const { coins: actualAdded } = computePassiveCoinDelta({
+            currentSteps,
+            watermark: effectiveWatermark,
+            rate,
+            dailyEarnLimit,
+          });
 
-            if (actualAdded > 0) {
+          if (actualAdded > 0) {
+            {
               // FIX #1 (passive coins): Atomic update to prevent race condition
               const passiveResult = await Gamification.findOneAndUpdate(
                 {
