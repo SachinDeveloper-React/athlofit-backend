@@ -43,6 +43,7 @@ function buildGamDoc(overrides = {}) {
     coinsBalance: 0,
     coinsEarnedToday: 0,
     lastCoinDate: null,
+    stepGoalCoinDate: null,
     lastWaterCoinDate: null,
     streakDays: 0,
     badgeList: [],
@@ -113,7 +114,7 @@ describe('claimReward - steps_daily', () => {
       );
       expect(gam.coinsBalance).toBe(175);
       expect(gam.coinsEarnedToday).toBe(125);
-      expect(gam.lastCoinDate).toBe('2025-01-15');
+      expect(gam.stepGoalCoinDate).toBe('2025-01-15');
       expect(gam.save).toHaveBeenCalled();
     });
 
@@ -183,8 +184,8 @@ describe('claimReward - steps_daily', () => {
       const cfg = buildConfig();
       AppConfig.findOne = jest.fn().mockResolvedValue(cfg);
 
-      // User already claimed today (lastCoinDate === today)
-      const gam = buildGamDoc({ lastCoinDate: '2025-01-15', coinsEarnedToday: 50 });
+      // User already claimed today (stepGoalCoinDate === today)
+      const gam = buildGamDoc({ stepGoalCoinDate: '2025-01-15', coinsEarnedToday: 50 });
       Gamification.findOne = jest.fn().mockResolvedValue(gam);
 
       HealthActivity.findOne = jest.fn().mockResolvedValue({ steps: 12000, hydration: 0 });
@@ -210,7 +211,7 @@ describe('claimReward - steps_daily', () => {
       AppConfig.findOne = jest.fn().mockResolvedValue(cfg);
 
       // Previous claim was yesterday
-      const gam = buildGamDoc({ lastCoinDate: '2025-01-14', coinsEarnedToday: 0 });
+      const gam = buildGamDoc({ stepGoalCoinDate: '2025-01-14', coinsEarnedToday: 0 });
       Gamification.findOne = jest.fn().mockResolvedValue(gam);
 
       HealthActivity.findOne = jest.fn().mockResolvedValue({ steps: 10500, hydration: 0 });
@@ -228,7 +229,7 @@ describe('claimReward - steps_daily', () => {
           message: 'Claimed 50 coins!',
         })
       );
-      expect(gam.lastCoinDate).toBe('2025-01-15');
+      expect(gam.stepGoalCoinDate).toBe('2025-01-15');
     });
   });
 

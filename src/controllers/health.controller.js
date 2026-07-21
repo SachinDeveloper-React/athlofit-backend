@@ -264,17 +264,27 @@ const syncHealthData = async (req, res, next) => {
     // FIX #7: Batch independent DB operations with Promise.all.
     // The HealthActivity upsert, AppConfig read, and Gamification read are
     // all independent — run them in parallel to save ~2 DB round-trips.
-    const [, cfg, gam] = await Promise.all([
-      HealthActivity.findOneAndUpdate(
-        { user: req.user._id, date: today },
-        { $set: updateFields },
-        { upsert: true, new: true }
-      ),
-      getCachedAppConfig(),
-      Gamification.findOne({ user: req.user._id }).then(
-        doc => doc || Gamification.create({ user: req.user._id })
-      ),
-    ]);
+    // NOTE: `gam` MUST be `let` — the atomic coin-award blocks below reassign it
+    // (gam = atomicResult / passiveResult / resetDoc). Declaring it `const` throws
+    // "Assignment to constant variable" the moment any coins are awarded, which
+    // aborts the sync and is a primary cause of step coins not being credited.
+    let gam;
+    let cfg;
+    {
+      const [, cfgDoc, gamDoc] = await Promise.all([
+        HealthActivity.findOneAndUpdate(
+          { user: req.user._id, date: today },
+          { $set: updateFields },
+          { upsert: true, new: true }
+        ),
+        getCachedAppConfig(),
+        Gamification.findOne({ user: req.user._id }).then(
+          doc => doc || Gamification.create({ user: req.user._id })
+        ),
+      ]);
+      cfg = cfgDoc;
+      gam = gamDoc;
+    }
 
     // Update streak if goal was met (depends on Gamification doc, so runs after)
     if (totalGoalMet) {
@@ -304,10 +314,22 @@ const syncHealthData = async (req, res, next) => {
     // sync that DOES meet the goal, skipping the streak increment entirely.
     // This was the root cause of streaks staying at 0 despite completing goals.
 
-    // Reset daily coins counter ONLY when we're sure it's a new server-day.
-    // Use lastCoinDate (which is set to the server's actualToday) to avoid double-resets.
+    // Reset daily coins counter ONLY when we're sure it's a new coin-day.
+    // This MUST be atomic + persisted: the goal/passive awards below use
+    // findOneAndUpdate($inc coinsEarnedToday), which increments the DB value.
+    // A purely in-memory reset (gam.coinsEarnedToday = 0) would be clobbered by
+    // those $inc ops running against yesterday's stale value, causing the daily
+    // counter to accumulate across days and prematurely hit the cap — blocking
+    // step coins. We also reset the passive watermark for the new day here.
     if (isTodaySync && gam.lastCoinDate !== actualToday) {
-      gam.coinsEarnedToday = 0;
+      const resetDoc = await Gamification.findOneAndUpdate(
+        { user: req.user._id, lastCoinDate: { $ne: actualToday } },
+        { $set: { coinsEarnedToday: 0, lastCoinDate: actualToday, lastPassiveCoinSteps: 0 } },
+        { new: true }
+      );
+      // If we won the reset, use the fresh doc; otherwise another concurrent
+      // sync already reset it — re-read to get the current state.
+      gam = resetDoc || (await Gamification.findOne({ user: req.user._id })) || gam;
     }
 
     let goalCoinsAwarded = false;
@@ -533,6 +555,10 @@ const syncHealthData = async (req, res, next) => {
                   $set: {
                     lastCoinDate: actualToday,
                     lastPassiveCoinSteps: currentSteps,
+                    // Fold the time marker into the atomic $set so we don't need
+                    // a follow-up gam.save() (which could clobber the atomic
+                    // coinsBalance with a stale in-memory value).
+                    lastPassiveCoinTime: new Date(),
                   },
                   $inc: {
                     coinsBalance: actualAdded,
@@ -548,7 +574,6 @@ const syncHealthData = async (req, res, next) => {
                 // ── Always log transaction when coins are awarded ────────────────
                 // Previously throttled to 3-hour intervals, which caused gaps in
                 // the user's transaction history (steps were awarded but not logged).
-                const now = new Date();
 
                 logCoinTransaction({
                   userId: req.user._id,
@@ -559,10 +584,7 @@ const syncHealthData = async (req, res, next) => {
                   description: `Auto Step Coins — ${effectiveWatermark.toLocaleString()} → ${currentSteps.toLocaleString()} (+${newStepsSinceWatermark.toLocaleString()} steps)`,
                   metadata: { steps: currentSteps, previousSteps: effectiveWatermark, stepDelta: newStepsSinceWatermark, date: today, trigger: 'sync' },
                 });
-
-                // Update time marker (used by cron to skip duplicate logging)
-                gam.lastPassiveCoinTime = now;
-                await gam.save();
+                // lastPassiveCoinTime was already persisted atomically above.
               }
               // If passiveResult is null, another concurrent sync already moved the watermark — no-op.
             }
