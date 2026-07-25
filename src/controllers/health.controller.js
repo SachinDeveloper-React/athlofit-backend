@@ -181,7 +181,7 @@ const syncHealthData = async (req, res, next) => {
     }
 
     const stepValidation = validateSteps({
-      incomingSteps: incomingSteps,
+      incomingSteps: steps,
       existingSteps: existing?.steps || 0,
       bonusSteps: existing?.bonusSteps || 0,
       lastSyncAt: existing?.updatedAt || null,
