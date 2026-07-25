@@ -186,7 +186,9 @@ const getUserHealth = async (req, res, next) => {
         { $match: { user: userOid, type: 'EARNED', source: { $in: STEP_SOURCES } } },
         { $group: { _id: null, total: { $sum: '$amount' } } },
       ]),
-      // Coins earned per calendar day (grouped by metadata.date if present, else createdAt)
+      // Coins earned per calendar day (grouped by metadata.date if present,
+      // else the IST calendar day of createdAt — matches HealthActivity.date
+      // which is always an IST "YYYY-MM-DD" string).
       CoinTransaction.aggregate([
         { $match: { user: userOid, type: 'EARNED' } },
         {
@@ -194,7 +196,7 @@ const getUserHealth = async (req, res, next) => {
             _id: {
               $ifNull: [
                 '$metadata.date',
-                { $dateToString: { format: '%Y-%m-%d', date: '$createdAt' } },
+                { $dateToString: { format: '%Y-%m-%d', date: '$createdAt', timezone: 'Asia/Kolkata' } },
               ],
             },
             total: { $sum: '$amount' },
@@ -205,6 +207,10 @@ const getUserHealth = async (req, res, next) => {
         },
       ]),
     ]);
+
+    // Round to 2 decimals — passive step coins are fractional (e.g. 0.5/100
+    // steps). Math.round() would misreport 37.5 as 38.
+    const round2 = (n) => Math.round(((n || 0) + Number.EPSILON) * 100) / 100;
 
     const totals = agg[0] || {
       totalSteps: 0, totalDistance: 0, totalCalories: 0,
@@ -221,8 +227,8 @@ const getUserHealth = async (req, res, next) => {
     const days = activities.map((a) => {
       const obj = a.toJSON();
       const c = coinsByDate[a.date] || { total: 0, step: 0 };
-      obj.coinsEarned = Math.round(c.total);   // all coins earned that day
-      obj.stepCoins = Math.round(c.step);      // coins from steps that day
+      obj.coinsEarned = round2(c.total);   // all coins earned that day
+      obj.stepCoins = round2(c.step);      // coins from steps that day
       return obj;
     });
 
@@ -230,8 +236,8 @@ const getUserHealth = async (req, res, next) => {
       days,
       summary: {
         ...totals,
-        totalCoinsEarned: Math.round(earnedAgg[0]?.total || 0),
-        totalStepCoins: Math.round(stepCoinAgg[0]?.total || 0),
+        totalCoinsEarned: round2(earnedAgg[0]?.total || 0),
+        totalStepCoins: round2(stepCoinAgg[0]?.total || 0),
       },
     });
   } catch (err) {
@@ -649,6 +655,67 @@ const getDashboardStats = async (req, res, next) => {
   }
 };
 
+// ─── GET /admin/users/:id/coins ──────────────────────────────────────────────
+// Full per-transaction coin ledger for a user (every earn/spend/refund/deduct).
+// Query: ?page=1&limit=25&type=EARNED&source=PASSIVE_STEPS
+const getUserCoinLedger = async (req, res, next) => {
+  try {
+    const mongoose = require('mongoose');
+    const userOid = new mongoose.Types.ObjectId(req.params.id);
+
+    const page  = Math.max(1, parseInt(req.query.page ?? '1', 10));
+    const limit = Math.min(100, Math.max(1, parseInt(req.query.limit ?? '25', 10)));
+    const skip  = (page - 1) * limit;
+
+    const filter = { user: userOid };
+    if (req.query.type)   filter.type = req.query.type;
+    if (req.query.source) filter.source = req.query.source;
+
+    const [transactions, total, earnedAgg, spentAgg] = await Promise.all([
+      CoinTransaction.find(filter)
+        .sort({ createdAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      CoinTransaction.countDocuments(filter),
+      CoinTransaction.aggregate([
+        { $match: { user: userOid, type: 'EARNED' } },
+        { $group: { _id: null, total: { $sum: '$amount' } } },
+      ]),
+      CoinTransaction.aggregate([
+        { $match: { user: userOid, type: { $in: ['SPENT', 'DEDUCTED'] } } },
+        { $group: { _id: null, total: { $sum: '$amount' } } },
+      ]),
+    ]);
+
+    const totalPages = Math.ceil(total / limit) || 1;
+
+    const formatted = transactions.map((t) => ({
+      id: t._id.toString(),
+      type: t.type,
+      // Signed amount for easy display: credits positive, debits negative.
+      signedAmount: (t.type === 'SPENT' || t.type === 'DEDUCTED') ? -t.amount : t.amount,
+      amount: t.amount,
+      source: t.source,
+      description: t.description,
+      balanceAfter: t.balanceAfter,
+      metadata: t.metadata || {},
+      createdAt: t.createdAt,
+    }));
+
+    return success(res, 'User coin ledger fetched', {
+      transactions: formatted,
+      summary: {
+        totalEarned: parseFloat((earnedAgg[0]?.total || 0).toFixed(2)),
+        totalSpent: parseFloat((spentAgg[0]?.total || 0).toFixed(2)),
+      },
+      pagination: { page, limit, total, totalPages, hasMore: page < totalPages },
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
 module.exports = {
   getUsers,
   getUserById,
@@ -668,5 +735,6 @@ module.exports = {
   getUserGamification,
   getUserAchievements,
   getUserOrders,
+  getUserCoinLedger,
   getDashboardStats,
 };

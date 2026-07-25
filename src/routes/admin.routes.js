@@ -25,6 +25,7 @@ const {
   getUserGamification,
   getUserAchievements,
   getUserOrders,
+  getUserCoinLedger,
   getDashboardStats,
 } = require('../controllers/admin.controller');
 
@@ -95,6 +96,7 @@ router.post('/users/:id/sessions/revoke-all', revokeAllUserSessions);
 router.get('/users/:id/action-log', getUserActionLog);
 router.delete('/users/:id', deleteUser);
 router.get('/users/:id/health', getUserHealth);
+router.get('/users/:id/coins', getUserCoinLedger);
 router.get('/users/:id/gamification', getUserGamification);
 router.get('/users/:id/achievements', getUserAchievements);
 router.get('/users/:id/orders', getUserOrders);

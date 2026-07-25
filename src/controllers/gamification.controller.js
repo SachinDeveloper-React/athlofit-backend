@@ -157,14 +157,16 @@ const syncGamification = async (req, res, next) => {
 };
 
 // ─── POST /gamification/coins/earn ───────────────────────────────────────────
+// POST /gamification/coins/earn — award the DAILY STEP GOAL reward.
+//
+// SECURITY + CORRECTNESS: the coin amount is computed SERVER-SIDE from config
+// and the goal is verified against the user's stored steps. The client no
+// longer dictates how many coins to add (the old `coinsToAdd` body param is
+// ignored). Idempotency shares `stepGoalCoinDate` with the health-sync
+// auto-award so the goal can be rewarded at most ONCE per day, regardless of
+// whether the app hits this endpoint, claimReward, or relies on the auto-award.
 const earnCoins = async (req, res, next) => {
   try {
-    const { coinsToAdd, goalMet } = req.body;
-
-    if (!coinsToAdd || coinsToAdd <= 0) {
-      return error(res, 'coinsToAdd must be positive', 400);
-    }
-
     // ── Anti-cheat: block coin earning if user is penalized ──────────────────
     const coinBlockStatus = isCoinBlocked(req.user);
     if (coinBlockStatus.isBlocked) {
@@ -173,52 +175,79 @@ const earnCoins = async (req, res, next) => {
 
     const today = todayISO();
     const [gam, cfg] = await Promise.all([ensureGamDoc(req.user._id), getLiveConfig()]);
-    const MAX_DAILY_COINS = getEffectiveDailyCap(req.user, cfg.coin.maxDailyRewards, cfg.coin.unverifiedDailyCap);
 
-    // Reset daily coins if it's a new day
-    if (gam.lastCoinDate !== today) {
-      gam.coinsEarnedToday = 0;
+    // Feature toggle
+    const stepGoalEnabled = cfg.coin_config?.rewards?.daily_step_goal_reached?.enabled ?? true;
+    if (!stepGoalEnabled) {
+      return error(res, 'Daily step goal reward is currently disabled', 400);
     }
 
-    const remainingAllowance = MAX_DAILY_COINS - (gam.coinsEarnedToday || 0);
-    const actualCoins = Math.round(Math.min(coinsToAdd, remainingAllowance));
+    // Verify the goal is actually met using SERVER-side stored steps.
+    const todayActivity = await HealthActivity.findOne({ user: req.user._id, date: today });
+    const todaySteps = todayActivity?.steps ?? 0;
+    const dailyGoal = req.user.dailyStepGoal || 10000;
+    if (todaySteps < dailyGoal) {
+      return error(res, 'Reward threshold not yet reached', 400);
+    }
 
-    if (actualCoins > 0) {
-      gam.coinsBalance = Math.round(gam.coinsBalance + actualCoins);
-      gam.coinsEarnedToday = Math.round((gam.coinsEarnedToday || 0) + actualCoins);
-      gam.lastCoinDate = today;
-
-      if (!gam.claimHistory) gam.claimHistory = [];
-      gam.claimHistory.push({
-        rewardId: 'steps_daily_card',
-        amount: actualCoins,
-        source: 'Daily Step Reward',
-        createdAt: new Date(),
+    // Idempotency: shared with the health-sync auto award.
+    if (gam.stepGoalCoinDate === today) {
+      return success(res, 'Daily step goal already rewarded today', {
+        coinsBalance: gam.coinsBalance,
+        coinsEarnedToday: gam.coinsEarnedToday,
+        alreadyClaimed: true,
       });
-
-      if (gam.claimHistory.length > 50) {
-        gam.claimHistory.shift();
-      }
     }
 
-    await gam.save();
+    // Reward amount is SERVER-defined, not client-supplied.
+    const stepGoalCoins =
+      cfg.coin_config?.rewards?.daily_step_goal_reached?.coin_value ?? cfg.rewards.stepGoalCoins ?? 50;
 
-    // Log coin transaction
+    // Atomic award — only one caller can flip stepGoalCoinDate for today.
+    const MAX_DAILY_COINS = getEffectiveDailyCap(req.user, cfg.coin.maxDailyRewards, cfg.coin.unverifiedDailyCap);
+    const remainingAllowance = Math.max(0, MAX_DAILY_COINS - (gam.coinsEarnedToday || 0));
+    const actualCoins = Math.round(Math.min(stepGoalCoins, remainingAllowance));
+
+    const awarded = await Gamification.findOneAndUpdate(
+      { user: req.user._id, $or: [{ stepGoalCoinDate: { $ne: today } }, { stepGoalCoinDate: null }] },
+      {
+        $set: { stepGoalCoinDate: today },
+        $inc: { coinsBalance: actualCoins, coinsEarnedToday: actualCoins },
+        $push: {
+          claimHistory: {
+            $each: [{ rewardId: 'steps_daily_card', amount: actualCoins, source: 'Daily Step Reward', createdAt: new Date() }],
+            $slice: -50,
+          },
+        },
+      },
+      { new: true }
+    );
+
+    if (!awarded) {
+      // Lost the race — another request already rewarded the goal today.
+      const fresh = await Gamification.findOne({ user: req.user._id });
+      return success(res, 'Daily step goal already rewarded today', {
+        coinsBalance: fresh?.coinsBalance ?? gam.coinsBalance,
+        coinsEarnedToday: fresh?.coinsEarnedToday ?? gam.coinsEarnedToday,
+        alreadyClaimed: true,
+      });
+    }
+
     if (actualCoins > 0) {
       logCoinTransaction({
         userId: req.user._id,
         type: 'EARNED',
         amount: actualCoins,
-        balanceAfter: gam.coinsBalance,
+        balanceAfter: awarded.coinsBalance,
         source: 'DAILY_STEP_GOAL',
         description: `Daily Step Reward — ${actualCoins} coins`,
-        metadata: { rewardId: 'steps_daily_card', date: today },
+        metadata: { rewardId: 'steps_daily_card', date: today, steps: todaySteps },
       });
     }
 
     return success(res, `Earned ${actualCoins} coins`, {
-      coinsBalance: gam.coinsBalance,
-      coinsEarnedToday: gam.coinsEarnedToday,
+      coinsBalance: awarded.coinsBalance,
+      coinsEarnedToday: awarded.coinsEarnedToday,
     });
   } catch (err) {
     next(err);
@@ -287,10 +316,12 @@ const getCoinData = async (req, res, next) => {
     let total;
 
     if (coinTxnTotal > 0) {
-      // Use the new CoinTransaction collection
+      // Use the new CoinTransaction collection.
+      // Normalise types for the app UI: REFUND shows as a credit (EARNED),
+      // DEDUCTED shows as a debit (SPENT).
       transactions = coinTxns.map(t => ({
         id: t._id.toString(),
-        type: t.type === 'REFUND' ? 'EARNED' : t.type,
+        type: t.type === 'REFUND' ? 'EARNED' : (t.type === 'DEDUCTED' ? 'SPENT' : t.type),
         amount: t.amount,
         source: t.description,
         createdAt: t.createdAt.toISOString(),
@@ -362,7 +393,7 @@ const getCoinData = async (req, res, next) => {
         threshold: dailyGoal,
         reward: cfg.rewards.stepGoalCoins,
         currentValue: todaySteps,
-        isClaimed: todaySteps >= dailyGoal && gam.lastCoinDate === today,
+        isClaimed: todaySteps >= dailyGoal && gam.stepGoalCoinDate === today,
       },
       {
         id: 'hydration_daily',
@@ -450,8 +481,10 @@ const claimReward = async (req, res, next) => {
           if (!enabled) return false;
           return todaySteps >= dailyGoal;
         },
-        isAlreadyClaimed: () => gam.lastCoinDate === today,
-        onClaim: () => { gam.lastCoinDate = today; },
+        // Share the SAME idempotency key as the health-sync auto award and
+        // earnCoins so the daily step goal is rewarded at most once per day.
+        isAlreadyClaimed: () => gam.stepGoalCoinDate === today,
+        onClaim: () => { gam.stepGoalCoinDate = today; },
       },
       hydration_daily: {
         title: `Daily Water Goal (${cfg.rewards.hydrationGoalMl}ml)`,
@@ -826,7 +859,7 @@ const getCoinHistory = async (req, res, next) => {
 
     const formatted = transactions.map(t => ({
       id: t._id.toString(),
-      type: t.type === 'REFUND' ? 'EARNED' : t.type,
+      type: t.type === 'REFUND' ? 'EARNED' : (t.type === 'DEDUCTED' ? 'SPENT' : t.type),
       amount: t.amount,
       source: t.description,
       createdAt: t.createdAt.toISOString(),

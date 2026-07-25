@@ -12,9 +12,11 @@
 //   1. For each user with HealthActivity today, calculate current steps.
 //   2. Skip if health sync already handled this user recently (within 5 min).
 //   3. Compare against lastPassiveCoinSteps (steps at last payout).
-//   4. Compute coins = Math.floor(stepDelta / 100) * rate_per_100_steps.
-//   5. Cap at remaining daily allowance (dailyEarnLimit - coinsEarnedToday).
-//   6. Award coins, log transaction, update markers.
+//   4. Compute passive coins = min(dailyEarnLimit, floor(steps/100) * rate),
+//      awarding only the difference vs. what the watermark already earned.
+//      The passive cap is STEP-DERIVED — independent of goal/hydration coins.
+//   5. Also clamp to the overall daily cap (maxDailyRewards, all sources).
+//   6. Award coins atomically, log transaction, update markers.
 
 const cron = require('node-cron');
 const Gamification = require('../models/Gamification.model');
@@ -24,6 +26,7 @@ const User = require('../models/User.model');
 const { todayISO } = require('../utils/date');
 const { logCoinTransaction } = require('../utils/logCoinTransaction');
 const { isCoinBlocked } = require('../utils/cheatPenalty');
+const { computePassiveCoinDelta } = require('../utils/passiveCoins');
 
 // ─── Core distribution function ──────────────────────────────────────────────
 
@@ -36,7 +39,7 @@ async function distributePassiveCoins() {
   if (!cfg) cfg = await AppConfig.create({ key: 'global' });
 
   const rate = cfg.coin_config?.steps?.rate_per_100_steps ?? 0.5;
-  const dailyEarnLimit = cfg.coin?.dailyEarnLimit ?? 10;
+  const dailyEarnLimit = cfg.coin?.dailyEarnLimit ?? 200;
   const unverifiedDailyCap = cfg.coin?.unverifiedDailyCap ?? 50;
 
   // Find all users who have health activity today (meaning they synced steps)
@@ -59,6 +62,8 @@ async function distributePassiveCoins() {
   let processed = 0;
   let awarded = 0;
   let totalCoinsAwarded = 0;
+  const skipReasons = { blocked: 0, noNewSteps: 0, recentSync: 0, capReached: 0, raceLost: 0 };
+  const debug = process.env.CRON_DEBUG === 'true';
 
   for (const activity of activities) {
     const userId = activity.user;
@@ -75,7 +80,7 @@ async function distributePassiveCoins() {
 
       // ── Anti-cheat: skip if user is blocked from earning coins ─────────────
       const userDoc = userMap.get(userId.toString());
-      if (userDoc && isCoinBlocked(userDoc).isBlocked) continue;
+      if (userDoc && isCoinBlocked(userDoc).isBlocked) { skipReasons.blocked++; continue; }
 
       // Reset coinsEarnedToday if it's a new day (read-only check — the atomic
       // update below handles the actual state transition safely)
@@ -86,15 +91,17 @@ async function distributePassiveCoins() {
       const previousSteps = isNewDay ? 0 : (gam.lastPassiveCoinSteps || 0);
       const stepDelta = currentSteps - previousSteps;
 
+      if (debug) {
+        console.log(`[CRON:PassiveCoins] user=${userId} steps=${currentSteps} watermark=${previousSteps} delta=${stepDelta} earnedToday=${gam.coinsEarnedToday} lastCoinDate=${lastCoinDate} lastPassiveTime=${gam.lastPassiveCoinTime}`);
+      }
+
       // Skip if no new steps since last payout
-      if (stepDelta <= 0) continue;
+      if (stepDelta <= 0) { skipReasons.noNewSteps++; continue; }
 
       // Skip if a health sync recently processed and logged coins (within 5 min).
-      // Since the health sync now logs every transaction (no throttle), the cron
-      // only needs to act as a safety net for users whose app hasn't synced recently.
       if (gam.lastPassiveCoinTime) {
         const timeSinceLastAward = Date.now() - new Date(gam.lastPassiveCoinTime).getTime();
-        if (timeSinceLastAward < 5 * 60 * 1000) continue; // skip, sync just handled it
+        if (timeSinceLastAward < 5 * 60 * 1000) { skipReasons.recentSync++; continue; }
       }
 
       // Determine the user's effective passive daily cap
@@ -103,28 +110,22 @@ async function distributePassiveCoins() {
         ? dailyEarnLimit
         : Math.min(unverifiedDailyCap, dailyEarnLimit);
 
-      // Calculate coins using the same formula as health sync:
-      // Total passive coins earned today = min(dailyEarnLimit, floor(totalSteps/100) * rate)
-      // Only award the difference between what should be earned and what's already in coinsEarnedToday.
-      const totalPassiveCoinsForToday = parseFloat(
-        Math.min(effectiveCap, Math.max(0, Math.floor(currentSteps / 100) * rate)).toFixed(4)
-      );
+      // Step-derived passive coins — identical math to the health sync path
+      // (shared helper). Cap is independent of goal/hydration coins.
+      const { coins: actualCoins } = computePassiveCoinDelta({
+        currentSteps,
+        watermark: previousSteps,
+        rate,
+        dailyEarnLimit: effectiveCap,
+      });
 
+      // Also check we don't exceed the overall daily cap (all coin sources)
       const currentEarned = isNewDay ? 0 : (gam.coinsEarnedToday || 0);
-      // coinsEarnedToday may include goal/hydration coins, so use lastPassiveCoinSteps as base
-      const passiveAlreadyAwarded = parseFloat(
-        Math.min(effectiveCap, Math.max(0, Math.floor(previousSteps / 100) * rate)).toFixed(4)
-      );
-      const actualCoins = parseFloat(
-        Math.max(0, totalPassiveCoinsForToday - passiveAlreadyAwarded).toFixed(4)
-      );
-
-      // Also check we don't exceed the overall daily cap
       const overallCap = cfg.coin?.maxDailyRewards ?? 250;
       const overallRemaining = Math.max(0, overallCap - currentEarned);
       const finalCoins = parseFloat(Math.min(actualCoins, overallRemaining).toFixed(4));
 
-      if (finalCoins <= 0) continue;
+      if (finalCoins <= 0) { skipReasons.capReached++; continue; }
 
       // Award coins ATOMICALLY — prevents race with concurrent health syncs.
       // Only updates if lastPassiveCoinSteps hasn't moved past our baseline.
@@ -169,7 +170,7 @@ async function distributePassiveCoins() {
         { new: true }
       );
 
-      if (!atomicResult) continue; // another process already moved the watermark
+      if (!atomicResult) { skipReasons.raceLost++; continue; } // watermark moved by another process
 
       // Log transaction
       logCoinTransaction({
@@ -198,8 +199,11 @@ async function distributePassiveCoins() {
   console.log(
     `[CRON:PassiveCoins] Done — ${processed} users checked, ${awarded} awarded, ${totalCoinsAwarded.toFixed(4)} total coins distributed`
   );
+  console.log(
+    `[CRON:PassiveCoins] Skips — blocked:${skipReasons.blocked} noNewSteps:${skipReasons.noNewSteps} recentSync:${skipReasons.recentSync} capReached:${skipReasons.capReached} raceLost:${skipReasons.raceLost}`
+  );
 
-  return { processed, awarded, totalCoins: totalCoinsAwarded };
+  return { processed, awarded, totalCoins: totalCoinsAwarded, skipReasons };
 }
 
 // ─── Schedule the cron jobs ──────────────────────────────────────────────────

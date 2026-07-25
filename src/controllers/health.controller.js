@@ -14,6 +14,7 @@ const { validateSteps } = require('../utils/stepValidation');
 const { getCachedAppConfig } = require('../utils/appConfigCache');
 const { checkTimezoneManipulation } = require('../utils/timezoneGuard');
 const { recordCheatFlag, isCoinBlocked } = require('../utils/cheatPenalty');
+const { computePassiveCoinDelta } = require('../utils/passiveCoins');
 
 // ─── Unverified user daily coin cap ──────────────────────────────────────────
 function getEffectiveDailyCap(user, configMax, unverifiedCap) {
@@ -145,45 +146,34 @@ const syncHealthData = async (req, res, next) => {
     // previous known values. Flags or rejects suspicious submissions.
     const existing = await HealthActivity.findOne({ user: req.user._id, date: today });
 
-    // ── Guard: reject stale syncs for brand-new accounts on their first day ──
-    // If the account was just created today and this is the very first sync
-    // (no existing record), validate that steps are plausible for the time
-    // elapsed since account creation. This catches cases where the client
-    // pushes pre-login historical Health Connect data on the creation day.
-    let incomingSteps = steps;
-    if (!existing && accountCreatedDate === today && steps > 0) {
-      const accountCreatedMs = new Date(req.user.createdAt).getTime();
-      const msSinceCreation = Date.now() - accountCreatedMs;
-      const minutesSinceCreation = msSinceCreation / 60000;
-      // Allow ~180 steps/min (brisk walk) + 200 buffer for sensor batching
-      const maxPlausibleForNewAccount = Math.max(500, Math.ceil(minutesSinceCreation * 180) + 200);
+    // ── Guard: reject stale background syncs on a FRESH account only ─────────
+    // Purpose: stop historical Health Connect / HealthKit data from flooding a
+    // brand-new account (fresh install or DB wipe), where a background sync can
+    // arrive seconds after signup carrying a previous device session's steps.
+    //
+    // IMPORTANT: This must NOT run for established users. `!existing` is true on
+    // the FIRST sync of every new day for everyone, so without the account-age
+    // scope below this rejected legitimate morning steps daily (steps the user
+    // walked before opening the app), which in turn blocked their step coins.
+    //
+    // The rate check (steps ≈ 180/min since account creation) only makes sense
+    // right after signup; we cap the window to the account's first hour.
+    const NEW_ACCOUNT_GUARD_MINUTES = 60;
+    const accountAgeMinutes =
+      (Date.now() - new Date(req.user.createdAt).getTime()) / 60000;
+    const isFreshAccount = accountAgeMinutes <= NEW_ACCOUNT_GUARD_MINUTES;
 
-      if (steps > maxPlausibleForNewAccount) {
-        console.warn(
-          `[HealthSync] Clamping new-account first sync for user ${req.user._id}: ` +
-          `${steps} steps, only ${Math.round(minutesSinceCreation)}min since account creation ` +
-          `(max plausible: ${maxPlausibleForNewAccount})`
-        );
-        // Clamp instead of rejecting — the user may have some legitimate steps
-        incomingSteps = maxPlausibleForNewAccount;
-      }
-    }
-
-    // ── Guard: reject stale background syncs after DB reset / fresh login ────
-    // When no record exists for today and a background sync arrives with
-    // implausibly high steps, reject it as stale Health Connect data.
-    if (!existing && isBackgroundSync && steps > 0) {
-      const lastLoginAt = req.user.lastLoginAt || req.user.updatedAt || req.user.createdAt;
-      const msSinceLogin = Date.now() - new Date(lastLoginAt).getTime();
-      const minutesSinceLogin = msSinceLogin / 60000;
-      const maxPlausibleSteps = Math.max(500, Math.ceil(minutesSinceLogin * 180));
+    if (!existing && isBackgroundSync && steps > 0 && isFreshAccount) {
+      // Plausibility is measured from account creation (not login), since a
+      // fresh account genuinely started at 0 steps at signup time.
+      const maxPlausibleSteps = Math.max(2000, Math.ceil(accountAgeMinutes * 180));
 
       if (steps > maxPlausibleSteps) {
         console.warn(
-          `[HealthSync] Rejected stale background sync for user ${req.user._id}: ` +
-          `${steps} steps, only ${Math.round(minutesSinceLogin)}min since login (max plausible: ${maxPlausibleSteps})`
+          `[HealthSync] Rejected stale background sync for NEW user ${req.user._id}: ` +
+          `${steps} steps, account only ${Math.round(accountAgeMinutes)}min old (max plausible: ${maxPlausibleSteps})`
         );
-        return success(res, 'Skipped — stale background sync after fresh login', {
+        return success(res, 'Skipped — stale background sync on fresh account', {
           skipped: true,
           reason: 'stale_background_sync',
         });
@@ -274,17 +264,27 @@ const syncHealthData = async (req, res, next) => {
     // FIX #7: Batch independent DB operations with Promise.all.
     // The HealthActivity upsert, AppConfig read, and Gamification read are
     // all independent — run them in parallel to save ~2 DB round-trips.
-    const [, cfg, gam] = await Promise.all([
-      HealthActivity.findOneAndUpdate(
-        { user: req.user._id, date: today },
-        { $set: updateFields },
-        { upsert: true, new: true }
-      ),
-      getCachedAppConfig(),
-      Gamification.findOne({ user: req.user._id }).then(
-        doc => doc || Gamification.create({ user: req.user._id })
-      ),
-    ]);
+    // NOTE: `gam` MUST be `let` — the atomic coin-award blocks below reassign it
+    // (gam = atomicResult / passiveResult / resetDoc). Declaring it `const` throws
+    // "Assignment to constant variable" the moment any coins are awarded, which
+    // aborts the sync and is a primary cause of step coins not being credited.
+    let gam;
+    let cfg;
+    {
+      const [, cfgDoc, gamDoc] = await Promise.all([
+        HealthActivity.findOneAndUpdate(
+          { user: req.user._id, date: today },
+          { $set: updateFields },
+          { upsert: true, new: true }
+        ),
+        getCachedAppConfig(),
+        Gamification.findOne({ user: req.user._id }).then(
+          doc => doc || Gamification.create({ user: req.user._id })
+        ),
+      ]);
+      cfg = cfgDoc;
+      gam = gamDoc;
+    }
 
     // Update streak if goal was met (depends on Gamification doc, so runs after)
     if (totalGoalMet) {
@@ -314,10 +314,22 @@ const syncHealthData = async (req, res, next) => {
     // sync that DOES meet the goal, skipping the streak increment entirely.
     // This was the root cause of streaks staying at 0 despite completing goals.
 
-    // Reset daily coins counter ONLY when we're sure it's a new server-day.
-    // Use lastCoinDate (which is set to the server's actualToday) to avoid double-resets.
+    // Reset daily coins counter ONLY when we're sure it's a new coin-day.
+    // This MUST be atomic + persisted: the goal/passive awards below use
+    // findOneAndUpdate($inc coinsEarnedToday), which increments the DB value.
+    // A purely in-memory reset (gam.coinsEarnedToday = 0) would be clobbered by
+    // those $inc ops running against yesterday's stale value, causing the daily
+    // counter to accumulate across days and prematurely hit the cap — blocking
+    // step coins. We also reset the passive watermark for the new day here.
     if (isTodaySync && gam.lastCoinDate !== actualToday) {
-      gam.coinsEarnedToday = 0;
+      const resetDoc = await Gamification.findOneAndUpdate(
+        { user: req.user._id, lastCoinDate: { $ne: actualToday } },
+        { $set: { coinsEarnedToday: 0, lastCoinDate: actualToday, lastPassiveCoinSteps: 0 } },
+        { new: true }
+      );
+      // If we won the reset, use the fresh doc; otherwise another concurrent
+      // sync already reset it — re-read to get the current state.
+      gam = resetDoc || (await Gamification.findOne({ user: req.user._id })) || gam;
     }
 
     let goalCoinsAwarded = false;
@@ -492,50 +504,42 @@ const syncHealthData = async (req, res, next) => {
         });
       }
       // If atomicResult is null, another concurrent request already awarded coins — no-op.
-    } else if (!isGoalMet && !userCoinBlocked) {
-      // Passive step-based coins: Math.floor(steps / 100) * rate_per_100_steps
-      // FIX #4: Use a step watermark (lastPassiveCoinSteps) to prevent replay.
-      // Instead of computing from total steps (which re-awards everything if
-      // coinsEarnedToday resets), we only award coins for NEW steps above
-      // the last known watermark.
-      //
-      // The balance is updated atomically so concurrent syncs can't double-award.
-      //
-      // IMPORTANT: Only update coinsEarnedToday/lastCoinDate for TODAY's date.
-      const isTodaySyncPassive = isTodaySync;
+    }
 
-      if (isTodaySyncPassive) {
-        const dailyEarnLimit = getEffectiveDailyCap(req.user, cfg.coin.dailyEarnLimit, cfg.coin.unverifiedDailyCap);
-        const rate = cfg.coin_config?.steps?.rate_per_100_steps ?? 0.5;
+    // Passive step-based coins — awarded for ALL steps regardless of goal status.
+    // Uses a watermark (lastPassiveCoinSteps) to only award coins for NEW steps.
+    // The daily cap (dailyEarnLimit) prevents over-earning.
+    if (!userCoinBlocked && isTodaySync) {
+      const dailyEarnLimit = getEffectiveDailyCap(req.user, cfg.coin.dailyEarnLimit, cfg.coin.unverifiedDailyCap);
+      const rate = cfg.coin_config?.steps?.rate_per_100_steps ?? 0.5;
 
-        // FIX #4: Watermark-based calculation.
-        // lastPassiveCoinSteps = the step count at which coins were last calculated.
-        // Only award coins for steps ABOVE this watermark.
-        const watermark = gam.lastPassiveCoinSteps || 0;
-        const currentSteps = validatedSteps ?? 0;
+      // Watermark-based calculation.
+      // lastPassiveCoinSteps = the step count at which coins were last calculated.
+      // Only award coins for steps ABOVE this watermark.
+      const watermark = gam.lastPassiveCoinSteps || 0;
+      const currentSteps = validatedSteps ?? 0;
 
-        // If this is a new day (lastCoinDate changed), the watermark from yesterday
-        // is stale — reset it so we don't penalise the user.
-        const effectiveWatermark = (gam.lastCoinDate === actualToday) ? watermark : 0;
+      // If this is a new day (lastCoinDate changed), the watermark from yesterday
+      // is stale — reset it so we don't penalise the user.
+      const effectiveWatermark = (gam.lastCoinDate === actualToday) ? watermark : 0;
 
-        // Only proceed if current steps exceed the watermark
-        // MULTI-DEVICE GUARD: currentSteps comes from the HealthActivity record
-        // (which stores the max seen across all devices via merge()). The watermark
-        // only moves forward — if device B sends fewer steps than device A already
-        // synced, the merge keeps the higher value, and currentSteps >= watermark
-        // will be false, preventing double-earning.
-        if (currentSteps > effectiveWatermark) {
-          // Calculate coins for the delta only (new steps since last award)
+      if (currentSteps > effectiveWatermark) {
           const newStepsSinceWatermark = currentSteps - effectiveWatermark;
-          const coinsForNewSteps = parseFloat((Math.floor(newStepsSinceWatermark / 100) * rate).toFixed(2));
 
-          if (coinsForNewSteps > 0) {
-            // Check against daily earn limit
-            const currentEarned = gam.coinsEarnedToday || 0;
-            const remainingAllowance = Math.max(0, dailyEarnLimit - currentEarned);
-            const actualAdded = parseFloat(Math.min(coinsForNewSteps, remainingAllowance).toFixed(2));
+          // Passive cap is STEP-DERIVED and independent of goal/hydration coins.
+          // Award = passiveCoinsFor(currentSteps) - passiveCoinsFor(watermark),
+          // each clamped to dailyEarnLimit. Using coinsEarnedToday here was a bug:
+          // it includes goal (+50) and hydration coins, so hitting the step goal
+          // instantly exceeded the small passive cap and blocked all step coins.
+          const { coins: actualAdded } = computePassiveCoinDelta({
+            currentSteps,
+            watermark: effectiveWatermark,
+            rate,
+            dailyEarnLimit,
+          });
 
-            if (actualAdded > 0) {
+          if (actualAdded > 0) {
+            {
               // FIX #1 (passive coins): Atomic update to prevent race condition
               const passiveResult = await Gamification.findOneAndUpdate(
                 {
@@ -551,6 +555,10 @@ const syncHealthData = async (req, res, next) => {
                   $set: {
                     lastCoinDate: actualToday,
                     lastPassiveCoinSteps: currentSteps,
+                    // Fold the time marker into the atomic $set so we don't need
+                    // a follow-up gam.save() (which could clobber the atomic
+                    // coinsBalance with a stale in-memory value).
+                    lastPassiveCoinTime: new Date(),
                   },
                   $inc: {
                     coinsBalance: actualAdded,
@@ -566,7 +574,6 @@ const syncHealthData = async (req, res, next) => {
                 // ── Always log transaction when coins are awarded ────────────────
                 // Previously throttled to 3-hour intervals, which caused gaps in
                 // the user's transaction history (steps were awarded but not logged).
-                const now = new Date();
 
                 logCoinTransaction({
                   userId: req.user._id,
@@ -577,17 +584,13 @@ const syncHealthData = async (req, res, next) => {
                   description: `Auto Step Coins — ${effectiveWatermark.toLocaleString()} → ${currentSteps.toLocaleString()} (+${newStepsSinceWatermark.toLocaleString()} steps)`,
                   metadata: { steps: currentSteps, previousSteps: effectiveWatermark, stepDelta: newStepsSinceWatermark, date: today, trigger: 'sync' },
                 });
-
-                // Update time marker (used by cron to skip duplicate logging)
-                gam.lastPassiveCoinTime = now;
-                await gam.save();
+                // lastPassiveCoinTime was already persisted atomically above.
               }
               // If passiveResult is null, another concurrent sync already moved the watermark — no-op.
             }
           }
         }
       }
-    }
 
     // Ensure lastActiveDate is persisted if _updateStreak or other code modified it
     if (isTodaySync && gam.isModified('lastActiveDate')) {

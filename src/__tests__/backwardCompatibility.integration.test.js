@@ -538,10 +538,11 @@ describe('Property 5: Existing Source Preservation — hydration, streak, and re
     });
   });
 
-  describe('earnCoins (step-based) endpoint is unchanged structurally', () => {
+  describe('earnCoins (step-based) endpoint — server-verified daily step goal', () => {
     const { earnCoins } = require('../controllers/gamification.controller');
+    const HealthActivity = require('../models/HealthActivity.model');
 
-    it('earnCoins still applies daily cap from cfg.coin.maxDailyRewards, not coin_config', async () => {
+    it('applies daily cap from cfg.coin.maxDailyRewards and computes reward server-side (ignores client coinsToAdd)', async () => {
       const cfgDoc = buildDefaultConfigDoc({
         steps: { rate_per_100_steps: 0.5 },
         rewards: { daily_step_goal_reached: { enabled: true, coin_value: 9999 } },
@@ -551,17 +552,24 @@ describe('Property 5: Existing Source Preservation — hydration, streak, and re
         user: 'user123',
         coinsBalance: 50,
         coinsEarnedToday: 200, // already earned 200 of max 250
-        lastCoinDate: '2025-01-15', // matches mocked todayISO so it won't reset
+        stepGoalCoinDate: null, // not yet rewarded today
         claimHistory: [],
         save: jest.fn().mockResolvedValue(true),
       };
 
       AppConfig.findOne = jest.fn().mockResolvedValue(cfgDoc);
       Gamification.findOne = jest.fn().mockResolvedValue(mockGam);
+      // Server verifies the goal from stored steps (12000 >= 10000 goal).
+      HealthActivity.findOne = jest.fn().mockResolvedValue({ steps: 12000, hydration: 0 });
+      // Atomic award returns the updated doc (capped at 50 = 250 max − 200 earned).
+      Gamification.findOneAndUpdate = jest.fn().mockResolvedValue({
+        coinsBalance: 100,      // 50 + 50 capped
+        coinsEarnedToday: 250,  // 200 + 50 capped
+      });
 
       const req = {
-        user: { _id: 'user123', emailVerified: true },
-        body: { coinsToAdd: 100 }, // wants 100 but only 50 remaining
+        user: { _id: 'user123', emailVerified: true, dailyStepGoal: 10000 },
+        body: { coinsToAdd: 9999 }, // client value is ignored now
       };
       const res = mockRes();
       const next = jest.fn();
@@ -571,10 +579,40 @@ describe('Property 5: Existing Source Preservation — hydration, streak, and re
       expect(next).not.toHaveBeenCalled();
       expect(res.status).toHaveBeenCalledWith(200);
 
+      // The atomic $inc used the server-capped amount (50), not the client's 9999.
+      const updateArg = Gamification.findOneAndUpdate.mock.calls[0][1];
+      expect(updateArg.$inc.coinsEarnedToday).toBe(50);
+      expect(updateArg.$inc.coinsBalance).toBe(50);
+
       const data = res.json.mock.calls[0][0].data;
-      // Capped at 50 (250 max - 200 already earned)
       expect(data.coinsEarnedToday).toBe(250);
-      expect(data.coinsBalance).toBe(100); // 50 + 50 capped
+      expect(data.coinsBalance).toBe(100);
+    });
+
+    it('rejects when the step goal is not met (server-side check)', async () => {
+      const cfgDoc = buildDefaultConfigDoc({
+        steps: { rate_per_100_steps: 0.5 },
+        rewards: { daily_step_goal_reached: { enabled: true, coin_value: 50 } },
+      });
+
+      AppConfig.findOne = jest.fn().mockResolvedValue(cfgDoc);
+      Gamification.findOne = jest.fn().mockResolvedValue({
+        coinsBalance: 0, coinsEarnedToday: 0, stepGoalCoinDate: null, save: jest.fn(),
+      });
+      HealthActivity.findOne = jest.fn().mockResolvedValue({ steps: 3000 }); // below goal
+      Gamification.findOneAndUpdate = jest.fn();
+
+      const req = {
+        user: { _id: 'user123', emailVerified: true, dailyStepGoal: 10000 },
+        body: { coinsToAdd: 50 },
+      };
+      const res = mockRes();
+      const next = jest.fn();
+
+      await earnCoins(req, res, next);
+
+      expect(res.status).toHaveBeenCalledWith(400);
+      expect(Gamification.findOneAndUpdate).not.toHaveBeenCalled();
     });
   });
 });
