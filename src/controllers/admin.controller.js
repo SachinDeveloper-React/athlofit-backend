@@ -186,7 +186,9 @@ const getUserHealth = async (req, res, next) => {
         { $match: { user: userOid, type: 'EARNED', source: { $in: STEP_SOURCES } } },
         { $group: { _id: null, total: { $sum: '$amount' } } },
       ]),
-      // Coins earned per calendar day (grouped by metadata.date if present, else createdAt)
+      // Coins earned per calendar day (grouped by metadata.date if present,
+      // else the IST calendar day of createdAt — matches HealthActivity.date
+      // which is always an IST "YYYY-MM-DD" string).
       CoinTransaction.aggregate([
         { $match: { user: userOid, type: 'EARNED' } },
         {
@@ -194,7 +196,7 @@ const getUserHealth = async (req, res, next) => {
             _id: {
               $ifNull: [
                 '$metadata.date',
-                { $dateToString: { format: '%Y-%m-%d', date: '$createdAt' } },
+                { $dateToString: { format: '%Y-%m-%d', date: '$createdAt', timezone: 'Asia/Kolkata' } },
               ],
             },
             total: { $sum: '$amount' },
@@ -205,6 +207,10 @@ const getUserHealth = async (req, res, next) => {
         },
       ]),
     ]);
+
+    // Round to 2 decimals — passive step coins are fractional (e.g. 0.5/100
+    // steps). Math.round() would misreport 37.5 as 38.
+    const round2 = (n) => Math.round(((n || 0) + Number.EPSILON) * 100) / 100;
 
     const totals = agg[0] || {
       totalSteps: 0, totalDistance: 0, totalCalories: 0,
@@ -221,8 +227,8 @@ const getUserHealth = async (req, res, next) => {
     const days = activities.map((a) => {
       const obj = a.toJSON();
       const c = coinsByDate[a.date] || { total: 0, step: 0 };
-      obj.coinsEarned = Math.round(c.total);   // all coins earned that day
-      obj.stepCoins = Math.round(c.step);      // coins from steps that day
+      obj.coinsEarned = round2(c.total);   // all coins earned that day
+      obj.stepCoins = round2(c.step);      // coins from steps that day
       return obj;
     });
 
@@ -230,8 +236,8 @@ const getUserHealth = async (req, res, next) => {
       days,
       summary: {
         ...totals,
-        totalCoinsEarned: Math.round(earnedAgg[0]?.total || 0),
-        totalStepCoins: Math.round(stepCoinAgg[0]?.total || 0),
+        totalCoinsEarned: round2(earnedAgg[0]?.total || 0),
+        totalStepCoins: round2(stepCoinAgg[0]?.total || 0),
       },
     });
   } catch (err) {
