@@ -145,6 +145,30 @@ const syncHealthData = async (req, res, next) => {
     // previous known values. Flags or rejects suspicious submissions.
     const existing = await HealthActivity.findOne({ user: req.user._id, date: today });
 
+    // ── Guard: reject stale syncs for brand-new accounts on their first day ──
+    // If the account was just created today and this is the very first sync
+    // (no existing record), validate that steps are plausible for the time
+    // elapsed since account creation. This catches cases where the client
+    // pushes pre-login historical Health Connect data on the creation day.
+    let incomingSteps = steps;
+    if (!existing && accountCreatedDate === today && steps > 0) {
+      const accountCreatedMs = new Date(req.user.createdAt).getTime();
+      const msSinceCreation = Date.now() - accountCreatedMs;
+      const minutesSinceCreation = msSinceCreation / 60000;
+      // Allow ~180 steps/min (brisk walk) + 200 buffer for sensor batching
+      const maxPlausibleForNewAccount = Math.max(500, Math.ceil(minutesSinceCreation * 180) + 200);
+
+      if (steps > maxPlausibleForNewAccount) {
+        console.warn(
+          `[HealthSync] Clamping new-account first sync for user ${req.user._id}: ` +
+          `${steps} steps, only ${Math.round(minutesSinceCreation)}min since account creation ` +
+          `(max plausible: ${maxPlausibleForNewAccount})`
+        );
+        // Clamp instead of rejecting — the user may have some legitimate steps
+        incomingSteps = maxPlausibleForNewAccount;
+      }
+    }
+
     // ── Guard: reject stale background syncs after DB reset / fresh login ────
     // When no record exists for today and a background sync arrives with
     // implausibly high steps, reject it as stale Health Connect data.
@@ -167,7 +191,7 @@ const syncHealthData = async (req, res, next) => {
     }
 
     const stepValidation = validateSteps({
-      incomingSteps: steps,
+      incomingSteps: incomingSteps,
       existingSteps: existing?.steps || 0,
       bonusSteps: existing?.bonusSteps || 0,
       lastSyncAt: existing?.updatedAt || null,
