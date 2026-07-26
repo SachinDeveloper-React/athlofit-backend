@@ -6,6 +6,7 @@
 const cron = require('node-cron');
 const { detectUninstalledUsers } = require('./uninstallDetection.service');
 const { cleanupInactiveSessions } = require('./inactivityCleanup.service');
+const { sendInactivityNudges } = require('../crons/inactivityNudge');
 
 function startScheduler() {
   // ─── Uninstall Detection ────────────────────────────────────────────────────
@@ -32,9 +33,23 @@ function startScheduler() {
     }
   });
 
+  // ─── Inactivity Nudge ──────────────────────────────────────────────────────
+  // Runs daily at 8:00 PM IST — pushes notification to users who haven't
+  // synced in 24h+ to encourage them to open the app and claim coins.
+  cron.schedule('0 20 * * *', async () => {
+    console.log('[Scheduler] Running inactivity nudge job...');
+    try {
+      const result = await sendInactivityNudges();
+      console.log('[Scheduler] Inactivity nudge complete:', result);
+    } catch (err) {
+      console.error('[Scheduler] Inactivity nudge failed:', err.message);
+    }
+  }, { timezone: 'Asia/Kolkata' });
+
   console.log('[Scheduler] Cron jobs registered:');
   console.log('  • Uninstall detection — every 6 hours');
   console.log('  • Inactivity cleanup  — daily at 3:00 AM');
+  console.log('  • Inactivity nudge    — daily at 8:00 PM IST');
 }
 
 module.exports = { startScheduler };

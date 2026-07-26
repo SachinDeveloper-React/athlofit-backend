@@ -37,8 +37,10 @@ const coinTransactionSchema = new mongoose.Schema(
       required: true,
       enum: [
         'PASSIVE_STEPS',         // Earned from every 100 steps
+        'PASSIVE_STEPS_RETRO',   // Retroactive passive coins for past dates (offline user)
         'DAILY_STEP_GOAL',       // Daily step goal reached (manual claim)
         'DAILY_STEP_GOAL_AUTO',  // Auto-awarded on health sync
+        'DAILY_STEP_GOAL_RETRO', // Retroactive step goal for past dates (offline user)
         'HYDRATION_GOAL',        // Daily water goal
         'HYDRATION_GOAL_REVERTED', // Water reset — hydration reward clawed back
         'STREAK_BADGE',          // Streak milestone badge
@@ -68,6 +70,8 @@ const coinTransactionSchema = new mongoose.Schema(
       badgeKey: String,
       periodKey: String,
       date: String,
+      daysAgo: Number,
+      trigger: String,
     },
   },
   {

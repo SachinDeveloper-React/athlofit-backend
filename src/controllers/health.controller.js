@@ -597,6 +597,86 @@ const syncHealthData = async (req, res, next) => {
       await gam.save();
     }
 
+    // ── RETROACTIVE COIN AWARD — past-date syncs (max 3 days back) ───────────
+    // When a background sync pushes steps for a past date (e.g., user was offline),
+    // award passive coins + step goal coins for that date — but only if:
+    //   1. The date is within 3 days of today (anti-abuse limit)
+    //   2. User is not coin-blocked
+    //   3. Coins haven't already been awarded for that date (idempotency via CoinTransaction)
+    let retroCoinsAwarded = 0;
+    if (!isTodaySync && !userCoinBlocked && totalSteps > 0) {
+      const { daysBetween } = require('../utils/date');
+      const CoinTransaction = require('../models/CoinTransaction.model');
+      const daysAgo = daysBetween(today, actualToday); // positive = today is in the past
+
+      if (daysAgo != null && daysAgo > 0 && daysAgo <= 3) {
+        // Check if passive coins were already awarded for this past date
+        const existingRetroTxn = await CoinTransaction.findOne({
+          user: req.user._id,
+          source: { $in: ['PASSIVE_STEPS_RETRO', 'DAILY_STEP_GOAL_RETRO'] },
+          'metadata.date': today,
+        });
+
+        if (!existingRetroTxn) {
+          const rate = cfg.coin_config?.steps?.rate_per_100_steps ?? 0.5;
+          const dailyEarnLimit = getEffectiveDailyCap(req.user, cfg.coin.dailyEarnLimit, cfg.coin.unverifiedDailyCap);
+
+          // Award passive coins for the full step count of that past day
+          const { coins: retroPassive } = computePassiveCoinDelta({
+            currentSteps: totalSteps,
+            watermark: 0, // full day — start from zero
+            rate,
+            dailyEarnLimit,
+          });
+
+          // Award step goal coins if goal was met on that past day
+          const stepGoalCoins = cfg.rewards?.stepGoalCoins ?? 50;
+          const retroGoalCoins = totalGoalMet ? stepGoalCoins : 0;
+
+          const totalRetro = parseFloat((retroPassive + retroGoalCoins).toFixed(4));
+
+          if (totalRetro > 0) {
+            const retroResult = await Gamification.findOneAndUpdate(
+              { user: req.user._id },
+              { $inc: { coinsBalance: totalRetro } },
+              { new: true }
+            );
+
+            if (retroResult) {
+              gam = retroResult;
+              retroCoinsAwarded = totalRetro;
+
+              // Log passive retro transaction
+              if (retroPassive > 0) {
+                logCoinTransaction({
+                  userId: req.user._id,
+                  type: 'EARNED',
+                  amount: retroPassive,
+                  balanceAfter: gam.coinsBalance - retroGoalCoins,
+                  source: 'PASSIVE_STEPS_RETRO',
+                  description: `Retroactive Step Coins (${today}) — ${totalSteps.toLocaleString()} steps`,
+                  metadata: { steps: totalSteps, date: today, daysAgo, trigger: 'retro_sync' },
+                });
+              }
+
+              // Log goal retro transaction
+              if (retroGoalCoins > 0) {
+                logCoinTransaction({
+                  userId: req.user._id,
+                  type: 'EARNED',
+                  amount: retroGoalCoins,
+                  balanceAfter: gam.coinsBalance,
+                  source: 'DAILY_STEP_GOAL_RETRO',
+                  description: `Retroactive Step Goal (${today}) — ${dailyGoal.toLocaleString()} steps reached`,
+                  metadata: { steps: totalSteps, date: today, daysAgo, trigger: 'retro_sync' },
+                });
+              }
+            }
+          }
+        }
+      }
+    }
+
     // Await challenge sync so we can include newly completed challenges in the response
     const { newlyCompleted } = await syncChallengeProgress(req.user._id).catch(() => ({ newlyCompleted: [] }));
 
@@ -607,6 +687,7 @@ const syncHealthData = async (req, res, next) => {
       bonusSteps,       // bonus steps credited for today (so app can show total)
       totalSteps,       // walked + bonus combined
       newlyCompleted,   // array of { title, emoji, coinReward }
+      retroCoinsAwarded: retroCoinsAwarded > 0 ? retroCoinsAwarded : undefined,
       // FIX #2: Inform client if steps were flagged/clamped
       stepValidation: stepValidation.flagged ? {
         flagged: true,

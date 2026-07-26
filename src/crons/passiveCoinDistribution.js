@@ -206,6 +206,124 @@ async function distributePassiveCoins() {
   return { processed, awarded, totalCoins: totalCoinsAwarded, skipReasons };
 }
 
+// ─── EOD Step Goal Auto-Claim ────────────────────────────────────────────────
+// At end of day, check all users whose steps >= dailyStepGoal but didn't get
+// stepGoalCoinDate set for today. This catches edge cases where:
+//   - Steps were synced via background but goal coin wasn't claimed
+//   - Health sync race condition missed the auto-award
+//   - User had steps from native worker but never opened the app
+
+async function eodAutoClaimStepGoal() {
+  const today = todayISO();
+
+  // Load config
+  let cfg = await AppConfig.findOne({ key: 'global' });
+  if (!cfg) cfg = await AppConfig.create({ key: 'global' });
+
+  const stepGoalCoins = cfg.coin_config?.rewards?.daily_step_goal_reached?.coin_value
+    ?? cfg.rewards?.stepGoalCoins ?? 50;
+  const stepGoalEnabled = cfg.coin_config?.rewards?.daily_step_goal_reached?.enabled ?? true;
+
+  if (!stepGoalEnabled) {
+    console.log('[CRON:EOD-GoalClaim] Step goal reward is disabled. Skipping.');
+    return { claimed: 0, skipped: 0 };
+  }
+
+  // Find all users who met their goal today but haven't been awarded
+  // We need to join HealthActivity (has steps) with User (has dailyStepGoal)
+  // and Gamification (has stepGoalCoinDate)
+  const activities = await HealthActivity.find({ date: today, goalMet: true })
+    .select('user steps')
+    .lean();
+
+  if (activities.length === 0) {
+    console.log(`[CRON:EOD-GoalClaim] No goal-met activities for ${today}. Skipping.`);
+    return { claimed: 0, skipped: 0 };
+  }
+
+  const userIds = activities.map(a => a.user);
+
+  // Batch load users for coin-block check
+  const users = await User.find({ _id: { $in: userIds } })
+    .select('_id emailVerified coinBlockedUntil')
+    .lean();
+  const userMap = new Map(users.map(u => [u._id.toString(), u]));
+
+  let claimed = 0;
+  let skipped = 0;
+
+  for (const activity of activities) {
+    const userId = activity.user;
+
+    try {
+      // Skip if user is coin-blocked
+      const userDoc = userMap.get(userId.toString());
+      if (userDoc && isCoinBlocked(userDoc).isBlocked) {
+        skipped++;
+        continue;
+      }
+
+      // Atomically award step goal coins ONLY if not already awarded today
+      const atomicResult = await Gamification.findOneAndUpdate(
+        {
+          user: userId,
+          $or: [
+            { stepGoalCoinDate: { $ne: today } },
+            { stepGoalCoinDate: null },
+          ],
+        },
+        {
+          $set: { stepGoalCoinDate: today },
+          $inc: {
+            coinsBalance: stepGoalCoins,
+            coinsEarnedToday: stepGoalCoins,
+          },
+          $push: {
+            claimHistory: {
+              $each: [{
+                rewardId: 'steps_daily_eod',
+                amount: stepGoalCoins,
+                source: 'Daily Step Goal — EOD Auto Claim',
+                createdAt: new Date(),
+              }],
+              $slice: -50,
+            },
+          },
+        },
+        { new: true }
+      );
+
+      if (atomicResult) {
+        claimed++;
+
+        logCoinTransaction({
+          userId,
+          type: 'EARNED',
+          amount: stepGoalCoins,
+          balanceAfter: atomicResult.coinsBalance,
+          source: 'DAILY_STEP_GOAL_AUTO',
+          description: `Daily Step Goal — EOD auto-claim (${activity.steps.toLocaleString()} steps)`,
+          metadata: {
+            steps: activity.steps,
+            date: today,
+            trigger: 'eod_cron',
+          },
+        });
+      } else {
+        skipped++; // Already claimed today via sync or manual
+      }
+    } catch (err) {
+      console.error(`[CRON:EOD-GoalClaim] Error for user ${userId}:`, err.message);
+    }
+  }
+
+  console.log(
+    `[CRON:EOD-GoalClaim] Done — ${claimed} users auto-claimed, ${skipped} skipped (already claimed or blocked)`
+  );
+
+  return { date: today, claimed, skipped, totalChecked: activities.length };
+}
+
 // ─── Schedule the cron jobs ──────────────────────────────────────────────────
 
 function startPassiveCoinCron() {
@@ -218,14 +336,20 @@ function startPassiveCoinCron() {
   }, { timezone: 'Asia/Kolkata' });
 
   // EOD at 23:59:50 IST — final sweep to award any remaining step coins
+  // Also auto-claims step goal reward for users who met goal but didn't claim.
   cron.schedule('50 59 23 * * *', () => {
     console.log('[CRON:PassiveCoins] Running EOD final distribution...');
     distributePassiveCoins().catch(err =>
       console.error('[CRON:PassiveCoins] EOD job failed:', err.message)
     );
+
+    console.log('[CRON:EOD-GoalClaim] Running EOD step goal auto-claim...');
+    eodAutoClaimStepGoal().catch(err =>
+      console.error('[CRON:EOD-GoalClaim] EOD job failed:', err.message)
+    );
   }, { timezone: 'Asia/Kolkata' });
 
-  console.log('⏰ Passive coin cron scheduled (IST): every 3h (0,3,6,9,12,15,18,21) + EOD @23:59:50');
+  console.log('⏰ Passive coin cron scheduled (IST): every 3h (0,3,6,9,12,15,18,21) + EOD @23:59:50 (+ step goal auto-claim)');
 }
 
-module.exports = { startPassiveCoinCron, distributePassiveCoins };
+module.exports = { startPassiveCoinCron, distributePassiveCoins, eodAutoClaimStepGoal };
