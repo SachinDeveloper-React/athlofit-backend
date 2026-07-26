@@ -31,6 +31,8 @@ const updateProfile = async (req, res, next) => {
       "bloodType",
       "dailyStepGoal",
       "unitSystem",
+      "heightUnit",
+      "weightUnit",
     ];
 
     const updates = {};
@@ -74,7 +76,7 @@ const updateProfile = async (req, res, next) => {
 // ─── POST /user/complete-profile ──────────────────────────────────────────────
 const completeProfile = async (req, res, next) => {
   try {
-    const { phone, dob, gender, height, weight, bloodType, avatarUrl } =
+    const { phone, dob, gender, height, weight, bloodType, avatarUrl, heightUnit, weightUnit } =
       req.body;
 
     // BUG-014: month/day-aware age calculation
@@ -96,6 +98,8 @@ const completeProfile = async (req, res, next) => {
           bloodType,
           avatarUrl: avatarUrl ?? null,
           age,
+          heightUnit: heightUnit || "cm",
+          weightUnit: weightUnit || "kg",
           isProfileCompleted: true,
         },
       },

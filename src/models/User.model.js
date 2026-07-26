@@ -58,6 +58,16 @@ const userSchema = new mongoose.Schema(
       enum: ["metric", "imperial"],
       default: "metric",
     },
+    heightUnit: {
+      type: String,
+      enum: ["cm", "ft"],
+      default: "cm",
+    },
+    weightUnit: {
+      type: String,
+      enum: ["kg", "lbs"],
+      default: "kg",
+    },
 
     // Google OAuth
     googleId: { type: String, default: null, sparse: true },
