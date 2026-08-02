@@ -96,10 +96,12 @@ const appConfigSchema = new mongoose.Schema(
     },
 
     support: {
-      email:   { type: String, default: 'support@athlofit.com' },
-      website: { type: String, default: 'www.athlofit.com/faq' },
-      phone:   { type: String, default: '+91 98765 43210' },
-      address: { type: String, default: 'Bengaluru, Karnataka, India' },
+      email:    { type: String, default: 'support@athlofit.com' },
+      website:  { type: String, default: 'www.athlofit.com/faq' },
+      phone:    { type: String, default: '+91 98765 43210' },
+      address:  { type: String, default: 'Bengaluru, Karnataka, India' },
+      whatsapp: { type: String, default: '919876543210' },
+      whatsappMessage: { type: String, default: 'Hello, I need support with Athlofit app' },
     },
 
     // ── Dynamic app store / download links shown on the website ──────────────
