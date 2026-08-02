@@ -90,7 +90,7 @@ const userSchema = new mongoose.Schema(
     pendingStepGoal: { type: Number, default: null },
     pendingGoalEffectiveDate: { type: String, default: null }, // ISO "YYYY-MM-DD"
     // Tracks when the user last changed their step goal (ISO "YYYY-MM-DD").
-    // Used to enforce the 90-day cooldown between goal changes.
+    // Used for tracking/analytics purposes only (no cooldown enforcement).
     lastStepGoalChangeDate: { type: String, default: null },
 
     // Saved delivery addresses

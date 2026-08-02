@@ -130,24 +130,12 @@ const updateStepGoal = async (req, res, next) => {
       return error(res, "Step goal cannot exceed 100,000", 400);
     }
 
-    // ── 90-day cooldown check ─────────────────────────────────────────────────
-    // After changing the step goal, users must wait 90 days before changing again.
-    const todayStr = todayISO();
-    const lastChangeDate = req.user.lastStepGoalChangeDate;
-    if (lastChangeDate) {
-      const daysSinceLastChange = daysBetween(lastChangeDate, todayStr);
-      if (daysSinceLastChange !== null && daysSinceLastChange < 90) {
-        const daysRemaining = 90 - daysSinceLastChange;
-        return error(
-          res,
-          `You can change your step goal again after ${daysRemaining} day${daysRemaining === 1 ? '' : 's'}`,
-          429,
-        );
-      }
-    }
+    // Note: 90-day cooldown check removed - users can now change their step goal anytime
+    // The change will still take effect from tomorrow (not immediate) for data consistency
 
     // Calculate tomorrow's date using IST-aware todayISO() for consistency
     // with the sync endpoint that applies pending goals.
+    const todayStr = todayISO();
     const [y, m, d] = todayStr.split('-').map(Number);
     const tomorrow = new Date(y, m - 1, d + 1);
     const effectiveDate = `${tomorrow.getFullYear()}-${String(tomorrow.getMonth() + 1).padStart(2, '0')}-${String(tomorrow.getDate()).padStart(2, '0')}`;
