@@ -602,9 +602,12 @@ const syncHealthData = async (req, res, next) => {
 
       if (daysAgo != null && daysAgo > 0 && daysAgo <= 3) {
         // Check if passive coins were already awarded for this past date
+        // Include PASSIVE_STEPS and DAILY_STEP_GOAL_AUTO to prevent duplicate awards
+        // when a date receives normal coins first (late night sync) and then
+        // retroactive coins (after midnight)
         const existingRetroTxn = await CoinTransaction.findOne({
           user: req.user._id,
-          source: { $in: ['PASSIVE_STEPS_RETRO', 'DAILY_STEP_GOAL_RETRO'] },
+          source: { $in: ['PASSIVE_STEPS', 'PASSIVE_STEPS_RETRO', 'DAILY_STEP_GOAL_AUTO', 'DAILY_STEP_GOAL_RETRO'] },
           'metadata.date': today,
         });
 
