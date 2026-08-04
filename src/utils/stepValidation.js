@@ -46,13 +46,14 @@ function validateSteps({ incomingSteps, existingSteps, bonusSteps, lastSyncAt, d
   // Existing record may include bonus, so compute walked-only from existing.
   const existingWalked = Math.max(0, existingSteps - bonusSteps);
 
+  // SUSPICIOUS DETECTION DISABLED — flagging logic commented out
   let flagged = false;
   let reason = null;
 
   // ── Rule 1: Absolute daily cap ──────────────────────────────────────────────
   if (steps > MAX_DAILY_STEPS) {
-    flagged = true;
-    reason = `Exceeded absolute daily cap (${steps} > ${MAX_DAILY_STEPS})`;
+    // flagged = true;
+    // reason = `Exceeded absolute daily cap (${steps} > ${MAX_DAILY_STEPS})`;
     steps = MAX_DAILY_STEPS;
   }
 
@@ -81,8 +82,8 @@ function validateSteps({ incomingSteps, existingSteps, bonusSteps, lastSyncAt, d
 
       // Check burst rate (per-minute)
       if (stepsPerMinute > MAX_STEPS_PER_MINUTE && elapsedMinutes < 60) {
-        flagged = true;
-        reason = `Rate too high: ${Math.round(stepsPerMinute)} steps/min over ${Math.round(elapsedMinutes)} min`;
+        // flagged = true;
+        // reason = `Rate too high: ${Math.round(stepsPerMinute)} steps/min over ${Math.round(elapsedMinutes)} min`;
         // Clamp to max achievable in this time window
         const maxPossible = Math.round(elapsedMinutes * MAX_STEPS_PER_MINUTE);
         steps = existingWalked + maxPossible;
@@ -92,8 +93,8 @@ function validateSteps({ incomingSteps, existingSteps, bonusSteps, lastSyncAt, d
       if (elapsedHours >= 1) {
         const stepsPerHour = stepDelta / elapsedHours;
         if (stepsPerHour > MAX_STEPS_PER_HOUR) {
-          flagged = true;
-          reason = `Hourly rate too high: ${Math.round(stepsPerHour)} steps/hr over ${elapsedHours.toFixed(1)} hrs`;
+          // flagged = true;
+          // reason = `Hourly rate too high: ${Math.round(stepsPerHour)} steps/hr over ${elapsedHours.toFixed(1)} hrs`;
           const maxPossible = Math.round(elapsedHours * MAX_STEPS_PER_HOUR);
           steps = existingWalked + maxPossible;
         }
@@ -102,8 +103,8 @@ function validateSteps({ incomingSteps, existingSteps, bonusSteps, lastSyncAt, d
 
     // ── Rule 4: Rapid single-sync jump ──────────────────────────────────────
     if (elapsedMs < RAPID_JUMP_WINDOW_MS && stepDelta > RAPID_JUMP_THRESHOLD) {
-      flagged = true;
-      reason = `Rapid jump: +${stepDelta} steps in ${Math.round(elapsedMs / 1000)}s`;
+      // flagged = true;
+      // reason = `Rapid jump: +${stepDelta} steps in ${Math.round(elapsedMs / 1000)}s`;
       steps = existingWalked + RAPID_JUMP_THRESHOLD;
     }
   }

@@ -78,9 +78,10 @@ async function distributePassiveCoins() {
 
       processed++;
 
-      // ── Anti-cheat: skip if user is blocked from earning coins ─────────────
+      // ── Anti-cheat: skip if user is blocked from earning coins — SUSPICIOUS FUNCTIONALITY DISABLED
+      // const userDoc = userMap.get(userId.toString());
+      // if (userDoc && isCoinBlocked(userDoc).isBlocked) { skipReasons.blocked++; continue; }
       const userDoc = userMap.get(userId.toString());
-      if (userDoc && isCoinBlocked(userDoc).isBlocked) { skipReasons.blocked++; continue; }
 
       // Reset coinsEarnedToday if it's a new day (read-only check — the atomic
       // update below handles the actual state transition safely)
@@ -256,12 +257,12 @@ async function eodAutoClaimStepGoal() {
     const userId = activity.user;
 
     try {
-      // Skip if user is coin-blocked
-      const userDoc = userMap.get(userId.toString());
-      if (userDoc && isCoinBlocked(userDoc).isBlocked) {
-        skipped++;
-        continue;
-      }
+      // Skip if user is coin-blocked — SUSPICIOUS FUNCTIONALITY DISABLED
+      // const userDoc = userMap.get(userId.toString());
+      // if (userDoc && isCoinBlocked(userDoc).isBlocked) {
+      //   skipped++;
+      //   continue;
+      // }
 
       // Atomically award step goal coins ONLY if not already awarded today
       const atomicResult = await Gamification.findOneAndUpdate(

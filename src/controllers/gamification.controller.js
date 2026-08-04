@@ -54,8 +54,8 @@ const getGamification = async (req, res, next) => {
   try {
     const gam = await ensureGamDoc(req.user._id);
 
-    // ── Anti-cheat: include coin block status ──────────────────────────────────
-    const coinBlockStatus = isCoinBlocked(req.user);
+    // ── Anti-cheat: include coin block status — SUSPICIOUS FUNCTIONALITY DISABLED
+    // const coinBlockStatus = isCoinBlocked(req.user);
 
     return success(res, 'Gamification data fetched', {
       coinsBalance: gam.coinsBalance,
@@ -64,13 +64,14 @@ const getGamification = async (req, res, next) => {
       lastActiveDate: gam.lastActiveDate,
       coinsEarnedToday: gam.coinsEarnedToday,
       lastCoinDate: gam.lastCoinDate,
-      // Coin block penalty info (null if not blocked)
-      coinBlocked: coinBlockStatus.isBlocked ? {
-        blocked: true,
-        blockedUntil: coinBlockStatus.blockedUntil,
-        daysRemaining: coinBlockStatus.daysRemaining,
-        message: `Your coin earnings are blocked until ${coinBlockStatus.blockedUntil.toISOString().slice(0, 10)} due to suspicious step activity.`,
-      } : null,
+      // Coin block penalty info — SUSPICIOUS FUNCTIONALITY DISABLED
+      // coinBlocked: coinBlockStatus.isBlocked ? {
+      //   blocked: true,
+      //   blockedUntil: coinBlockStatus.blockedUntil,
+      //   daysRemaining: coinBlockStatus.daysRemaining,
+      //   message: `Your coin earnings are blocked until ${coinBlockStatus.blockedUntil.toISOString().slice(0, 10)} due to suspicious step activity.`,
+      // } : null,
+      coinBlocked: null,
     });
   } catch (err) {
     next(err);
@@ -167,11 +168,11 @@ const syncGamification = async (req, res, next) => {
 // whether the app hits this endpoint, claimReward, or relies on the auto-award.
 const earnCoins = async (req, res, next) => {
   try {
-    // ── Anti-cheat: block coin earning if user is penalized ──────────────────
-    const coinBlockStatus = isCoinBlocked(req.user);
-    if (coinBlockStatus.isBlocked) {
-      return error(res, `Coin earnings are blocked until ${coinBlockStatus.blockedUntil.toISOString().slice(0, 10)} due to suspicious step activity. ${coinBlockStatus.daysRemaining} days remaining.`, 403);
-    }
+    // ── Anti-cheat: block coin earning if user is penalized — SUSPICIOUS FUNCTIONALITY DISABLED
+    // const coinBlockStatus = isCoinBlocked(req.user);
+    // if (coinBlockStatus.isBlocked) {
+    //   return error(res, `Coin earnings are blocked until ${coinBlockStatus.blockedUntil.toISOString().slice(0, 10)} due to suspicious step activity. ${coinBlockStatus.daysRemaining} days remaining.`, 403);
+    // }
 
     const today = todayISO();
     const [gam, cfg] = await Promise.all([ensureGamDoc(req.user._id), getLiveConfig()]);
@@ -408,8 +409,8 @@ const getCoinData = async (req, res, next) => {
 
     await gam.save();
 
-    // ── Anti-cheat: include coin block status ──────────────────────────────────
-    const coinBlockStatus = isCoinBlocked(req.user);
+    // ── Anti-cheat: include coin block status — SUSPICIOUS FUNCTIONALITY DISABLED
+    // const coinBlockStatus = isCoinBlocked(req.user);
 
     return success(res, 'Coin data fetched', {
       balance: gam.coinsBalance,
@@ -422,13 +423,14 @@ const getCoinData = async (req, res, next) => {
         totalPages,
         hasMore: page < totalPages,
       },
-      // Coin block penalty info (null if not blocked)
-      coinBlocked: coinBlockStatus.isBlocked ? {
-        blocked: true,
-        blockedUntil: coinBlockStatus.blockedUntil,
-        daysRemaining: coinBlockStatus.daysRemaining,
-        message: `Your coin earnings are blocked until ${coinBlockStatus.blockedUntil.toISOString().slice(0, 10)} due to suspicious step activity.`,
-      } : null,
+      // Coin block penalty info — SUSPICIOUS FUNCTIONALITY DISABLED
+      // coinBlocked: coinBlockStatus.isBlocked ? {
+      //   blocked: true,
+      //   blockedUntil: coinBlockStatus.blockedUntil,
+      //   daysRemaining: coinBlockStatus.daysRemaining,
+      //   message: `Your coin earnings are blocked until ${coinBlockStatus.blockedUntil.toISOString().slice(0, 10)} due to suspicious step activity.`,
+      // } : null,
+      coinBlocked: null,
     });
   } catch (err) {
     next(err);
@@ -444,11 +446,11 @@ const claimReward = async (req, res, next) => {
 
     if (!rewardId) return error(res, 'rewardId is required', 400);
 
-    // ── Anti-cheat: block coin claiming if user is penalized ─────────────────
-    const coinBlockStatus = isCoinBlocked(req.user);
-    if (coinBlockStatus.isBlocked) {
-      return error(res, `Coin claims are blocked until ${coinBlockStatus.blockedUntil.toISOString().slice(0, 10)} due to suspicious step activity. ${coinBlockStatus.daysRemaining} days remaining.`, 403);
-    }
+    // ── Anti-cheat: block coin claiming if user is penalized — SUSPICIOUS FUNCTIONALITY DISABLED
+    // const coinBlockStatus = isCoinBlocked(req.user);
+    // if (coinBlockStatus.isBlocked) {
+    //   return error(res, `Coin claims are blocked until ${coinBlockStatus.blockedUntil.toISOString().slice(0, 10)} due to suspicious step activity. ${coinBlockStatus.daysRemaining} days remaining.`, 403);
+    // }
 
     const [gam, badgeDefs, cfg] = await Promise.all([
       ensureGamDoc(userId),
@@ -667,11 +669,11 @@ const claimAdvancedAchievement = async (req, res, next) => {
 
     if (!achievementId) return error(res, 'achievementId is required', 400);
 
-    // ── Anti-cheat: block achievement claiming if user is penalized ──────────
-    const coinBlockStatus = isCoinBlocked(req.user);
-    if (coinBlockStatus.isBlocked) {
-      return error(res, `Coin claims are blocked until ${coinBlockStatus.blockedUntil.toISOString().slice(0, 10)} due to suspicious step activity. ${coinBlockStatus.daysRemaining} days remaining.`, 403);
-    }
+    // ── Anti-cheat: block achievement claiming if user is penalized — SUSPICIOUS FUNCTIONALITY DISABLED
+    // const coinBlockStatus = isCoinBlocked(req.user);
+    // if (coinBlockStatus.isBlocked) {
+    //   return error(res, `Coin claims are blocked until ${coinBlockStatus.blockedUntil.toISOString().slice(0, 10)} due to suspicious step activity. ${coinBlockStatus.daysRemaining} days remaining.`, 403);
+    // }
 
     const achievement = await Achievement.findById(achievementId);
     if (!achievement) return error(res, 'Achievement not found', 404);

@@ -147,38 +147,25 @@ const syncHealthData = async (req, res, next) => {
     const existing = await HealthActivity.findOne({ user: req.user._id, date: today });
 
     // ── Guard: reject stale background syncs on a FRESH account only ─────────
-    // Purpose: stop historical Health Connect / HealthKit data from flooding a
-    // brand-new account (fresh install or DB wipe), where a background sync can
-    // arrive seconds after signup carrying a previous device session's steps.
-    //
-    // IMPORTANT: This must NOT run for established users. `!existing` is true on
-    // the FIRST sync of every new day for everyone, so without the account-age
-    // scope below this rejected legitimate morning steps daily (steps the user
-    // walked before opening the app), which in turn blocked their step coins.
-    //
-    // The rate check (steps ≈ 180/min since account creation) only makes sense
-    // right after signup; we cap the window to the account's first hour.
-    const NEW_ACCOUNT_GUARD_MINUTES = 60;
-    const accountAgeMinutes =
-      (Date.now() - new Date(req.user.createdAt).getTime()) / 60000;
-    const isFreshAccount = accountAgeMinutes <= NEW_ACCOUNT_GUARD_MINUTES;
+    // SUSPICIOUS FUNCTIONALITY DISABLED — fresh-account stale-sync guard commented out.
+    // const NEW_ACCOUNT_GUARD_MINUTES = 60;
+    // const accountAgeMinutes =
+    //   (Date.now() - new Date(req.user.createdAt).getTime()) / 60000;
+    // const isFreshAccount = accountAgeMinutes <= NEW_ACCOUNT_GUARD_MINUTES;
 
-    if (!existing && isBackgroundSync && steps > 0 && isFreshAccount) {
-      // Plausibility is measured from account creation (not login), since a
-      // fresh account genuinely started at 0 steps at signup time.
-      const maxPlausibleSteps = Math.max(2000, Math.ceil(accountAgeMinutes * 180));
-
-      if (steps > maxPlausibleSteps) {
-        console.warn(
-          `[HealthSync] Rejected stale background sync for NEW user ${req.user._id}: ` +
-          `${steps} steps, account only ${Math.round(accountAgeMinutes)}min old (max plausible: ${maxPlausibleSteps})`
-        );
-        return success(res, 'Skipped — stale background sync on fresh account', {
-          skipped: true,
-          reason: 'stale_background_sync',
-        });
-      }
-    }
+    // if (!existing && isBackgroundSync && steps > 0 && isFreshAccount) {
+    //   const maxPlausibleSteps = Math.max(2000, Math.ceil(accountAgeMinutes * 180));
+    //   if (steps > maxPlausibleSteps) {
+    //     console.warn(
+    //       `[HealthSync] Rejected stale background sync for NEW user ${req.user._id}: ` +
+    //       `${steps} steps, account only ${Math.round(accountAgeMinutes)}min old (max plausible: ${maxPlausibleSteps})`
+    //     );
+    //     return success(res, 'Skipped — stale background sync on fresh account', {
+    //       skipped: true,
+    //       reason: 'stale_background_sync',
+    //     });
+    //   }
+    // }
 
     const stepValidation = validateSteps({
       incomingSteps: steps,
@@ -192,18 +179,19 @@ const syncHealthData = async (req, res, next) => {
     const validatedSteps = stepValidation.clampedSteps;
 
     // ── Anti-cheat: record flag if step submission was suspicious ─────────────
-    // Only flags device-originated step cheats (not bonus/admin steps).
+    // SUSPICIOUS FUNCTIONALITY DISABLED — cheat flag recording commented out.
+    // let cheatPenaltyResult = null;
+    // if (stepValidation.flagged) {
+    //   cheatPenaltyResult = await recordCheatFlag({
+    //     userId: req.user._id,
+    //     reason: stepValidation.reason,
+    //     incomingSteps: steps,
+    //     clampedSteps: validatedSteps,
+    //     existingSteps: existing?.steps || 0,
+    //     date: today,
+    //   });
+    // }
     let cheatPenaltyResult = null;
-    if (stepValidation.flagged) {
-      cheatPenaltyResult = await recordCheatFlag({
-        userId: req.user._id,
-        reason: stepValidation.reason,
-        incomingSteps: steps,
-        clampedSteps: validatedSteps,
-        existingSteps: existing?.steps || 0,
-        date: today,
-      });
-    }
 
     const isGoalMet = goalMet ?? (validatedSteps >= dailyGoal);
 
@@ -336,8 +324,11 @@ const syncHealthData = async (req, res, next) => {
     let awardedGoalCoins = 0;
 
     // ── Anti-cheat: check if user is blocked from earning coins ──────────────
-    const coinBlockStatus = isCoinBlocked(req.user);
-    const userCoinBlocked = coinBlockStatus.isBlocked;
+    // SUSPICIOUS FUNCTIONALITY DISABLED — coin block check commented out.
+    // const coinBlockStatus = isCoinBlocked(req.user);
+    // const userCoinBlocked = coinBlockStatus.isBlocked;
+    const coinBlockStatus = { isBlocked: false, blockedUntil: null, daysRemaining: 0 };
+    const userCoinBlocked = false;
 
     // ── Revert hydration reward if water was reset below goal ─────────────────
     // When the user explicitly resets hydration (sends 0), and they had already
@@ -695,18 +686,18 @@ const syncHealthData = async (req, res, next) => {
         originalSteps: steps,
         acceptedSteps: validatedSteps,
       } : undefined,
-      // Anti-cheat: inform client if coins are blocked
-      coinBlocked: userCoinBlocked ? {
-        blocked: true,
-        blockedUntil: coinBlockStatus.blockedUntil,
-        daysRemaining: coinBlockStatus.daysRemaining,
-      } : undefined,
-      // Anti-cheat: inform client about today's cheat flag (for popup)
-      cheatWarning: cheatPenaltyResult ? {
-        flagCount: cheatPenaltyResult.flagCount,
-        blocked: cheatPenaltyResult.blocked,
-        blockedUntil: cheatPenaltyResult.coinBlockedUntil,
-      } : undefined,
+      // Anti-cheat: inform client if coins are blocked — SUSPICIOUS FUNCTIONALITY DISABLED
+      // coinBlocked: userCoinBlocked ? {
+      //   blocked: true,
+      //   blockedUntil: coinBlockStatus.blockedUntil,
+      //   daysRemaining: coinBlockStatus.daysRemaining,
+      // } : undefined,
+      // Anti-cheat: inform client about today's cheat flag (for popup) — SUSPICIOUS FUNCTIONALITY DISABLED
+      // cheatWarning: cheatPenaltyResult ? {
+      //   flagCount: cheatPenaltyResult.flagCount,
+      //   blocked: cheatPenaltyResult.blocked,
+      //   blockedUntil: cheatPenaltyResult.coinBlockedUntil,
+      // } : undefined,
     });
   } catch (err) {
     next(err);
