@@ -588,10 +588,10 @@ const syncHealthData = async (req, res, next) => {
       await gam.save();
     }
 
-    // ── RETROACTIVE COIN AWARD — past-date syncs (max 3 days back) ───────────
+    // ── RETROACTIVE COIN AWARD — past-date syncs (max 7 days back) ───────────
     // When a background sync pushes steps for a past date (e.g., user was offline),
     // award passive coins + step goal coins for that date — but only if:
-    //   1. The date is within 3 days of today (anti-abuse limit)
+    //   1. The date is within 7 days of today (allows offline users to claim rewards)
     //   2. User is not coin-blocked
     //   3. Coins haven't already been awarded for that date (idempotency via CoinTransaction)
     let retroCoinsAwarded = 0;
@@ -600,7 +600,7 @@ const syncHealthData = async (req, res, next) => {
       const CoinTransaction = require('../models/CoinTransaction.model');
       const daysAgo = daysBetween(today, actualToday); // positive = today is in the past
 
-      if (daysAgo != null && daysAgo > 0 && daysAgo <= 3) {
+      if (daysAgo != null && daysAgo > 0 && daysAgo <= 7) {
         // Check if passive coins were already awarded for this past date
         // Include PASSIVE_STEPS and DAILY_STEP_GOAL_AUTO to prevent duplicate awards
         // when a date receives normal coins first (late night sync) and then
