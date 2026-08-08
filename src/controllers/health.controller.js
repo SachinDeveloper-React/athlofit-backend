@@ -616,9 +616,11 @@ const syncHealthData = async (req, res, next) => {
           const dailyEarnLimit = getEffectiveDailyCap(req.user, cfg.coin.dailyEarnLimit, cfg.coin.unverifiedDailyCap);
 
           // Award passive coins for the full step count of that past day
+          // BUG FIX: Use existing stepCoinWatermark to avoid awarding duplicate coins
+          // when retroactive sync happens after partial coins were already awarded
           const { coins: retroPassive } = computePassiveCoinDelta({
             currentSteps: totalSteps,
-            watermark: 0, // full day — start from zero
+            watermark: existing?.stepCoinWatermark ?? 0, // start from last awarded watermark
             rate,
             dailyEarnLimit,
           });
