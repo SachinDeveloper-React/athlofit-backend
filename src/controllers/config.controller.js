@@ -94,7 +94,7 @@ const getAppConfig = async (req, res, next) => {
         website: cfg.support.website,
         phone: cfg.support?.phone ?? '',
         address: cfg.support?.address ?? '',
-        whatsapp: cfg.support?.whatsapp ?? '919876543210',
+        whatsapp: cfg.support?.whatsapp ?? '919310777797',
         whatsappMessage: cfg.support?.whatsappMessage ?? 'Hello, I need support with Athlofit app',
       },
       appLinks: {

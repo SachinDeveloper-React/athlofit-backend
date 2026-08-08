@@ -100,7 +100,7 @@ const appConfigSchema = new mongoose.Schema(
       website:  { type: String, default: 'www.athlofit.com/faq' },
       phone:    { type: String, default: '+91 98765 43210' },
       address:  { type: String, default: 'Bengaluru, Karnataka, India' },
-      whatsapp: { type: String, default: '919876543210' },
+      whatsapp: { type: String, default: '919310777797' },
       whatsappMessage: { type: String, default: 'Hello, I need support with Athlofit app' },
     },
 
