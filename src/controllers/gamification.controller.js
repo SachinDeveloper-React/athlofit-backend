@@ -559,10 +559,25 @@ const claimReward = async (req, res, next) => {
     });
 
     // ── Persist + push: reward claimed ───────────────────────────────────
+    // Customize message based on reward type
+    let notificationTitle = '🪙 Reward Claimed!';
+    let notificationMessage = `You claimed ${actualCoins} coins for "${rewardDef.title}"!`;
+    
+    if (rewardId === 'hydration_daily') {
+      notificationTitle = '💧 Hydration Goal Achieved!';
+      notificationMessage = `Amazing! You've completed your daily water intake goal. Keep yourself hydrated! 🌊`;
+    } else if (rewardId === 'steps_daily') {
+      notificationTitle = '🎯 Daily Goal Completed!';
+      notificationMessage = `Congratulations! You crushed your daily step goal and earned ${actualCoins} coins. Keep moving! 🚶‍♂️`;
+    } else if (rewardId.startsWith('streak_')) {
+      notificationTitle = '🔥 Streak Milestone!';
+      notificationMessage = `Incredible! You've maintained your ${gam.streakDays}-day streak and earned ${actualCoins} coins. You're unstoppable! 💪`;
+    }
+    
     createNotification(userId, {
       type:    'COIN',
-      title:   '🪙 Reward Claimed!',
-      message: `You claimed ${actualCoins} coins for "${rewardDef.title}"!`,
+      title:   notificationTitle,
+      message: notificationMessage,
       data:    { screen: 'Tracker' },
     });
 
