@@ -91,6 +91,11 @@ const syncHealthData = async (req, res, next) => {
       weight,
       goalMet,
       timezone, // FIX #3: Client sends timezone (e.g., "Asia/Kolkata" or offset like "+05:30")
+      // Set by the client when the figure it is sending is materially LOWER than
+      // what it itself last sent today — i.e. it detected and fixed its own
+      // over-count. Lets validateSteps accept the decrease instead of raising it
+      // back to the stored high-water mark. See stepValidation.js Rule 3.
+      stepsCorrection,
     } = req.body;
 
     // FIX #3: Use client timezone for "today" calculation when available.
@@ -173,10 +178,20 @@ const syncHealthData = async (req, res, next) => {
       bonusSteps: existing?.bonusSteps || 0,
       lastSyncAt: existing?.updatedAt || null,
       dailyGoal,
+      allowCorrection: stepsCorrection === true,
     });
 
     // Use the clamped (safe) step value instead of raw client input
     const validatedSteps = stepValidation.clampedSteps;
+
+    // Corrections are rare and only ever reduce the stored count, so they are worth
+    // a log line: a burst of them points at a client still over-reporting.
+    if (stepValidation.corrected) {
+      console.warn(
+        `[HealthSync] Step correction accepted for user ${req.user._id} on ${today}: ` +
+        `${stepValidation.correctedFrom} → ${validatedSteps}`
+      );
+    }
 
     // ── Anti-cheat: record flag if step submission was suspicious ─────────────
     // SUSPICIOUS FUNCTIONALITY DISABLED — cheat flag recording commented out.
@@ -677,13 +692,27 @@ const syncHealthData = async (req, res, next) => {
     const { newlyCompleted } = await syncChallengeProgress(req.user._id).catch(() => ({ newlyCompleted: [] }));
 
     return success(res, 'Health data synced', {
+      // The date this sync was actually written to, in the user's local day. The
+      // client compares this against its own local date before pushing totalSteps
+      // to the notification and widget. It used to be missing, so those checks
+      // compared against `undefined`, never passed, and the widget silently stopped
+      // following the server total.
+      date: today,
       goalCoinsAwarded,
       coinsBalance: gam.coinsBalance,
       stepGoalCoins: awardedGoalCoins,
       bonusSteps,       // bonus steps credited for today (so app can show total)
       totalSteps,       // walked + bonus combined
+      deviceSteps,      // walked only — what the client should compare its own figure against
       newlyCompleted,   // array of { title, emoji, coinReward }
       retroCoinsAwarded: retroCoinsAwarded > 0 ? retroCoinsAwarded : undefined,
+      // Confirms a requested downward correction was applied, so the client can
+      // stop re-sending the flag.
+      stepCorrection: stepValidation.corrected ? {
+        applied: true,
+        from: stepValidation.correctedFrom,
+        to: validatedSteps,
+      } : undefined,
       // FIX #2: Inform client if steps were flagged/clamped
       stepValidation: stepValidation.flagged ? {
         flagged: true,

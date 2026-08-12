@@ -10,7 +10,9 @@
 //   1. Absolute daily cap: 100,000 steps (ultra-marathon level)
 //   2. Rate cap: ~200 steps/minute = 12,000 steps/hour
 //   3. No-decrease rule: steps should not decrease within a day
-//      (allow a small tolerance for sensor corrections)
+//      (allow a small tolerance for sensor corrections). Overridable via
+//      `allowCorrection` so a client that over-reported can repair the record —
+//      without it, one bad figure was the stored value for the rest of the day.
 //   4. Single-sync jump cap: max 5,000 steps in under 5 minutes
 //      (prevents "inject 50k steps in one API call" attacks)
 
@@ -30,13 +32,17 @@ const RAPID_JUMP_WINDOW_MS = 5 * 60 * 1000; // 5 minutes
  * @param {number} params.bonusSteps - Bonus steps (admin-credited, not from device)
  * @param {Date|null} params.lastSyncAt - Timestamp of last sync (updatedAt of HealthActivity)
  * @param {number} params.dailyGoal - User's daily step goal (for context only)
+ * @param {boolean} [params.allowCorrection] - When true, a decrease below the stored
+ *   value is accepted instead of being silently raised back up. The client sets this
+ *   only when it has detected that its own previously reported figure was too high.
  *
- * @returns {{ clampedSteps: number, flagged: boolean, reason: string|null }}
+ * @returns {{ clampedSteps: number, flagged: boolean, reason: string|null,
+ *   corrected: boolean, correctedFrom: number|null }}
  */
-function validateSteps({ incomingSteps, existingSteps, bonusSteps, lastSyncAt, dailyGoal }) {
+function validateSteps({ incomingSteps, existingSteps, bonusSteps, lastSyncAt, dailyGoal, allowCorrection = false }) {
   // If no steps provided or negative, return 0
   if (incomingSteps === undefined || incomingSteps === null || incomingSteps < 0) {
-    return { clampedSteps: 0, flagged: false, reason: null };
+    return { clampedSteps: 0, flagged: false, reason: null, corrected: false, correctedFrom: null };
   }
 
   // Round to integer (step counts should be whole numbers)
@@ -109,20 +115,41 @@ function validateSteps({ incomingSteps, existingSteps, bonusSteps, lastSyncAt, d
     }
   }
 
-  // ── Rule 3: No unreasonable decrease ────────────────────────────────────────
-  // Steps should generally only increase within a day. A small decrease is
-  // allowed (sensor correction, different source reporting lower), but a major
-  // drop could indicate replay or manipulation.
+  // ── Rule 3: No unreasonable decrease, unless it is an explicit correction ───
+  //
+  // Within a day steps normally only go up, and several devices may report for the
+  // same user, so a lower figure is usually just a device that is behind. Keeping
+  // the higher value is the right default.
+  //
+  // But applied unconditionally it made a wrong value permanent. The stored count
+  // became a high-water mark that nothing could bring down: an inflated figure
+  // stayed for the rest of the day, was handed back to the app as its baseline on
+  // the next login, and got re-reported from there. There was no path by which a
+  // corrected client could repair the record.
+  //
+  // `allowCorrection` provides that path. The client sets it only when the value it
+  // is sending is materially lower than what it itself last sent today, i.e. when
+  // it has detected and fixed its own over-count.
+  //
+  // This is not a cheat vector: it can only ever LOWER the stored count. Coin
+  // awards are driven by a separate high-water mark, so a decrease neither refunds
+  // nor re-mints coins — it just stops the wrong number being displayed forever.
+  let corrected = false;
+  let correctedFrom = null;
   if (steps < existingWalked - DECREASE_TOLERANCE && existingWalked > 0) {
-    // Don't flag — this is common when switching between Health Connect and
-    // native sensor. Just keep the higher value.
-    steps = existingWalked;
+    if (allowCorrection) {
+      corrected = true;
+      correctedFrom = existingWalked;
+      reason = `Client-requested correction: ${existingWalked} → ${steps}`;
+    } else {
+      steps = existingWalked;
+    }
   }
 
   // Ensure non-negative after all clamping
   steps = Math.max(0, steps);
 
-  return { clampedSteps: steps, flagged, reason };
+  return { clampedSteps: steps, flagged, reason, corrected, correctedFrom };
 }
 
 module.exports = { validateSteps };
