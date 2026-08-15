@@ -179,19 +179,20 @@ const syncHealthData = async (req, res, next) => {
     const validatedSteps = stepValidation.clampedSteps;
 
     // ── Anti-cheat: record flag if step submission was suspicious ─────────────
-    // SUSPICIOUS FUNCTIONALITY DISABLED — cheat flag recording commented out.
-    // let cheatPenaltyResult = null;
-    // if (stepValidation.flagged) {
-    //   cheatPenaltyResult = await recordCheatFlag({
-    //     userId: req.user._id,
-    //     reason: stepValidation.reason,
-    //     incomingSteps: steps,
-    //     clampedSteps: validatedSteps,
-    //     existingSteps: existing?.steps || 0,
-    //     date: today,
-    //   });
-    // }
+    // ── Anti-cheat: record flag if step submission was suspicious ─────────────
+    // Only flags device-originated step cheats (not bonus/admin steps).
+    // After 3 flags in a single day, the user's coin earnings are blocked 10 days.
     let cheatPenaltyResult = null;
+    if (stepValidation.flagged) {
+      cheatPenaltyResult = await recordCheatFlag({
+        userId: req.user._id,
+        reason: stepValidation.reason,
+        incomingSteps: steps,
+        clampedSteps: validatedSteps,
+        existingSteps: existing?.steps || 0,
+        date: today,
+      });
+    }
 
     const isGoalMet = goalMet ?? (validatedSteps >= dailyGoal);
 
