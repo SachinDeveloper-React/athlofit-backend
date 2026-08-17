@@ -62,20 +62,21 @@ app.post(
 );
 
 // ─── Rate limiting ────────────────────────────────────────────────────────────
-const limiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 min
-  max: 1000,
-  standardHeaders: true,
-  legacyHeaders: false,
-  message: { success: false, message: 'Too many requests, please try again later.' },
-});
-// BUG-002: Exclude /auth from global limiter — auth routes have their own tighter limiter
-app.use((req, res, next) => {
-  if (req.path.startsWith('/auth')) return next();
-  return limiter(req, res, next);
-});
+// Global rate limiter is PAUSED (disabled) for all routes except auth/login.
+// To re-enable, uncomment the app.use block below.
+// const limiter = rateLimit({
+//   windowMs: 15 * 60 * 1000,
+//   max: 1000,
+//   standardHeaders: true,
+//   legacyHeaders: false,
+//   message: { success: false, message: 'Too many requests, please try again later.' },
+// });
+// app.use((req, res, next) => {
+//   if (req.path.startsWith('/auth')) return next();
+//   return limiter(req, res, next);
+// });
 
-// Auth endpoints get tighter limiting
+// Auth/login endpoints keep rate limiting (brute-force protection)
 const authLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: 200,

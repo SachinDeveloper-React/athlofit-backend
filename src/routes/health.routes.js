@@ -19,15 +19,15 @@ const { protect } = require('../middleware/auth.middleware');
 // FIX #4: Per-user rate limiter for POST /health/sync.
 // 20 requests per minute per user — prevents API flooding while allowing
 // normal usage (native service every 15 min + app sync on foreground + background fetch).
-const syncRateLimiter = rateLimit({
-  windowMs: 60 * 1000, // 1 minute
-  max: 20,
-  standardHeaders: true,
-  legacyHeaders: false,
-  // Key by authenticated user ID (set by protect middleware)
-  keyGenerator: (req) => req.user?._id?.toString() || req.ip,
-  message: { success: false, message: 'Too many sync requests. Please wait a moment.' },
-});
+// Health sync rate limiter — PAUSED (disabled). To re-enable, uncomment.
+// const syncRateLimiter = rateLimit({
+//   windowMs: 60 * 1000,
+//   max: 20,
+//   standardHeaders: true,
+//   legacyHeaders: false,
+//   message: { success: false, message: 'Too many sync requests. Try again in a minute.' },
+// });
+const syncRateLimiter = (req, res, next) => next(); // passthrough
 
 // All routes require auth
 router.use(protect);
