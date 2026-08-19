@@ -29,6 +29,39 @@ const healthActivitySchema = new mongoose.Schema(
     weight: { type: Number, default: 0 },        // kg
     goalMet: { type: Boolean, default: false },
     goalSnapshot: { type: Number, default: 0 }, // goal that was active on this day
+
+    // ── Retroactive coin bookkeeping (per-date, unlike the Gamification doc) ──
+    //
+    // Passive step coins are paid on a watermark: the award is
+    // coinsFor(steps) - coinsFor(watermark). For TODAY that watermark lives on
+    // the Gamification doc (lastPassiveCoinSteps), which only ever tracks one
+    // day at a time — so it cannot express "how much was already paid for
+    // 2026-08-12". Retroactive awards for past dates therefore need their own
+    // per-date watermark, and this is it.
+    //
+    // The retro path already read `stepCoinWatermark`, but the field was never
+    // declared on this schema, so it was always undefined → treated as 0 → every
+    // retro sync assumed nothing had been paid for that day and paid the full
+    // amount again.
+    //
+    // Walked steps only (bonus excluded), matching the passive-coin rule.
+    stepCoinWatermark: { type: Number, default: 0 },
+
+    // When this day's walked step count was last actually accepted UPWARD.
+    //
+    // Distinct from `updatedAt`, which every write to this row bumps — including
+    // hydration-only syncs, which post to /health/sync with no steps at all.
+    // Step-rate validation needs "time since we last took steps", not "time since
+    // anything touched this row": using updatedAt made a legitimate sync carrying
+    // hours of walking look like an impossible burst if a water log happened to
+    // land seconds earlier, and it let a client reset the rate window at will just
+    // by syncing more often.
+    lastStepIncreaseAt: { type: Date, default: null },
+
+    // Whether the one-off retroactive step-goal bonus has been paid for this
+    // date. Separate from the watermark because the goal bonus is a flat amount
+    // awarded once, not a function of the step count.
+    retroGoalCoinAwarded: { type: Boolean, default: false },
   },
   {
     timestamps: true,

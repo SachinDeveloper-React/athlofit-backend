@@ -36,6 +36,16 @@ const appConfigSchema = new mongoose.Schema(
       healthAnalyticsEnabled:   { type: Boolean, default: true },
       referralEnabled:          { type: Boolean, default: true },
       leaderboardEnabled:       { type: Boolean, default: true },
+      // Whether an implausible step submission actually PUNISHES the user —
+      // warning notifications and the 10-day coin block in cheatPenalty.js.
+      //
+      // Default false, deliberately. The penalty system was switched off wholesale
+      // because it was firing on honest users, and while the signal driving it is
+      // now much narrower (severity 'implausible' only, never mere clamping), that
+      // is an argument for being able to turn it on — not for turning it on by
+      // itself. Flags are recorded either way, so leaving this false collects the
+      // evidence without anyone being blocked on a theory.
+      cheatPenaltyEnabled:      { type: Boolean, default: false },
     },
 
     nutrition: {

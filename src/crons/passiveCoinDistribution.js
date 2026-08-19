@@ -43,8 +43,10 @@ async function distributePassiveCoins() {
   const unverifiedDailyCap = cfg.coin?.unverifiedDailyCap ?? 50;
 
   // Find all users who have health activity today (meaning they synced steps)
+  // bonusSteps is selected so walked steps can be derived — see the comment on
+  // `currentSteps` in the loop below.
   const activities = await HealthActivity.find({ date: today, steps: { $gt: 0 } })
-    .select('user steps')
+    .select('user steps bonusSteps')
     .lean();
 
   if (activities.length === 0) {
@@ -67,7 +69,23 @@ async function distributePassiveCoins() {
 
   for (const activity of activities) {
     const userId = activity.user;
-    const currentSteps = activity.steps;
+
+    // WALKED steps, bonus excluded.
+    //
+    // `activity.steps` is walked + bonus. Using it here put this cron on a
+    // different basis from the health sync, which computes the same watermark
+    // from walked steps only — and because both write the SAME field
+    // (lastPassiveCoinSteps), the mismatch broke the sync:
+    //
+    //   cron pays on (walked + bonus) and sets watermark = walked + bonus
+    //   → sync then tests `walked > walked + bonus`, which is never true
+    //   → every real step the user walks for the rest of that day earns nothing.
+    //
+    // Deriving walked steps here puts both writers on one basis, so the watermark
+    // means the same thing whoever moved it last. It also stops passive coins
+    // being paid on admin-credited steps, which was never the intent — bonus
+    // steps still count toward the goal, which pays its own separate bonus.
+    const currentSteps = Math.max(0, (activity.steps || 0) - (activity.bonusSteps || 0));
 
     try {
       // Get or create gamification record
@@ -78,10 +96,11 @@ async function distributePassiveCoins() {
 
       processed++;
 
-      // ── Anti-cheat: skip if user is blocked from earning coins — SUSPICIOUS FUNCTIONALITY DISABLED
-      // const userDoc = userMap.get(userId.toString());
-      // if (userDoc && isCoinBlocked(userDoc).isBlocked) { skipReasons.blocked++; continue; }
+      // ── Anti-cheat: skip if user is blocked from earning coins ─────────────
+      // Reads not-blocked for everyone while features.cheatPenaltyEnabled is off,
+      // since nothing writes coinBlockedUntil in that state.
       const userDoc = userMap.get(userId.toString());
+      if (userDoc && isCoinBlocked(userDoc).isBlocked) { skipReasons.blocked++; continue; }
 
       // Reset coinsEarnedToday if it's a new day (read-only check — the atomic
       // update below handles the actual state transition safely)
@@ -173,6 +192,15 @@ async function distributePassiveCoins() {
 
       if (!atomicResult) { skipReasons.raceLost++; continue; } // watermark moved by another process
 
+      // Mirror the payout onto this DATE's own watermark, same as the health sync
+      // does. lastPassiveCoinSteps above tracks only the current day, so without
+      // this a date re-synced later as a PAST date would read its retro watermark
+      // as 0 and be paid all over again.
+      await HealthActivity.updateOne(
+        { user: userId, date: today },
+        { $max: { stepCoinWatermark: currentSteps } }
+      ).catch(() => { /* non-fatal: the retro path re-checks anyway */ });
+
       // Log transaction
       logCoinTransaction({
         userId,
@@ -257,12 +285,12 @@ async function eodAutoClaimStepGoal() {
     const userId = activity.user;
 
     try {
-      // Skip if user is coin-blocked — SUSPICIOUS FUNCTIONALITY DISABLED
-      // const userDoc = userMap.get(userId.toString());
-      // if (userDoc && isCoinBlocked(userDoc).isBlocked) {
-      //   skipped++;
-      //   continue;
-      // }
+      // Skip if user is coin-blocked (no-op while penalties are disabled).
+      const userDoc = userMap.get(userId.toString());
+      if (userDoc && isCoinBlocked(userDoc).isBlocked) {
+        skipped++;
+        continue;
+      }
 
       // Atomically award step goal coins ONLY if not already awarded today
       const atomicResult = await Gamification.findOneAndUpdate(

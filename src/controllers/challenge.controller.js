@@ -255,24 +255,26 @@ const syncChallengeProgress = async (userId) => {
 
       // Auto-award coins if just completed and not yet rewarded
       if (isCompleted && !existing?.isRewarded) {
-        // ── Anti-cheat: skip coin award if user is penalized — SUSPICIOUS FUNCTIONALITY DISABLED
-        // const user = await User.findById(userId).select('coinBlockedUntil');
-        // const coinBlockStatus = isCoinBlocked(user || {});
-        // if (coinBlockStatus.isBlocked) {
-        //   // Challenge is marked complete but coins are NOT awarded due to penalty.
-        //   // Still mark as rewarded to prevent retry — user forfeits this reward.
-        //   await UserChallenge.findOneAndUpdate(
-        //     { user: userId, challenge: challenge._id, periodKey },
-        //     { $set: { isRewarded: true, rewardedAt: new Date() } },
-        //     { new: true },
-        //   );
-        //   newlyCompleted.push({
-        //     title:      challenge.title,
-        //     emoji:      challenge.emoji,
-        //     coinReward: 0, // blocked
-        //   });
-        //   continue;
-        // }
+        // ── Anti-cheat: skip coin award if user is penalized ─────────────────
+        // No-op for everyone while features.cheatPenaltyEnabled is off, since
+        // nothing writes coinBlockedUntil in that state.
+        const user = await User.findById(userId).select('coinBlockedUntil');
+        const coinBlockStatus = isCoinBlocked(user || {});
+        if (coinBlockStatus.isBlocked) {
+          // Challenge is marked complete but coins are NOT awarded due to penalty.
+          // Still mark as rewarded to prevent retry — user forfeits this reward.
+          await UserChallenge.findOneAndUpdate(
+            { user: userId, challenge: challenge._id, periodKey },
+            { $set: { isRewarded: true, rewardedAt: new Date() } },
+            { new: true },
+          );
+          newlyCompleted.push({
+            title:      challenge.title,
+            emoji:      challenge.emoji,
+            coinReward: 0, // blocked
+          });
+          continue;
+        }
 
         // BUG-023 fix: save gam (coins) BEFORE marking isRewarded on UserChallenge.
         // If gam.save() fails, isRewarded stays false so the user can retry.

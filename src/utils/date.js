@@ -70,6 +70,178 @@ const resolveClientDate = (timezone) => {
   return `${y}-${m}-${d}`;
 };
 
+/** Matches a strict "YYYY-MM-DD" calendar date. */
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+/** Fixed zone used whenever the client sends no usable timezone. */
+const SERVER_ZONE = 'Asia/Kolkata';
+
+/**
+ * True when `timezone` looks like an IANA zone name this runtime can use.
+ */
+const isZoneName = (timezone) =>
+  typeof timezone === 'string' && (timezone.includes('/') || timezone === 'UTC');
+
+/**
+ * Parses "+05:30" / "-08:00" / raw-minutes ("330", "-480") into minutes.
+ * @returns {number|null} null when the value is not an offset form.
+ */
+const parseOffsetMinutes = (timezone) => {
+  if (typeof timezone !== 'string') return null;
+  if (/^[+-]\d{2}:\d{2}$/.test(timezone)) {
+    const sign = timezone[0] === '-' ? -1 : 1;
+    const [h, m] = timezone.slice(1).split(':').map(Number);
+    return sign * (h * 60 + m);
+  }
+  if (/^-?\d+$/.test(timezone)) return parseInt(timezone, 10);
+  return null;
+};
+
+/**
+ * Minutes elapsed since 00:00 local time in the client's timezone.
+ *
+ * Used as the step-validation window when there is no record of steps having
+ * been accepted yet today: the most a user can have walked is bounded by how
+ * much of their local day has actually happened. Falls back to the server zone
+ * when the timezone is missing or unusable, matching todayISO().
+ *
+ * @param {string|null|undefined} timezone
+ * @param {Date} [now]
+ * @returns {number} 0..1439
+ */
+const minutesSinceLocalMidnight = (timezone, now = new Date()) => {
+  const readParts = (zone) => {
+    const parts = new Intl.DateTimeFormat('en-GB', {
+      timeZone: zone,
+      hour: '2-digit',
+      minute: '2-digit',
+      hourCycle: 'h23',
+    }).formatToParts(now);
+    const h = Number(parts.find((p) => p.type === 'hour').value);
+    const m = Number(parts.find((p) => p.type === 'minute').value);
+    return h * 60 + m;
+  };
+
+  if (isZoneName(timezone)) {
+    try {
+      return readParts(timezone);
+    } catch (e) {
+      // Unknown zone — fall through.
+    }
+  }
+
+  const offsetMinutes = parseOffsetMinutes(timezone);
+  if (offsetMinutes === null) return readParts(SERVER_ZONE);
+
+  const shifted = new Date(now.getTime() + offsetMinutes * 60_000);
+  return shifted.getUTCHours() * 60 + shifted.getUTCMinutes();
+};
+
+/**
+ * True when `value` is a well-formed "YYYY-MM-DD" string denoting a real date.
+ *
+ * POST /health/sync takes `req.body.date` verbatim to decide which day to write,
+ * with no validation at all — unlike GET /health/weekly-steps and the admin
+ * add-steps route, which both check the format. A malformed or arbitrary value
+ * creates junk rows under the unique {user, date} index.
+ */
+const isValidISODate = (value) => {
+  if (typeof value !== 'string' || !ISO_DATE_RE.test(value)) return false;
+  const [y, m, d] = value.split('-').map(Number);
+  if (m < 1 || m > 12 || d < 1 || d > 31) return false;
+  // Reject impossible days (e.g. 2026-02-30) by round-tripping.
+  const dt = new Date(Date.UTC(y, m - 1, d));
+  return dt.getUTCFullYear() === y && dt.getUTCMonth() === m - 1 && dt.getUTCDate() === d;
+};
+
+/**
+ * Formats an arbitrary Date as "YYYY-MM-DD" in the given timezone.
+ *
+ * Needed because comparing a UTC-derived date against a client-local date is
+ * off by one for part of every day. The account-creation guard did exactly that:
+ * `new Date(user.createdAt).toISOString().slice(0, 10)` is the UTC day, compared
+ * against an IST/client-local `today`, so an account created between 00:00 and
+ * 05:30 IST looked like it was created "tomorrow" and its first legitimate sync
+ * was rejected as pre-dating the account.
+ *
+ * @param {Date|string|number} date
+ * @param {string|null|undefined} timezone IANA name, "+05:30" offset, or minutes.
+ * @returns {string|null} null when `date` is unusable.
+ */
+const toClientDate = (date, timezone) => {
+  const dt = date instanceof Date ? date : new Date(date);
+  if (Number.isNaN(dt.getTime())) return null;
+
+  const asDay = (zone) => new Intl.DateTimeFormat('en-CA', {
+    timeZone: zone,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(dt);
+
+  if (isZoneName(timezone)) {
+    try {
+      return asDay(timezone);
+    } catch (e) {
+      // Unknown zone — fall through to the offset/default handling below.
+    }
+  }
+
+  // Numeric offsets ("+05:30" / "-08:00" / raw minutes), else default to the
+  // server's fixed zone so this agrees with todayISO().
+  const offsetMinutes = parseOffsetMinutes(timezone);
+  if (offsetMinutes === null) return asDay(SERVER_ZONE);
+
+  const shifted = new Date(dt.getTime() + offsetMinutes * 60_000);
+  const y = shifted.getUTCFullYear();
+  const m = String(shifted.getUTCMonth() + 1).padStart(2, '0');
+  const d = String(shifted.getUTCDate()).padStart(2, '0');
+  return `${y}-${m}-${d}`;
+};
+
+/** Minutes in a whole day. */
+const MINUTES_PER_DAY = 24 * 60;
+
+/**
+ * Minutes of `isoDate` that have actually elapsed, from the user's point of view.
+ *
+ * For today this is the time since local midnight. For a date already in the past
+ * it is the WHOLE day — all 1,440 minutes of it happened, regardless of what time
+ * it is now.
+ *
+ * That distinction is the point of this helper. Step validation's first-accepted-
+ * value ceiling called minutesSinceLocalMidnight() directly, which always answers
+ * for TODAY, and then applied the result to whichever date the sync was writing.
+ * POST /health/sync accepts an explicit past `date` and the Android widget worker
+ * pushes the last seven days every 15 minutes, so past-date syncs are routine —
+ * and one landing at 00:10 was judged against ten minutes of elapsed time. A
+ * genuine 12,000-step day synced then was clamped to the 3,000-step floor, flagged
+ * as a cheat, and paid retroactive coins on the clamped figure. It recovered over
+ * the following hour as the delta ceiling took over, but the flags and the
+ * temporarily wrong total were real.
+ *
+ * A date in the FUTURE gets today's elapsed minutes: no more of it can have
+ * happened than has happened today, and that is the conservative answer. (Such a
+ * sync should not exist, but this helper is not the place to reject it.)
+ *
+ * @param {string|null|undefined} isoDate "YYYY-MM-DD"; anything unusable falls
+ *   back to today's elapsed minutes.
+ * @param {string|null|undefined} timezone IANA name, "+05:30" offset, or minutes.
+ * @param {Date} [now]
+ * @returns {number} 1..1440
+ */
+const minutesElapsedOnDate = (isoDate, timezone, now = new Date()) => {
+  const elapsedToday = Math.max(1, minutesSinceLocalMidnight(timezone, now));
+  if (!isValidISODate(isoDate)) return elapsedToday;
+
+  // toClientDate(now, tz) is resolveClientDate(tz) with an injectable clock, and
+  // falls back to the same server zone, so the two always agree on "today".
+  const today = toClientDate(now, timezone);
+  if (!today || isoDate >= today) return elapsedToday;
+
+  return MINUTES_PER_DAY;
+};
+
 /**
  * Returns whether two ISO date strings are consecutive days.
  * Uses date-part arithmetic only (no time/timezone math) to avoid
@@ -165,4 +337,4 @@ const isoWeekKeyIST = () => {
   return `${dt.getUTCFullYear()}-W${String(weekNo).padStart(2, '0')}`;
 };
 
-module.exports = { todayISO, resolveClientDate, isConsecutiveDay, buildDateRange, toDayLabel, toDateWithDayLabel, daysBetween, currentHourIST, isoWeekKeyIST };
+module.exports = { todayISO, resolveClientDate, isValidISODate, toClientDate, minutesSinceLocalMidnight, minutesElapsedOnDate, isConsecutiveDay, buildDateRange, toDayLabel, toDateWithDayLabel, daysBetween, currentHourIST, isoWeekKeyIST };
