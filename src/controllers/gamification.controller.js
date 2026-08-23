@@ -11,6 +11,11 @@ const { sendPushToUser } = require('../utils/pushNotification');
 const { createNotification } = require('../utils/createNotification');
 const { logCoinTransaction } = require('../utils/logCoinTransaction');
 const { isCoinBlocked } = require('../utils/cheatPenalty');
+const {
+  isStepsTrackingEnabled,
+  stepsTrackingStatus,
+  STEPS_DISABLED_CODE,
+} = require('../utils/stepsTracking');
 
 // ─── Helper: load live config (falls back to defaults if not seeded) ──────────
 async function getLiveConfig() {
@@ -106,16 +111,27 @@ const getStreaks = async (req, res, next) => {
 // ─── POST /gamification/sync ──────────────────────────────────────────────────
 const syncGamification = async (req, res, next) => {
   try {
-    const {
-      coinsEarnedToday,
-      streakDays,
-      bestStreakDays,
-      lastActiveDate,
-      lastCoinDate,
-    } = req.body;
-
-    const today = todayISO();
-
+    // ── Reward state is server-owned; the client cannot write it ────────────
+    //
+    // This endpoint used to accept streakDays, bestStreakDays, coinsEarnedToday,
+    // lastCoinDate and lastActiveDate straight from the request body. Every one
+    // of them drives money:
+    //
+    //   • coinsEarnedToday was the daily-cap accumulator, and the only guard on
+    //     writing it was `lastCoinDate === today` — a field supplied in the same
+    //     body. Posting { lastCoinDate: <today>, coinsEarnedToday: 0 } reset the
+    //     user's own daily earning cap, as often as they liked.
+    //   • streakDays was accepted whenever it exceeded the stored value, with no
+    //     upper bound, and streak thresholds gate the badge rewards.
+    //
+    // Nothing in the app calls this endpoint — the service method exists with
+    // zero call sites — so accepting the fields bought nothing and cost the
+    // integrity of every number the reward system depends on.
+    //
+    // The authoritative writers are _updateStreak (health sync) for the streak
+    // fields and the coin-award paths for the balance fields. The route is kept
+    // rather than deleted in case a non-app client depends on the badge
+    // re-check, but it is now read-mostly.
     const [gam, badgeDefs] = await Promise.all([
       ensureGamDoc(req.user._id),
       loadBadgeDefs(),
@@ -123,35 +139,27 @@ const syncGamification = async (req, res, next) => {
 
     gam.migrateOldBadges();
 
-    // streakDays: only accept the client value if it's strictly higher than
-    // what the server already recorded. _updateStreak (called during health/sync)
-    // is the authoritative writer; we must not let a stale client value
-    // overwrite a server-incremented streak.
-    if (streakDays !== undefined && streakDays > gam.streakDays) {
-      gam.streakDays = streakDays;
-    }
-    if (bestStreakDays !== undefined && bestStreakDays > gam.bestStreakDays) {
-      gam.bestStreakDays = bestStreakDays;
-    }
-    if (lastActiveDate !== undefined) {
-      // BUG-028: Validate lastActiveDate — must be a valid ISO date and not in the future
-      const d = new Date(lastActiveDate);
-      if (isNaN(d.getTime()) || lastActiveDate > today) {
-        return error(res, 'lastActiveDate must be a valid ISO date not in the future', 400);
-      }
-      gam.lastActiveDate = lastActiveDate;
-    }
-    if (lastCoinDate !== undefined) gam.lastCoinDate = lastCoinDate;
-    if (coinsEarnedToday !== undefined && lastCoinDate === today) {
-      gam.coinsEarnedToday = coinsEarnedToday;
-    }
-
-    // Re-check badges based on incoming streakDays
-    gam.awardBadges(badgeDefs);
+    // Re-check badge ELIGIBILITY against the server's own streak value. This
+    // only ever sets `unlocked`; payment is a separate flag that claimReward
+    // owns, so this cannot mark a reward as collected.
+    //
+    // The payout flag is passed for the same reason as in the health-sync path:
+    // awardBadges stamps it at unlock time, and omitting it here would default
+    // to false — which is safe, but passing it explicitly keeps the two unlock
+    // sites consistent rather than depending on one of them being wrong.
+    const badgeCfg = await getLiveConfig();
+    gam.awardBadges(badgeDefs, {
+      payoutEnabled: badgeCfg?.streak?.badgeCoinsEnabled === true,
+    });
 
     await gam.save();
 
-    return success(res, 'Gamification synced');
+    return success(res, 'Gamification synced', {
+      streakDays: gam.streakDays,
+      bestStreakDays: gam.bestStreakDays,
+      coinsBalance: gam.coinsBalance,
+      coinsEarnedToday: gam.coinsEarnedToday,
+    });
   } catch (err) {
     next(err);
   }
@@ -172,6 +180,17 @@ const earnCoins = async (req, res, next) => {
     const coinBlockStatus = isCoinBlocked(req.user);
     if (coinBlockStatus.isBlocked) {
       return error(res, `Coin earnings are blocked until ${coinBlockStatus.blockedUntil.toISOString().slice(0, 10)} due to suspicious step activity. ${coinBlockStatus.daysRemaining} days remaining.`, 403);
+    }
+
+    // Step tracking paused for this account by an admin. Blocks the manual
+    // claim as well as the automatic award: the sync endpoint refuses new
+    // steps, but steps stored BEFORE the pause are still sitting in today's
+    // row, and without this the user can simply tap Claim and collect the
+    // step-goal reward from exactly the data the pause exists to stop
+    // crediting. The switch is meant to stop step-derived earning, not only
+    // step ingestion.
+    if (!isStepsTrackingEnabled(req.user)) {
+      return error(res, stepsTrackingStatus(req.user).reason, 403, STEPS_DISABLED_CODE);
     }
 
     const today = todayISO();
@@ -372,6 +391,13 @@ const getCoinData = async (req, res, next) => {
     const totalPages = Math.ceil(total / limit) || 1;
 
     // ── Build claimable rewards ───────────────────────────────────────────────
+    // Step tracking paused for this account. Gated on the reward being a
+    // step-derived one, so hydration and other non-step claims keep working —
+    // the pause stops the step pipeline, not the rest of the app.
+    if (String(rewardId).startsWith('steps') && !isStepsTrackingEnabled(req.user)) {
+      return error(res, stepsTrackingStatus(req.user).reason, 403, STEPS_DISABLED_CODE);
+    }
+
     const todayActivity = await HealthActivity.findOne({ user: userId, date: today });
     const todaySteps = todayActivity?.steps ?? 0;
     const todayWater = todayActivity?.hydration ?? 0;
@@ -504,8 +530,18 @@ const claimReward = async (req, res, next) => {
         title: `${def.threshold}-Day Streak (${def.title})`,
         reward: def.coinReward,
         isMet: () => gam.streakDays >= def.threshold,
-        isAlreadyClaimed: () => gam.isBadgeUnlocked(def.key),
-        onClaim: () => { gam.unlockBadge(def.key); },
+        // Reads the PAYMENT flag. This used to read isBadgeUnlocked, which
+        // awardBadges sets by itself during health sync — so every badge was
+        // "already claimed" the instant it became earnable and the coins could
+        // never be collected.
+        isAlreadyClaimed: () => gam.isBadgeClaimed(def.key),
+        // Badges unlocked while payouts were disabled carry no coins, ever.
+        // Checked as a separate predicate from isMet/isAlreadyClaimed so the
+        // refusal message can say something true rather than "already claimed".
+        isPayable: () => gam.isBadgePayoutEligible(def.key),
+        onClaim: () => { gam.markBadgeClaimed(def.key); },
+        // Milestone rewards bypass the daily cap — see the claim block below.
+        bypassDailyCap: true,
       };
     }
 
@@ -513,13 +549,41 @@ const claimReward = async (req, res, next) => {
     if (!rewardDef) return error(res, 'Unknown reward ID', 400);
     if (!rewardDef.isMet()) return error(res, 'Reward threshold not yet reached', 400);
     if (rewardDef.isAlreadyClaimed()) return error(res, 'Reward already claimed', 400);
+    // `isPayable` is only defined for badge rewards; daily rewards have no such
+    // concept and are unaffected.
+    if (rewardDef.isPayable && !rewardDef.isPayable()) {
+      return error(
+        res,
+        'This badge was earned while coin rewards were paused, so it carries no coins.',
+        400,
+      );
+    }
 
-    // BUG-025: apply daily coin cap before awarding streak badge coins
-    const MAX_DAILY_COINS = getEffectiveDailyCap(req.user, cfg.coin.maxDailyRewards, cfg.coin.unverifiedDailyCap);
-    const remainingAllowance = MAX_DAILY_COINS - (gam.coinsEarnedToday || 0);
-    const actualCoins = Math.round(Math.min(rewardDef.reward, remainingAllowance));
-    gam.coinsBalance = Math.round(gam.coinsBalance + actualCoins);
-    gam.coinsEarnedToday = Math.round((gam.coinsEarnedToday || 0) + actualCoins);
+    // ── Daily cap ─────────────────────────────────────────────────────────
+    //
+    // The cap exists to bound what a user can FARM in a day. A streak badge is
+    // once per lifetime and gated on a milestone the server itself recorded, so
+    // it is not farmable and the cap does not apply to it.
+    //
+    // Applying it was actively destructive: rewards run to 10,000 coins against
+    // a 250 cap, and the badge was consumed by onClaim regardless — so a
+    // 250-day-streak user collected at most 250 coins and permanently lost the
+    // other 9,750. If the cap was already spent that day, they got zero.
+    //
+    // Badge coins are also left OUT of coinsEarnedToday. Counting them would
+    // blow the day's allowance and stop the user earning anything else, which
+    // is the same bug pointing the other way.
+    let actualCoins;
+    if (rewardDef.bypassDailyCap) {
+      actualCoins = Math.round(rewardDef.reward);
+      gam.coinsBalance = Math.round(gam.coinsBalance + actualCoins);
+    } else {
+      const MAX_DAILY_COINS = getEffectiveDailyCap(req.user, cfg.coin.maxDailyRewards, cfg.coin.unverifiedDailyCap);
+      const remainingAllowance = Math.max(0, MAX_DAILY_COINS - (gam.coinsEarnedToday || 0));
+      actualCoins = Math.round(Math.min(rewardDef.reward, remainingAllowance));
+      gam.coinsBalance = Math.round(gam.coinsBalance + actualCoins);
+      gam.coinsEarnedToday = Math.round((gam.coinsEarnedToday || 0) + actualCoins);
+    }
 
     // Run badge-specific side effects
     rewardDef.onClaim();

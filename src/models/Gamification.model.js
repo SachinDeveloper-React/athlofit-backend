@@ -39,8 +39,34 @@ const gamificationSchema = new mongoose.Schema(
     badgeList: [
       {
         key: { type: String, required: true },
+        // ELIGIBILITY: the streak threshold has been reached. Set automatically
+        // by awardBadges() during health sync. Says nothing about payment.
         unlocked: { type: Boolean, default: false },
         unlockedAt: { type: Date, default: null },
+        // WORTH COINS: stamped when the badge is unlocked, from
+        // AppConfig.streak.badgeCoinsEnabled at that moment.
+        //
+        // Defaults to false, and that default is doing real work: every badge
+        // already in the database was unlocked while payouts were broken, so
+        // the default alone closes the entire historical backlog with no
+        // migration to write or get wrong. Flipping the config on later cannot
+        // retroactively make those payable, because this is decided once, at
+        // unlock, and never revisited.
+        payoutEligible: { type: Boolean, default: false },
+
+        // PAYMENT: the coin reward has actually been credited.
+        //
+        // Split out because one flag was doing both jobs, and the two collided:
+        // awardBadges() set `unlocked` on every health sync that crossed a
+        // threshold, and claimReward read that same flag as "already claimed"
+        // and refused with 400. The badge appeared, the notification promised
+        // the coins, and the coins could never be collected — by anyone, for
+        // any streak badge, ever.
+        //
+        // Defaults to false, which is the truthful state for existing rows:
+        // those users were never paid, so they become claimable.
+        coinsClaimed: { type: Boolean, default: false },
+        coinsClaimedAt: { type: Date, default: null },
       },
     ],
 
@@ -158,6 +184,12 @@ gamificationSchema.methods.getBadgeList = function (badgeDefs) {
       coinReward: def.coinReward,
       unlocked: entry?.unlocked ?? false,
       unlockedAt: entry?.unlockedAt ?? null,
+      // Whether this badge actually carries coins for THIS user. Exposed so the
+      // app can show the badge as earned without offering a Claim button that
+      // the server would refuse — badges unlocked while payouts were disabled
+      // are display-only.
+      payoutEligible: entry?.payoutEligible ?? false,
+      coinsClaimed: entry?.coinsClaimed ?? false,
     };
   });
 };
@@ -176,7 +208,23 @@ gamificationSchema.methods.getNextBadgeAt = function (badgeDefs) {
 
 // ─── Award badges based on current streakDays ─────────────────────────────────
 // badgeDefs: BadgeDefinition[] sorted by `order`
-gamificationSchema.methods.awardBadges = function (badgeDefs) {
+/**
+ * Mark every badge whose threshold the current streak has reached as unlocked.
+ *
+ * @param {Array} badgeDefs
+ * @param {object} [opts]
+ * @param {boolean} [opts.payoutEnabled=false]  AppConfig.streak.badgeCoinsEnabled.
+ *   Stamped onto newly unlocked badges as `payoutEligible` and never re-read, so
+ *   a badge earned while payouts were off stays unpayable even after the flag is
+ *   turned on. Defaults to false so a caller that forgets to pass it cannot
+ *   accidentally create a coin liability.
+ *
+ * Only ever sets ELIGIBILITY. It must never touch `coinsClaimed` — this runs on
+ * every health sync, and marking payment here is precisely the bug that made
+ * every streak reward unclaimable.
+ */
+gamificationSchema.methods.awardBadges = function (badgeDefs, opts = {}) {
+  const payoutEnabled = opts.payoutEnabled === true;
   const streak = this.streakDays;
   const now = new Date();
 
@@ -185,20 +233,61 @@ gamificationSchema.methods.awardBadges = function (badgeDefs) {
 
     let entry = this.badgeList.find(b => b.key === def.key);
     if (!entry) {
-      this.badgeList.push({ key: def.key, unlocked: false, unlockedAt: null });
+      this.badgeList.push({
+        key: def.key, unlocked: false, unlockedAt: null,
+        payoutEligible: false, coinsClaimed: false,
+      });
       entry = this.badgeList[this.badgeList.length - 1];
     }
 
     if (!entry.unlocked) {
       entry.unlocked = true;
       entry.unlockedAt = now;
+      // Decided once, here. Re-evaluating it later is what would reopen the
+      // backlog the moment payouts are switched on.
+      entry.payoutEligible = payoutEnabled;
     }
   }
+};
+
+// ─── Is this badge's coin reward payable at all? ─────────────────────────────
+// False for badges unlocked while payouts were disabled. Distinct from
+// isBadgeClaimed, which is about whether a payable reward has been collected.
+gamificationSchema.methods.isBadgePayoutEligible = function (key) {
+  return this.badgeList.find(b => b.key === key)?.payoutEligible ?? false;
 };
 
 // ─── Check if a specific badge key is unlocked ───────────────────────────────
 gamificationSchema.methods.isBadgeUnlocked = function (key) {
   return this.badgeList.find(b => b.key === key)?.unlocked ?? false;
+};
+
+// ─── Has this badge's coin reward actually been paid? ────────────────────────
+// Distinct from isBadgeUnlocked, which only means the threshold was reached.
+// Claim eligibility must be checked against THIS, never against `unlocked` —
+// awardBadges sets `unlocked` on its own and would otherwise mark every badge
+// as claimed the moment it became earnable.
+gamificationSchema.methods.isBadgeClaimed = function (key) {
+  return this.badgeList.find(b => b.key === key)?.coinsClaimed ?? false;
+};
+
+// ─── Record that a badge's coins have been credited ──────────────────────────
+gamificationSchema.methods.markBadgeClaimed = function (key) {
+  let entry = this.badgeList.find(b => b.key === key);
+  if (!entry) {
+    // Reached only via a direct claim, which the controller has already gated
+    // on payoutEligible — so recording it as eligible here is consistent, not
+    // a way to bypass the gate.
+    this.badgeList.push({
+      key, unlocked: true, unlockedAt: new Date(),
+      payoutEligible: true, coinsClaimed: true, coinsClaimedAt: new Date(),
+    });
+    return;
+  }
+  entry.unlocked = true;
+  if (!entry.unlockedAt) entry.unlockedAt = new Date();
+  entry.coinsClaimed = true;
+  entry.coinsClaimedAt = new Date();
 };
 
 // ─── Unlock a specific badge key ─────────────────────────────────────────────

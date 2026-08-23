@@ -26,6 +26,7 @@ const User = require('../models/User.model');
 const { todayISO } = require('../utils/date');
 const { logCoinTransaction } = require('../utils/logCoinTransaction');
 const { isCoinBlocked } = require('../utils/cheatPenalty');
+const { isStepsTrackingEnabled } = require('../utils/stepsTracking');
 const { computePassiveCoinDelta } = require('../utils/passiveCoins');
 
 // ─── Core distribution function ──────────────────────────────────────────────
@@ -57,14 +58,14 @@ async function distributePassiveCoins() {
   // Batch-load user verification + cheat-block status in one query
   const userIds = activities.map(a => a.user);
   const users = await User.find({ _id: { $in: userIds } })
-    .select('_id emailVerified coinBlockedUntil')
+    .select('_id emailVerified coinBlockedUntil stepsTracking')
     .lean();
   const userMap = new Map(users.map(u => [u._id.toString(), u]));
 
   let processed = 0;
   let awarded = 0;
   let totalCoinsAwarded = 0;
-  const skipReasons = { blocked: 0, noNewSteps: 0, recentSync: 0, capReached: 0, raceLost: 0 };
+  const skipReasons = { blocked: 0, stepsPaused: 0, noNewSteps: 0, recentSync: 0, capReached: 0, raceLost: 0 };
   const debug = process.env.CRON_DEBUG === 'true';
 
   for (const activity of activities) {
@@ -101,6 +102,16 @@ async function distributePassiveCoins() {
       // since nothing writes coinBlockedUntil in that state.
       const userDoc = userMap.get(userId.toString());
       if (userDoc && isCoinBlocked(userDoc).isBlocked) { skipReasons.blocked++; continue; }
+
+      // Step tracking paused for this account by an admin.
+      //
+      // The sync endpoint refuses NEW steps, but this cron pays out against
+      // steps already stored today whose watermark has not caught up — so
+      // without this check a paused user keeps earning step coins for hours
+      // after the pause, from the very data the pause was meant to stop
+      // crediting. The switch is supposed to stop step-derived earning, not
+      // just step ingestion.
+      if (userDoc && !isStepsTrackingEnabled(userDoc)) { skipReasons.stepsPaused++; continue; }
 
       // Reset coinsEarnedToday if it's a new day (read-only check — the atomic
       // update below handles the actual state transition safely)
@@ -274,7 +285,7 @@ async function eodAutoClaimStepGoal() {
 
   // Batch load users for coin-block check
   const users = await User.find({ _id: { $in: userIds } })
-    .select('_id emailVerified coinBlockedUntil')
+    .select('_id emailVerified coinBlockedUntil stepsTracking')
     .lean();
   const userMap = new Map(users.map(u => [u._id.toString(), u]));
 
@@ -288,6 +299,14 @@ async function eodAutoClaimStepGoal() {
       // Skip if user is coin-blocked (no-op while penalties are disabled).
       const userDoc = userMap.get(userId.toString());
       if (userDoc && isCoinBlocked(userDoc).isBlocked) {
+        skipped++;
+        continue;
+      }
+
+      // Same reasoning as the passive payout above: a paused account must not
+      // collect the daily step-goal bonus for a goal met from data the pause
+      // exists to stop crediting.
+      if (userDoc && !isStepsTrackingEnabled(userDoc)) {
         skipped++;
         continue;
       }

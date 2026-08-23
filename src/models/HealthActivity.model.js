@@ -62,6 +62,28 @@ const healthActivitySchema = new mongoose.Schema(
     // date. Separate from the watermark because the goal bonus is a flat amount
     // awarded once, not a function of the step count.
     retroGoalCoinAwarded: { type: Boolean, default: false },
+
+    // ── Which client build produced this day's numbers ───────────────────────
+    //
+    // Recorded per-day, not just per-user, because the user-level snapshot only
+    // says what they run NOW. When a step-counting bug is fixed and shipped, the
+    // question is always "was this particular day's data produced before or
+    // after the fix?" — and the per-user field cannot answer it once they have
+    // updated. `syncVersions` keeps every distinct build that wrote to the day,
+    // so a day straddling an update is visible as such.
+    lastSync: {
+      appVersion: { type: String, default: null },
+      buildNumber: { type: Number, default: null },
+      platform: { type: String, default: null },
+      // 'app' (JS), 'native_service' (Android foreground service),
+      // 'worker' (widget / EOD WorkManager), or null for pre-telemetry builds.
+      source: { type: String, default: null },
+      at: { type: Date, default: null },
+    },
+    // Distinct app versions that contributed to this row, in first-seen order.
+    // Left empty by builds that send no version headers — which is itself the
+    // signal that the device has not taken the update.
+    syncVersions: { type: [String], default: [] },
   },
   {
     timestamps: true,

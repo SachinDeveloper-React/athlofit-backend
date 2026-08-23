@@ -6,6 +6,7 @@ const Faq = require("../models/Faq.model");
 const LegalContent = require("../models/LegalContent.model");
 const SupportTicket = require("../models/SupportTicket.model");
 const { success, error } = require("../utils/response");
+const { resolveUpdateRequirement } = require("../utils/versionGate");
 
 const { LEGAL_TYPES } = LegalContent;
 
@@ -88,6 +89,24 @@ const getAppConfig = async (req, res, next) => {
       maintenance: {
         enabled: cfg.maintenance.enabled,
         message: cfg.maintenance.message,
+      },
+      // Whether streak badges currently carry coin rewards. Exposed so the app
+      // can present a badge as an achievement rather than advertising a coin
+      // amount it will not receive. Per-badge truth is on the badge itself
+      // (`payoutEligible`); this is the global state for copy and layout.
+      streak: {
+        badgeCoinsEnabled: cfg.streak?.badgeCoinsEnabled ?? false,
+      },
+      // Build-level step-sync gate. Exposed so the admin panel can read the
+      // current state, and so the app can show the update prompt before its
+      // first sync is rejected rather than after. Nothing here is sensitive —
+      // a blocked client is told exactly this in the 403 anyway.
+      stepSync: {
+        enabled: cfg.stepSync?.enabled ?? false,
+        blockedVersions: cfg.stepSync?.blockedVersions ?? [],
+        minVersion: cfg.stepSync?.minVersion ?? '',
+        blockUnknownVersion: cfg.stepSync?.blockUnknownVersion ?? false,
+        message: cfg.stepSync?.message ?? '',
       },
       support: {
         email: cfg.support.email,
@@ -767,53 +786,25 @@ const checkVersion = async (req, res, next) => {
     const cfg = await getOrCreateConfig();
     const forceUpdateCfg = cfg.forceUpdate;
 
-    // If the feature is disabled, always return no update
-    if (!forceUpdateCfg || !forceUpdateCfg.enabled) {
-      return success(res, "Version check passed", {
-        updateRequired: false,
-        updateType: "none",
-      });
-    }
+    // The decision lives in utils/versionGate so it can be unit-tested, and so
+    // there is one version-comparison implementation rather than two that can
+    // drift. The local copy this replaced parsed with a bare Number(), which
+    // yields NaN on any non-numeric component — and every NaN comparison is
+    // false, so an unparseable version fell through to "no update" by accident
+    // rather than by decision. It also had no guard against a minVersion typo
+    // hard-blocking users who were already on the newest build.
+    const verdict = resolveUpdateRequirement(
+      forceUpdateCfg,
+      platform,
+      version,
+    );
 
-    const platformCfg = forceUpdateCfg[platform.toLowerCase()];
-    const minVersion = platformCfg?.minVersion || "0.0.1";
-    const latestVersion = platformCfg?.latestVersion || "0.0.1";
-    const updateUrl = platformCfg?.updateUrl || "";
-
-    const clientVersion = version.trim();
-
-    // Semver comparison helper
-    const compareVersions = (a, b) => {
-      const pa = a.split(".").map(Number);
-      const pb = b.split(".").map(Number);
-      for (let i = 0; i < Math.max(pa.length, pb.length); i++) {
-        const na = pa[i] || 0;
-        const nb = pb[i] || 0;
-        if (na < nb) return -1;
-        if (na > nb) return 1;
-      }
-      return 0;
-    };
-
-    let updateType = "none";
-    let updateRequired = false;
-
-    if (compareVersions(clientVersion, minVersion) < 0) {
-      // Client is below the hard minimum → force update (mandatory)
-      updateType = "force";
-      updateRequired = true;
-    } else if (compareVersions(clientVersion, latestVersion) < 0) {
-      // Client is above minimum but below latest → soft update (optional)
-      updateType = "soft";
-      updateRequired = true;
+    if (!verdict.updateRequired) {
+      return success(res, "Version check passed", verdict);
     }
 
     return success(res, "Version check completed", {
-      updateRequired,
-      updateType,
-      latestVersion,
-      minVersion,
-      updateUrl,
+      ...verdict,
       title: forceUpdateCfg.title || "Update Available",
       message:
         forceUpdateCfg.message ||

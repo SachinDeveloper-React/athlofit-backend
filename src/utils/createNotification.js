@@ -43,8 +43,13 @@ async function createNotification(userId, { type, title, message, data = {}, pus
     await Notification.create({ user: userId, type, title, message, data });
 
     // 4. Fire FCM push (non-blocking)
+    //
+    // `type` is forwarded so the per-category preference can be honoured. The
+    // record above is written regardless: muting a category means "do not
+    // interrupt me", not "hide this from me" — the in-app list is a surface the
+    // user opens deliberately, and it should still be complete when they do.
     if (push) {
-      sendPushToUser(userId, { title, body: message, data });
+      sendPushToUser(userId, { title, body: message, data, type });
     }
   } catch (err) {
     console.warn('[createNotification] failed:', err.message);

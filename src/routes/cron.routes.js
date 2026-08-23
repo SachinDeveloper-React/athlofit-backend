@@ -4,6 +4,7 @@ const router = express.Router();
 const { evaluateStreaks, grantWeeklyLives, applyPendingGoals } = require('../controllers/cron.controller');
 const { distributePassiveCoins, eodAutoClaimStepGoal } = require('../crons/passiveCoinDistribution');
 const { sendInactivityNudges } = require('../crons/inactivityNudge');
+const { processAccountDeletions } = require('../crons/accountDeletion');
 
 // Authorization is handled inside the controller via CRON_SECRET.
 // Support both GET (for curl/crontab) and POST.
@@ -54,6 +55,25 @@ router.all('/eod-auto-claim-step-goal', async (req, res) => {
   try {
     const result = await eodAutoClaimStepGoal();
     return res.json({ success: true, message: 'EOD step goal auto-claim complete', data: result });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// Account deletion — purges accounts whose 30-day grace period has expired.
+// Also registered as an in-process job (services/scheduler.js); this endpoint
+// exists so it can be triggered manually and so an external crontab can act as
+// a backstop if the app process is restarted around the scheduled time.
+router.all('/process-account-deletions', async (req, res) => {
+  const secret = process.env.CRON_SECRET;
+  const auth = req.headers.authorization || '';
+  const keyParam = req.query?.key;
+  if (!secret || (auth !== `Bearer ${secret}` && keyParam !== secret)) {
+    return res.status(401).json({ success: false, message: 'Unauthorized' });
+  }
+  try {
+    const result = await processAccountDeletions();
+    return res.json({ success: true, message: 'Account deletions processed', data: result });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
   }

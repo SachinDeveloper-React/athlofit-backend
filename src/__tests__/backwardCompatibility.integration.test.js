@@ -270,6 +270,9 @@ describe('Property 5: Existing Source Preservation — hydration, streak, and re
               migrateOldBadges: jest.fn(),
               isBadgeUnlocked: jest.fn().mockReturnValue(false),
               unlockBadge: jest.fn(),
+              isBadgeClaimed: jest.fn().mockReturnValue(false),
+              isBadgePayoutEligible: jest.fn().mockReturnValue(true),
+              markBadgeClaimed: jest.fn(),
               save: jest.fn().mockResolvedValue(true),
             };
 
@@ -324,6 +327,9 @@ describe('Property 5: Existing Source Preservation — hydration, streak, and re
         migrateOldBadges: jest.fn(),
         isBadgeUnlocked: jest.fn().mockReturnValue(false),
         unlockBadge: jest.fn(),
+        isBadgeClaimed: jest.fn().mockReturnValue(false),
+        isBadgePayoutEligible: jest.fn().mockReturnValue(true),
+        markBadgeClaimed: jest.fn(),
         save: jest.fn().mockResolvedValue(true),
       };
 
@@ -391,6 +397,9 @@ describe('Property 5: Existing Source Preservation — hydration, streak, and re
               migrateOldBadges: jest.fn(),
               isBadgeUnlocked: jest.fn().mockReturnValue(false), // not yet claimed
               unlockBadge: jest.fn(),
+              isBadgeClaimed: jest.fn().mockReturnValue(false),
+              isBadgePayoutEligible: jest.fn().mockReturnValue(true),
+              markBadgeClaimed: jest.fn(),
               save: jest.fn().mockResolvedValue(true),
             };
 
@@ -415,12 +424,20 @@ describe('Property 5: Existing Source Preservation — hydration, streak, and re
             const responseBody = res.json.mock.calls[0][0];
             expect(responseBody.success).toBe(true);
 
-            // The reward amount is badge_coin_reward from BadgeDefinition, not from coin_config
-            const expectedBalance = 100 + Math.min(badge_coin_reward, 250); // capped at maxDailyRewards
+            // The reward amount is badge_coin_reward from BadgeDefinition, not from coin_config.
+            //
+            // Paid in FULL: the daily cap deliberately no longer applies to
+            // milestone badges. It exists to bound farmable earnings, and a
+            // badge is once per lifetime — clamping it meant a 10,000-coin
+            // reward paid out 250 and the badge was consumed anyway, silently
+            // destroying the rest.
+            const expectedBalance = 100 + badge_coin_reward;
             expect(responseBody.data.newBalance).toBe(expectedBalance);
 
-            // unlockBadge was called (streak logic path preserved)
-            expect(mockGam.unlockBadge).toHaveBeenCalledWith(badgeKey);
+            // The badge is marked PAID (not merely unlocked) — the two are
+            // separate states now, because awardBadges sets `unlocked` on its
+            // own during health sync and claim eligibility must not key off it.
+            expect(mockGam.markBadgeClaimed).toHaveBeenCalledWith(badgeKey);
           }
         ),
         { numRuns: 30 }
@@ -455,6 +472,9 @@ describe('Property 5: Existing Source Preservation — hydration, streak, and re
         migrateOldBadges: jest.fn(),
         isBadgeUnlocked: jest.fn().mockReturnValue(false),
         unlockBadge: jest.fn(),
+        isBadgeClaimed: jest.fn().mockReturnValue(false),
+        isBadgePayoutEligible: jest.fn().mockReturnValue(true),
+        markBadgeClaimed: jest.fn(),
         save: jest.fn().mockResolvedValue(true),
       };
 

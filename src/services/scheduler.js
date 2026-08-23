@@ -7,6 +7,7 @@ const cron = require('node-cron');
 const { detectUninstalledUsers } = require('./uninstallDetection.service');
 const { cleanupInactiveSessions } = require('./inactivityCleanup.service');
 const { sendInactivityNudges } = require('../crons/inactivityNudge');
+const { processAccountDeletions } = require('../crons/accountDeletion');
 
 function startScheduler() {
   // ─── Uninstall Detection ────────────────────────────────────────────────────
@@ -46,10 +47,34 @@ function startScheduler() {
     }
   }, { timezone: 'Asia/Kolkata' });
 
+  // ─── Account deletion execution ────────────────────────────────────────────
+  // Runs daily at 4:00 AM IST — purges accounts whose 30-day grace period has
+  // expired. Scheduled here rather than left to the external crontab because
+  // this one is a legal obligation (Play Store data-deletion policy, DPDP Act):
+  // it has to run whether or not someone remembers to add a crontab line.
+  //
+  // 4 AM sits after the 3 AM session cleanup and well clear of the midnight
+  // step/streak jobs, so a large purge batch cannot contend with them.
+  cron.schedule('0 4 * * *', async () => {
+    console.log('[Scheduler] Running account deletion job...');
+    try {
+      const result = await processAccountDeletions();
+      console.log('[Scheduler] Account deletion complete:', {
+        processed: result.processed,
+        purged: result.purged,
+        blocked: result.blocked,
+        failed: result.failed,
+      });
+    } catch (err) {
+      console.error('[Scheduler] Account deletion failed:', err.message);
+    }
+  }, { timezone: 'Asia/Kolkata' });
+
   console.log('[Scheduler] Cron jobs registered:');
   console.log('  • Uninstall detection — every 6 hours');
   console.log('  • Inactivity cleanup  — daily at 3:00 AM');
   console.log('  • Inactivity nudge    — daily at 8:00 PM IST');
+  console.log('  • Account deletion    — daily at 4:00 AM IST');
 }
 
 module.exports = { startScheduler };

@@ -27,6 +27,13 @@ const {
   getUserOrders,
   getUserCoinLedger,
   getDashboardStats,
+  setStepsTracking,
+  getAppVersionStats,
+  getUserDevice,
+  getDeletionRequests,
+  runDeletionJob,
+  getUserSyncLogs,
+  setSyncDebug,
 } = require('../controllers/admin.controller');
 
 const {
@@ -62,6 +69,15 @@ router.use(protect, adminOnly);
 // ── Dashboard ─────────────────────────────────────────────────────────────────
 router.get('/dashboard/stats', getDashboardStats);
 
+// GET /admin/stats/app-versions?days=30 — install-base breakdown by app build.
+router.get('/stats/app-versions', getAppVersionStats);
+
+// ── Account deletion queue ───────────────────────────────────────────────────
+// GET  /admin/deletions?status=pending|in_progress|blocked — open requests.
+// POST /admin/deletions/run — run the purge job now instead of waiting for 4 AM.
+router.get('/deletions', getDeletionRequests);
+router.post('/deletions/run', runDeletionJob);
+
 // ── Users ─────────────────────────────────────────────────────────────────────
 router.get('/users', getUsers);
 router.get('/users/:id', getUserById);
@@ -90,6 +106,36 @@ router.post('/users/:id/ban',
   body('reason').isString().trim().notEmpty().withMessage('A ban reason is required').isLength({ max: 300 }),
   validate, banUser);
 router.post('/users/:id/unban', unbanUser);
+
+// ── Per-user step-tracking kill switch ───────────────────────────────────────
+// POST /admin/users/:id/steps-tracking  { enabled: boolean, reason?: string }
+// Pauses/resumes step ingestion and step-derived coins for one user without
+// touching the rest of their account. See setStepsTracking for why this is
+// separate from ban.
+router.post(
+  '/users/:id/steps-tracking',
+  param('id').isMongoId(),
+  body('enabled').isBoolean().withMessage('enabled must be a boolean'),
+  body('reason').optional().isString().isLength({ max: 300 }),
+  validate,
+  setStepsTracking,
+);
+
+// GET /admin/users/:id/device — build/device trail + per-day sync stamps.
+router.get('/users/:id/device', param('id').isMongoId(), validate, getUserDevice);
+
+// ── Raw sync trail ───────────────────────────────────────────────────────────
+// GET  /admin/users/:id/sync-logs  — what the device sent vs what was kept.
+// POST /admin/users/:id/sync-debug — { enabled, hours? } verbose tracing.
+router.get('/users/:id/sync-logs', param('id').isMongoId(), validate, getUserSyncLogs);
+router.post(
+  '/users/:id/sync-debug',
+  param('id').isMongoId(),
+  body('enabled').isBoolean().withMessage('enabled must be a boolean'),
+  body('hours').optional().isInt({ min: 1, max: 168 }),
+  validate,
+  setSyncDebug,
+);
 router.get('/users/:id/sessions', getUserSessions);
 router.delete('/users/:id/sessions/:sessionId', revokeUserSession);
 router.post('/users/:id/sessions/revoke-all', revokeAllUserSessions);

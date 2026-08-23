@@ -8,15 +8,53 @@
 
 const { validateSteps } = require('../utils/stepValidation');
 
-const base = { bonusSteps: 0, lastStepIncreaseAt: null, dailyGoal: 10000, timezone: 'Asia/Kolkata' };
+const base = {
+  bonusSteps: 0,
+  lastStepIncreaseAt: null,
+  dailyGoal: 10000,
+  timezone: 'Asia/Kolkata',
+};
 
-/** A Date `mins` minutes in the past. */
-const minsAgo = (mins) => new Date(Date.now() - mins * 60_000);
+// ─── Frozen clock ────────────────────────────────────────────────────────────
+//
+// validateSteps reads Date.now() itself, and these tests build their inputs
+// from Date.now() too. With a live clock the two readings differ by however
+// many milliseconds passed in between, which is enough to move an assertion
+// that sits exactly on a ceiling:
+//
+//   minsAgo(1) then windowMinutes = 1 + ε
+//   → Math.ceil((1 + ε) * 220) = 221, not 220
+//   → the expected 1,220 becomes 1,221
+//
+// That made the suite pass or fail depending on whether both reads landed in
+// the same millisecond — a real intermittent failure, not a code defect.
+//
+// Freezing also removes a second, quieter dependency: the day-bound ceiling and
+// the severity split are computed from how much of the local day has elapsed,
+// so results shifted with the wall-clock time the suite happened to run at.
+// Midday IST is chosen because it is far from both midnight boundaries in the
+// timezone these fixtures use.
+const FROZEN_NOW = new Date('2026-08-23T06:30:00.000Z'); // 12:00 Asia/Kolkata
+
+beforeAll(() => {
+  jest.useFakeTimers({ now: FROZEN_NOW });
+});
+
+afterAll(() => {
+  jest.useRealTimers();
+});
+
+/** A Date `mins` minutes in the past, relative to the frozen clock. */
+const minsAgo = mins => new Date(Date.now() - mins * 60_000);
 
 describe('validateSteps — no-decrease rule', () => {
   it('keeps the stored value when a device reports fewer steps', () => {
     // Normal multi-device case: phone B is behind phone A. Not a correction.
-    const result = validateSteps({ ...base, incomingSteps: 3000, existingSteps: 8000 });
+    const result = validateSteps({
+      ...base,
+      incomingSteps: 3000,
+      existingSteps: 8000,
+    });
     expect(result.clampedSteps).toBe(8000);
     expect(result.corrected).toBe(false);
   });
@@ -35,7 +73,11 @@ describe('validateSteps — no-decrease rule', () => {
 
   it('leaves a decrease inside the tolerance alone', () => {
     // Source jitter, not a correction — no need to involve the correction path.
-    const result = validateSteps({ ...base, incomingSteps: 7050, existingSteps: 7097 });
+    const result = validateSteps({
+      ...base,
+      incomingSteps: 7050,
+      existingSteps: 7097,
+    });
     expect(result.clampedSteps).toBe(7050);
     expect(result.corrected).toBe(false);
   });
@@ -84,9 +126,18 @@ describe('validateSteps — hard limits', () => {
   });
 
   it('treats missing or negative input as zero', () => {
-    expect(validateSteps({ ...base, incomingSteps: undefined, existingSteps: 500 }).clampedSteps).toBe(0);
-    expect(validateSteps({ ...base, incomingSteps: null, existingSteps: 500 }).clampedSteps).toBe(0);
-    expect(validateSteps({ ...base, incomingSteps: -50, existingSteps: 500 }).clampedSteps).toBe(0);
+    expect(
+      validateSteps({ ...base, incomingSteps: undefined, existingSteps: 500 })
+        .clampedSteps,
+    ).toBe(0);
+    expect(
+      validateSteps({ ...base, incomingSteps: null, existingSteps: 500 })
+        .clampedSteps,
+    ).toBe(0);
+    expect(
+      validateSteps({ ...base, incomingSteps: -50, existingSteps: 500 })
+        .clampedSteps,
+    ).toBe(0);
   });
 
   it('clamps an implausible jump to what could physically have been walked', () => {
@@ -159,7 +210,7 @@ describe('validateSteps — the 5,000-step ratchet', () => {
     // whole exploit.
     const spanMinutes = 10;
 
-    const runCadence = (syncCount) => {
+    const runCadence = syncCount => {
       let stored = 0;
       const gap = spanMinutes / syncCount;
       for (let i = 0; i < syncCount; i++) {
@@ -173,7 +224,7 @@ describe('validateSteps — the 5,000-step ratchet', () => {
       return stored;
     };
 
-    const few = runCadence(2);   // every 5 minutes
+    const few = runCadence(2); // every 5 minutes
     const many = runCadence(60); // every 10 seconds
 
     // Both bounded by the same physical rate over the same span, so they land in
@@ -450,16 +501,19 @@ describe('validateSteps — severity separates routine clamping from cheating', 
       [8_000, 5_000, 'smartwatch flushes a 3,000-step backlog'],
       [12_000, 2_000, 'app reopened after the OS killed it'],
       [20_000, 3_000, 'a full day of walking arrives in one read'],
-    ])('%i steps over a stored %i → clamped, not implausible (%s)', (incoming, existing) => {
-      jest.useFakeTimers().setSystemTime(new Date('2026-08-17T18:00:00Z')); // 18h elapsed
-      try {
-        const result = check(incoming, existing);
-        expect(result.flagged).toBe(true);
-        expect(result.severity).toBe('clamped');
-      } finally {
-        jest.useRealTimers();
-      }
-    });
+    ])(
+      '%i steps over a stored %i → clamped, not implausible (%s)',
+      (incoming, existing) => {
+        jest.useFakeTimers().setSystemTime(new Date('2026-08-17T18:00:00Z')); // 18h elapsed
+        try {
+          const result = check(incoming, existing);
+          expect(result.flagged).toBe(true);
+          expect(result.severity).toBe('clamped');
+        } finally {
+          jest.useRealTimers();
+        }
+      },
+    );
 
     it('grades an unclamped submission as none', () => {
       const result = check(5_000, 5_000);
@@ -469,7 +523,11 @@ describe('validateSteps — severity separates routine clamping from cheating', 
 
     it('grades a payload with no steps at all as none', () => {
       // A hydration-only sync. Must never look like a cheat.
-      const result = validateSteps({ ...base, incomingSteps: undefined, existingSteps: 5_000 });
+      const result = validateSteps({
+        ...base,
+        incomingSteps: undefined,
+        existingSteps: 5_000,
+      });
       expect(result.severity).toBe('none');
     });
   });
@@ -549,7 +607,10 @@ describe('validateSteps — severity separates routine clamping from cheating', 
           timezone: 'UTC',
         });
         seen.push(r.severity);
-        if (r.clampedSteps > existing) { existing = r.clampedSteps; last = new Date(); }
+        if (r.clampedSteps > existing) {
+          existing = r.clampedSteps;
+          last = new Date();
+        }
       }
       return seen;
     };

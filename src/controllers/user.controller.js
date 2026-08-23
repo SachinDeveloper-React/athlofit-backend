@@ -8,6 +8,12 @@ const { success, error } = require("../utils/response");
 const { todayISO, daysBetween } = require("../utils/date");
 const { uploadImage } = require("../utils/uploadImage");
 const { createNotification } = require("../utils/createNotification");
+const { exportUserData } = require("../utils/exportUserData");
+const { sendDataExportEmail } = require("../utils/otp");
+const {
+  readPrefs,
+  buildPrefUpdate,
+} = require("../utils/notificationPrefs");
 
 // ─── GET /user/profile ────────────────────────────────────────────────────────
 const getProfile = async (req, res, next) => {
@@ -425,6 +431,142 @@ const updateFcmToken = async (req, res, next) => {
   }
 };
 
+// ─── GET /user/notification-preferences ───────────────────────────────────────
+const getNotificationPreferences = async (req, res, next) => {
+  try {
+    return success(res, "Notification preferences fetched", readPrefs(req.user));
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ─── PATCH /user/notification-preferences ─────────────────────────────────────
+// Body: any subset of { goal, hydration, streak, challenge, coin, product, heart }
+// plus an optional top-level `masterEnabled`.
+const updateNotificationPreferences = async (req, res, next) => {
+  try {
+    const { masterEnabled, ...categories } = req.body || {};
+
+    // Only known keys with boolean values survive; anything else is reported
+    // back rather than silently dropped, so a client sending a category that no
+    // longer exists finds out instead of believing it was saved.
+    const { set, rejected } = buildPrefUpdate(categories);
+
+    if (masterEnabled !== undefined) {
+      if (typeof masterEnabled !== "boolean") {
+        return error(res, "masterEnabled must be a boolean", 400);
+      }
+      set.notificationsEnabled = masterEnabled;
+    }
+
+    if (Object.keys(set).length === 0) {
+      return error(
+        res,
+        rejected.length
+          ? `No valid preferences supplied. Unknown or non-boolean: ${rejected.join(", ")}`
+          : "No preferences supplied",
+        400,
+      );
+    }
+
+    const user = await User.findByIdAndUpdate(
+      req.user._id,
+      { $set: set },
+      { new: true },
+    );
+
+    return success(res, "Notification preferences updated", {
+      ...readPrefs(user),
+      ...(rejected.length ? { ignored: rejected } : {}),
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ─── GET /user/export-data ────────────────────────────────────────────────────
+// Returns everything the platform holds about the caller, as a downloadable
+// JSON file. Required by the Play Store data policy and India's DPDP Act, and
+// the natural counterpart to the deletion flow — the same data map, read
+// instead of erased.
+//
+// Always scoped to req.user._id and never to a route param: an export endpoint
+// that can be pointed at another id is a full account-data leak.
+const exportMyData = async (req, res, next) => {
+  try {
+    const payload = await exportUserData(req.user._id);
+    if (!payload) return error(res, "User not found", 404);
+
+    const stamp = new Date().toISOString().slice(0, 10);
+
+    // Served as an attachment rather than a plain JSON body. The response can
+    // be several MB for a long-standing account, and a file is what the user
+    // asked for — something they can keep, open, or hand to someone else.
+    res.setHeader("Content-Type", "application/json; charset=utf-8");
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="athlofit-data-${stamp}.json"`,
+    );
+    // Not cacheable anywhere: this is a complete dump of one person's data and
+    // must not sit in a proxy or CDN.
+    res.setHeader("Cache-Control", "no-store, private");
+
+    // Written directly rather than through success(), because the standard
+    // envelope would nest the whole export under `data` and make the saved file
+    // awkward to read. Pretty-printed for the same reason — a person opens this.
+    return res.status(200).send(JSON.stringify(payload, null, 2));
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ─── POST /user/export-data/email ─────────────────────────────────────────────
+// Same export, emailed to the account's registered address as an attachment.
+// This is the path the mobile app uses: the app has no filesystem library, so
+// a streamed file download it cannot save is not a usable feature.
+const emailMyData = async (req, res, next) => {
+  try {
+    // Verified addresses only. The export is a complete dump of someone's
+    // personal data; sending it to an address nobody has proven control of
+    // turns this endpoint into a way to exfiltrate an account. A user who
+    // cannot verify their email can still use GET /user/export-data.
+    if (!req.user.emailVerified) {
+      return error(
+        res,
+        "Please verify your email address before requesting a data export.",
+        403,
+      );
+    }
+
+    const payload = await exportUserData(req.user._id);
+    if (!payload) return error(res, "User not found", 404);
+
+    const stamp = new Date().toISOString().slice(0, 10);
+    const json = JSON.stringify(payload, null, 2);
+
+    await sendDataExportEmail(
+      req.user.email,
+      req.user.name,
+      json,
+      `athlofit-data-${stamp}.json`,
+    );
+
+    // The address is echoed back partially masked so the user can confirm where
+    // it went without the response itself becoming a way to read the full
+    // address off an account someone has only momentary access to.
+    const [local, domain] = String(req.user.email).split("@");
+    const masked = `${local.slice(0, 2)}${"*".repeat(Math.max(1, local.length - 2))}@${domain}`;
+
+    return success(res, "Data export sent to your email", {
+      sentTo: masked,
+      sizeBytes: Buffer.byteLength(json, "utf8"),
+      counts: payload.counts,
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
 // ─── POST /user/request-deletion ──────────────────────────────────────────────
 // User requests account deletion. Sets status to 'pending' and schedules deletion
 // for 30 days from now (grace period for cancellation).
@@ -533,6 +675,7 @@ const getDeletionStatus = async (req, res, next) => {
         reason: null,
         cancelledAt: null,
         completedAt: null,
+        blockedReason: null,
       });
     }
 
@@ -543,6 +686,11 @@ const getDeletionStatus = async (req, res, next) => {
       reason: user.deletionRequest.reason || null,
       cancelledAt: user.deletionRequest.cancelledAt || null,
       completedAt: user.deletionRequest.completedAt || null,
+      // Set when the scheduled date has passed but the purge could not run —
+      // currently an undelivered order, whose shipping address the purge would
+      // redact. Surfaced so the user sees why their deletion is taking longer
+      // than the 30 days they were promised, instead of assuming it was ignored.
+      blockedReason: user.deletionRequest.blockedReason || null,
     });
   } catch (err) {
     next(err);
@@ -607,6 +755,10 @@ module.exports = {
   deleteAddress,
   uploadAvatar,
   updateFcmToken,
+  getNotificationPreferences,
+  updateNotificationPreferences,
+  exportMyData,
+  emailMyData,
   requestAccountDeletion,
   cancelAccountDeletion,
   getDeletionStatus,

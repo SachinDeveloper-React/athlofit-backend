@@ -49,6 +49,12 @@ async function sendInactivityNudges() {
   const eligibleUsers = await User.find({
     fcmToken: { $ne: null },
     notificationsEnabled: true,
+    // These go out as COIN notifications, so someone who has muted that
+    // category has opted out of exactly this. Filtered in the query rather than
+    // left to sendPushToUser so the job does not spend a DB round-trip per user
+    // building a notification that will be dropped at the last step.
+    // $ne:false, not true — users predating the field have no value at all.
+    'notificationPrefs.coin': { $ne: false },
     lastActiveAt: { $lt: twentyFourHoursAgo },
   })
     .select('_id lastActiveAt')

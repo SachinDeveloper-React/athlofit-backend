@@ -80,9 +80,10 @@ const foodSchema = new mongoose.Schema(
 
 // Full-text search index for name and description
 foodSchema.index({ name: 'text', description: 'text' });
-// Compound index for the most common filter combinations
-foodSchema.index({ dietType: 1, category: 1, isActive: 1 });
+// Individual indexes for array fields — MongoDB does NOT allow a compound index
+// on two array fields ("parallel arrays"). So dietType + category must be separate.
+foodSchema.index({ dietType: 1, isActive: 1 });
 foodSchema.index({ category: 1, isActive: 1 });
-foodSchema.index({ goals: 1, dietType: 1, isActive: 1 });
+foodSchema.index({ goals: 1, isActive: 1 });
 
 module.exports = mongoose.model('Food', foodSchema);

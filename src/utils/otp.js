@@ -69,4 +69,41 @@ const sendOtpEmail = async (to, otp, flow) => {
   return abc;
 };
 
-module.exports = { generateOtp, getOtpExpiry, sendOtpEmail };
+// ─── Send the data export as an email attachment ─────────────────────────────
+//
+// Mobile is why this exists. GET /user/export-data streams a JSON file, which
+// is fine from a browser or curl but awkward inside a React Native app with no
+// filesystem library — the endpoint would be present and unreachable, which is
+// not a delivered feature. Email is also what every large platform does for a
+// data export, and it lands somewhere the user already controls.
+//
+// The caller is responsible for checking that the address is VERIFIED before
+// calling this. Sending a complete dump of someone's personal data to an
+// unverified address would turn the export into a way to exfiltrate an account.
+const sendDataExportEmail = async (to, name, json, filename) => {
+  const html = `
+    <div style="font-family:sans-serif;max-width:480px;margin:auto;padding:32px;border-radius:12px;border:1px solid #eee">
+      <h1 style="color:#1a1a1a;font-size:24px">Athlofit 🏃</h1>
+      <p>Hi ${name || 'there'},</p>
+      <p>Your data export is attached as a JSON file. It contains everything we
+         hold about your account — your profile, activity history, coins, orders
+         and support messages.</p>
+      <p style="color:#999;font-size:12px;margin-top:24px">
+         This file contains personal information. Keep it somewhere safe and do
+         not forward it. If you did not request this export, please contact
+         support immediately — someone may have access to your account.</p>
+    </div>`;
+
+  const info = await transporter.sendMail({
+    from: process.env.EMAIL_FROM || '"Athlofit" <noreply@athlofit.com>',
+    to,
+    subject: 'Athlofit – Your Data Export',
+    html,
+    attachments: [{ filename, content: json, contentType: 'application/json' }],
+  });
+
+  console.log('[SMTP] Data export sent to:', to, '| MessageId:', info.messageId);
+  return info;
+};
+
+module.exports = { generateOtp, getOtpExpiry, sendOtpEmail, sendDataExportEmail };

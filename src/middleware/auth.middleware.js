@@ -2,6 +2,7 @@
 const { verifyAccessToken } = require('../utils/jwt');
 const User = require('../models/User.model');
 const { error } = require('../utils/response');
+const { captureDeviceContext } = require('./deviceContext.middleware');
 
 const protect = async (req, res, next) => {
   try {
@@ -39,6 +40,12 @@ const protect = async (req, res, next) => {
     if (!user.lastActiveAt || Date.now() - user.lastActiveAt.getTime() > FIVE_MINUTES) {
       User.updateOne({ _id: user._id }, { $set: { lastActiveAt: new Date() } }).catch(() => {});
     }
+
+    // Record which app build / device this request came from. Sits here rather
+    // than in its own app-level middleware so it runs for every authenticated
+    // route with req.user already resolved — including the /health/sync calls
+    // the Android foreground service makes without going through the JS layer.
+    captureDeviceContext(req, user);
 
     req.user = user;
     next();

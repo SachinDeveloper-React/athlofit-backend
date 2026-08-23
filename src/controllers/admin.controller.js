@@ -12,6 +12,11 @@ const CoinTransaction = require('../models/CoinTransaction.model');
 const RefreshToken = require('../models/RefreshToken.model');
 const AdminActionLog = require('../models/AdminActionLog.model');
 const { success, error } = require('../utils/response');
+const { createNotification } = require('../utils/createNotification');
+const { DEFAULT_REASON } = require('../utils/stepsTracking');
+const { purgeUserData } = require('../utils/purgeUserData');
+const { processAccountDeletions } = require('../crons/accountDeletion');
+const SyncLog = require('../models/SyncLog.model');
 
 const escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -56,7 +61,17 @@ function parseUserAgent(ua = '') {
 // Query: ?page=1&limit=20&search=&role=
 const getUsers = async (req, res, next) => {
   try {
-    const { page = 1, limit = 20, search, role } = req.query;
+    const {
+      page = 1,
+      limit = 20,
+      search,
+      role,
+      // Build / device filters — "who is still on the old version?"
+      appVersion,
+      platform,
+      // 'on' | 'off' — filter by the step-tracking kill switch.
+      stepsTracking,
+    } = req.query;
     const filter = {};
     if (role) filter.role = role;
     if (search) {
@@ -65,6 +80,23 @@ const getUsers = async (req, res, next) => {
         { name: { $regex: safe, $options: 'i' } },
         { email: { $regex: safe, $options: 'i' } },
       ];
+    }
+
+    if (appVersion) {
+      // 'unknown' selects users who have never sent a version header — i.e.
+      // still running a pre-telemetry build, or dormant since before it shipped.
+      filter['device.appVersion'] =
+        appVersion === 'unknown' ? null : String(appVersion).trim();
+    }
+    if (platform && ['android', 'ios'].includes(String(platform).toLowerCase())) {
+      filter['device.platform'] = String(platform).toLowerCase();
+    }
+    if (stepsTracking === 'off') {
+      filter['stepsTracking.enabled'] = false;
+    } else if (stepsTracking === 'on') {
+      // Users who predate the field have no sub-document at all, and they are
+      // enabled by schema default — $ne:false rather than true catches both.
+      filter['stepsTracking.enabled'] = { $ne: false };
     }
 
     const pageNum = Math.max(1, parseInt(page, 10));
@@ -135,11 +167,36 @@ const deleteUser = async (req, res, next) => {
     if (req.params.id === req.user._id.toString()) {
       return error(res, 'You cannot delete your own account', 400);
     }
-    const user = await User.findByIdAndDelete(req.params.id);
+    const user = await User.findById(req.params.id).select('_id email');
     if (!user) return error(res, 'User not found', 404);
-    // Clean up the user's gamification record (best-effort)
-    await Gamification.deleteOne({ user: user._id }).catch(() => {});
-    return success(res, 'User deleted', { id: req.params.id });
+
+    // Full purge, not just User + Gamification.
+    //
+    // This used to be `findByIdAndDelete` plus a Gamification cleanup, which
+    // left the user's health history, coin ledger, notifications, refresh
+    // tokens, meal logs, BMI records, referrals and challenge progress behind
+    // as orphans keyed to an id that no longer resolved — data that could not
+    // be found, could not be deleted, and still contained their information.
+    // It now runs exactly the same purge as the scheduled deletion job, so an
+    // admin delete and a user-requested delete leave the same state.
+    const result = await purgeUserData(user._id);
+
+    await logAdminAction(req, req.params.id, 'DELETE', req.body?.reason || '', {
+      deleted: result.deleted,
+      errors: result.errors,
+    });
+
+    if (result.errors.length > 0) {
+      // Reported rather than swallowed: a half-purged account needs a human to
+      // look at it, and returning 200 would hide that.
+      return error(
+        res,
+        `User partially deleted — ${result.errors.length} step(s) failed: ${result.errors.join('; ')}`,
+        500,
+      );
+    }
+
+    return success(res, 'User deleted', { id: req.params.id, deleted: result.deleted });
   } catch (err) {
     next(err);
   }
@@ -716,6 +773,364 @@ const getUserCoinLedger = async (req, res, next) => {
   }
 };
 
+// ─── POST /admin/users/:id/steps-tracking ─────────────────────────────────────
+// Body: { enabled: boolean, reason?: string }
+//
+// The per-user step kill switch. Deliberately NOT a ban: the account stays
+// fully usable — shop, hydration, meals, challenges, existing coin balance —
+// and only step ingestion and step-derived coins stop. Use it when a device is
+// a bad data source (broken sensor, third-party app writing inflated records,
+// an old build with a counting bug) rather than when a person is misbehaving.
+const setStepsTracking = async (req, res, next) => {
+  try {
+    const { enabled, reason } = req.body;
+    if (typeof enabled !== 'boolean') {
+      return error(res, 'enabled must be a boolean', 400);
+    }
+
+    const user = await User.findById(req.params.id);
+    if (!user) return error(res, 'User not found', 404);
+
+    const wasEnabled = user.stepsTracking?.enabled !== false;
+    if (wasEnabled === enabled) {
+      // Idempotent — repeating the current state is a no-op, not an error, so a
+      // retried admin request cannot produce a duplicate audit entry or a second
+      // notification to the user.
+      return success(res, `Step tracking already ${enabled ? 'enabled' : 'disabled'}`, {
+        id: user._id,
+        stepsTracking: user.stepsTracking,
+        changed: false,
+      });
+    }
+
+    const now = new Date();
+    const cleanReason = typeof reason === 'string' ? reason.trim().slice(0, 300) : '';
+
+    if (enabled) {
+      user.stepsTracking = {
+        enabled: true,
+        reason: null,
+        disabledAt: null,
+        disabledBy: null,
+        enabledAt: now,
+        enabledBy: req.user._id,
+      };
+    } else {
+      user.stepsTracking = {
+        enabled: false,
+        reason: cleanReason || DEFAULT_REASON,
+        disabledAt: now,
+        disabledBy: req.user._id,
+        enabledAt: user.stepsTracking?.enabledAt || null,
+        enabledBy: user.stepsTracking?.enabledBy || null,
+      };
+    }
+
+    await user.save();
+
+    await logAdminAction(
+      req,
+      user._id,
+      enabled ? 'STEPS_TRACKING_ON' : 'STEPS_TRACKING_OFF',
+      cleanReason,
+      {
+        // The build the device was last seen on. Recorded on the audit entry
+        // because "which version was this user running when we switched them
+        // off?" is the whole reason the switch gets used.
+        appVersion: user.device?.appVersion || null,
+        buildNumber: user.device?.buildNumber || null,
+        platform: user.device?.platform || null,
+        model: user.device?.model || null,
+      },
+    );
+
+    // Push so the device reacts now rather than at next app open. The client
+    // keys off data.type; the title/body are the user-visible fallback.
+    createNotification(user._id, {
+      type: 'SECURITY',
+      title: enabled ? 'Step tracking resumed' : 'Step tracking paused',
+      message: enabled
+        ? 'Your steps are being counted again. Open the app to resume tracking.'
+        : user.stepsTracking.reason,
+      data: {
+        type: 'STEPS_TRACKING_CHANGED',
+        stepsTrackingEnabled: enabled ? 'true' : 'false',
+        reason: user.stepsTracking.reason || '',
+        screen: 'StepsScreen',
+      },
+    }).catch(() => {});
+
+    return success(res, `Step tracking ${enabled ? 'enabled' : 'disabled'}`, {
+      id: user._id,
+      stepsTracking: user.stepsTracking,
+      changed: true,
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ─── GET /admin/stats/app-versions ────────────────────────────────────────────
+// Rollout visibility: how many users are on each build, and how many have never
+// reported one. Answers "has this user taken the update?" at population scale
+// instead of one user at a time.
+const getAppVersionStats = async (req, res, next) => {
+  try {
+    // A user who has not opened the app in months is not evidence about a
+    // rollout. Default to the last 30 active days; ?days=0 for all-time.
+    const days = Math.max(0, parseInt(req.query.days ?? '30', 10) || 0);
+    const activeSince = days > 0 ? new Date(Date.now() - days * 86400000) : null;
+    const match = activeSince ? { lastActiveAt: { $gte: activeSince } } : {};
+
+    const [byVersion, stepsOff, total] = await Promise.all([
+      User.aggregate([
+        { $match: match },
+        {
+          $group: {
+            _id: {
+              // Null-coalesced to 'unknown' so pre-telemetry builds are a
+              // visible bucket rather than silently missing from the totals.
+              appVersion: { $ifNull: ['$device.appVersion', 'unknown'] },
+              platform: { $ifNull: ['$device.platform', 'unknown'] },
+            },
+            users: { $sum: 1 },
+            lastSeenAt: { $max: '$device.lastSeenAt' },
+          },
+        },
+        { $sort: { users: -1 } },
+      ]),
+      User.countDocuments({ ...match, 'stepsTracking.enabled': false }),
+      User.countDocuments(match),
+    ]);
+
+    return success(res, 'App version stats fetched', {
+      windowDays: days || null,
+      totalUsers: total,
+      stepsTrackingDisabled: stepsOff,
+      versions: byVersion.map((v) => ({
+        appVersion: v._id.appVersion,
+        platform: v._id.platform,
+        users: v.users,
+        share: total ? parseFloat(((v.users / total) * 100).toFixed(2)) : 0,
+        lastSeenAt: v.lastSeenAt || null,
+      })),
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ─── GET /admin/users/:id/device ──────────────────────────────────────────────
+// Full device / build trail for one user, including the per-day build stamps on
+// their recent health rows. This is the view that answers "the steps this user
+// is reporting — which app version produced them?".
+const getUserDevice = async (req, res, next) => {
+  try {
+    const user = await User.findById(req.params.id).select(
+      'name email device deviceHistory stepsTracking platform lastActiveAt lastLoginAt',
+    );
+    if (!user) return error(res, 'User not found', 404);
+
+    const limit = Math.min(60, Math.max(1, parseInt(req.query.days ?? '14', 10) || 14));
+    const recentDays = await HealthActivity.find({ user: req.params.id })
+      .sort({ date: -1 })
+      .limit(limit)
+      .select('date steps bonusSteps lastSync syncVersions updatedAt');
+
+    return success(res, 'User device info fetched', {
+      user: { id: user._id, name: user.name, email: user.email },
+      device: user.device || null,
+      deviceHistory: user.deviceHistory || [],
+      stepsTracking: user.stepsTracking || { enabled: true },
+      lastActiveAt: user.lastActiveAt,
+      lastLoginAt: user.lastLoginAt,
+      recentDays: recentDays.map((d) => ({
+        date: d.date,
+        steps: d.steps,
+        bonusSteps: d.bonusSteps,
+        // null here means the day's data came from a build that predates
+        // version headers — the strongest signal that they have not updated.
+        lastSync: d.lastSync?.appVersion ? d.lastSync : null,
+        syncVersions: d.syncVersions || [],
+        updatedAt: d.updatedAt,
+      })),
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ─── GET /admin/deletions ─────────────────────────────────────────────────────
+// Every account with an open deletion request, so a request that the job could
+// not act on is visible instead of looking like it was silently skipped.
+// Query: ?status=pending|in_progress|blocked  (blocked = has a blockedReason)
+const getDeletionRequests = async (req, res, next) => {
+  try {
+    const { status } = req.query;
+
+    const filter = { 'deletionRequest.status': { $in: ['pending', 'in_progress'] } };
+    if (status === 'blocked') {
+      filter['deletionRequest.blockedReason'] = { $ne: null };
+    } else if (status === 'pending' || status === 'in_progress') {
+      filter['deletionRequest.status'] = status;
+    }
+
+    const users = await User.find(filter)
+      .select('name email role createdAt deletionRequest')
+      .sort({ 'deletionRequest.scheduledDeletionDate': 1 })
+      .limit(200)
+      .lean();
+
+    const now = Date.now();
+    return success(res, 'Deletion requests fetched', {
+      total: users.length,
+      requests: users.map((u) => {
+        const d = u.deletionRequest || {};
+        const scheduled = d.scheduledDeletionDate ? new Date(d.scheduledDeletionDate) : null;
+        return {
+          id: u._id,
+          name: u.name,
+          email: u.email,
+          role: u.role,
+          status: d.status,
+          reason: d.reason || null,
+          requestedAt: d.requestedAt || null,
+          scheduledDeletionDate: scheduled,
+          // Negative means the grace period has already expired — the job
+          // should have acted, so a negative value with no blockedReason is
+          // the signal that something is wrong.
+          daysUntilDeletion: scheduled
+            ? Math.ceil((scheduled.getTime() - now) / 86400000)
+            : null,
+          blockedReason: d.blockedReason || null,
+          isOverdue: scheduled ? scheduled.getTime() <= now : false,
+        };
+      }),
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ─── POST /admin/deletions/run ────────────────────────────────────────────────
+// Manually trigger the deletion job. Same code path as the scheduled run — used
+// to clear a backlog, or to complete a request that was blocked and has since
+// been unblocked, without waiting for 4 AM.
+const runDeletionJob = async (req, res, next) => {
+  try {
+    const result = await processAccountDeletions();
+    await logAdminAction(req, req.user._id, 'DELETE', 'Manually ran account deletion job', {
+      processed: result.processed,
+      purged: result.purged,
+      blocked: result.blocked,
+      failed: result.failed,
+    });
+    return success(res, 'Deletion job completed', result);
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ─── GET /admin/users/:id/sync-logs ───────────────────────────────────────────
+// What this user's device actually sent to /health/sync, next to what the
+// server kept. The first thing to look at when someone reports wrong steps —
+// before this existed there was no record of the incoming figure at all.
+// Query: ?limit=100&date=YYYY-MM-DD&reason=clamped
+const getUserSyncLogs = async (req, res, next) => {
+  try {
+    const limit = Math.min(500, Math.max(1, parseInt(req.query.limit ?? '100', 10) || 100));
+    const filter = { user: req.params.id };
+    if (req.query.date) filter.date = String(req.query.date);
+    if (req.query.reason) filter.logReason = String(req.query.reason);
+
+    const [logs, user] = await Promise.all([
+      SyncLog.find(filter).sort({ createdAt: -1 }).limit(limit).lean(),
+      User.findById(req.params.id).select('syncDebug device').lean(),
+    ]);
+
+    const tracing = user?.syncDebug?.enabled === true &&
+      (!user.syncDebug.expiresAt || new Date(user.syncDebug.expiresAt) > new Date());
+
+    return success(res, 'Sync logs fetched', {
+      // Surfaced so an empty result is not mistaken for "the device sent
+      // nothing". By default only anomalous syncs are stored; a quiet log with
+      // tracing OFF means nothing unusual happened, which is a different fact.
+      tracing,
+      tracingExpiresAt: user?.syncDebug?.expiresAt || null,
+      currentBuild: user?.device?.appVersion || null,
+      total: logs.length,
+      logs: logs.map((l) => ({
+        at: l.createdAt,
+        date: l.date,
+        incomingSteps: l.incomingSteps,
+        existingSteps: l.existingSteps,
+        clampedSteps: l.clampedSteps,
+        storedSteps: l.storedSteps,
+        // The number that matters: how much the server changed the submission.
+        adjustment: l.clampedSteps - l.incomingSteps,
+        delta: l.incomingSteps - l.existingSteps,
+        flagged: l.flagged,
+        severity: l.severity,
+        reason: l.reason,
+        corrected: l.corrected,
+        logReason: l.logReason,
+        appVersion: l.appVersion,
+        clientSource: l.clientSource,
+        timezone: l.timezone,
+      })),
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ─── POST /admin/users/:id/sync-debug ─────────────────────────────────────────
+// Body: { enabled: boolean, hours?: number }
+// Switch on verbose tracing so EVERY sync from this account is logged, not just
+// the anomalous ones. Always time-boxed — see the model comment.
+const setSyncDebug = async (req, res, next) => {
+  try {
+    const { enabled, hours } = req.body;
+    if (typeof enabled !== 'boolean') {
+      return error(res, 'enabled must be a boolean', 400);
+    }
+
+    const user = await User.findById(req.params.id);
+    if (!user) return error(res, 'User not found', 404);
+
+    if (enabled) {
+      // Default 24h, capped at a week — the TTL on SyncLog is 7 days, so
+      // tracing for longer than that only produces rows that expire before
+      // anyone reads the start of the trail.
+      const windowHours = Math.min(168, Math.max(1, parseInt(hours ?? 24, 10) || 24));
+      user.syncDebug = {
+        enabled: true,
+        enabledAt: new Date(),
+        enabledBy: req.user._id,
+        expiresAt: new Date(Date.now() + windowHours * 3600 * 1000),
+      };
+    } else {
+      user.syncDebug = { enabled: false, enabledAt: null, enabledBy: null, expiresAt: null };
+    }
+
+    await user.save();
+    await logAdminAction(
+      req,
+      user._id,
+      'ACCOUNT_EDIT',
+      `Sync tracing ${enabled ? 'enabled' : 'disabled'}`,
+      { syncDebug: user.syncDebug },
+    );
+
+    return success(res, `Sync tracing ${enabled ? 'enabled' : 'disabled'}`, {
+      id: user._id,
+      syncDebug: user.syncDebug,
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
 module.exports = {
   getUsers,
   getUserById,
@@ -737,4 +1152,11 @@ module.exports = {
   getUserOrders,
   getUserCoinLedger,
   getDashboardStats,
+  setStepsTracking,
+  getAppVersionStats,
+  getUserDevice,
+  getDeletionRequests,
+  runDeletionJob,
+  getUserSyncLogs,
+  setSyncDebug,
 };

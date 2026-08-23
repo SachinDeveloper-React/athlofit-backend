@@ -103,8 +103,19 @@ function validateSteps({
   allowCorrection = false,
 }) {
   // If no steps provided or negative, return 0
-  if (incomingSteps === undefined || incomingSteps === null || incomingSteps < 0) {
-    return { clampedSteps: 0, flagged: false, severity: 'none', reason: null, corrected: false, correctedFrom: null };
+  if (
+    incomingSteps === undefined ||
+    incomingSteps === null ||
+    incomingSteps < 0
+  ) {
+    return {
+      clampedSteps: 0,
+      flagged: false,
+      severity: 'none',
+      reason: null,
+      corrected: false,
+      correctedFrom: null,
+    };
   }
 
   let steps = Math.round(incomingSteps);
@@ -120,7 +131,10 @@ function validateSteps({
   // bound the value. Nothing here assigns to `steps`, which is what makes it
   // impossible for one rule to raise what another lowered.
   const ceilings = [
-    { limit: MAX_DAILY_STEPS, reason: `Exceeded daily cap (${steps} > ${MAX_DAILY_STEPS})` },
+    {
+      limit: MAX_DAILY_STEPS,
+      reason: `Exceeded daily cap (${steps} > ${MAX_DAILY_STEPS})`,
+    },
   ];
 
   // Exactly ONE of the two rate ceilings applies, because they are two ways of
@@ -154,15 +168,20 @@ function validateSteps({
 
     // Burst allowance for short windows, sustained rate for long ones — the same
     // split the previous two rate checks intended.
-    const maxDelta = windowMinutes < 60
-      ? Math.ceil(windowMinutes * MAX_STEPS_PER_MINUTE)
-      : Math.ceil((windowMinutes / 60) * MAX_STEPS_PER_HOUR);
+    const maxDelta =
+      windowMinutes < 60
+        ? Math.ceil(windowMinutes * MAX_STEPS_PER_MINUTE)
+        : Math.ceil((windowMinutes / 60) * MAX_STEPS_PER_HOUR);
 
     ceilings.push({
       limit: existingWalked + maxDelta,
       reason:
         `Rate too high: +${steps - existingWalked} steps in ` +
-        `${windowMinutes < 60 ? `${Math.round(windowMinutes)} min` : `${(windowMinutes / 60).toFixed(1)} hrs`} ` +
+        `${
+          windowMinutes < 60
+            ? `${Math.round(windowMinutes)} min`
+            : `${(windowMinutes / 60).toFixed(1)} hrs`
+        } ` +
         `(max ${maxDelta})`,
     });
   } else if (steps > 0) {
@@ -280,7 +299,14 @@ function validateSteps({
 
   steps = Math.max(0, steps);
 
-  return { clampedSteps: steps, flagged, severity, reason, corrected, correctedFrom };
+  return {
+    clampedSteps: steps,
+    flagged,
+    severity,
+    reason,
+    corrected,
+    correctedFrom,
+  };
 }
 
 module.exports = { validateSteps };

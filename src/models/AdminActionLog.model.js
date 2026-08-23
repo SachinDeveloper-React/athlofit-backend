@@ -19,6 +19,16 @@ const adminActionLogSchema = new mongoose.Schema(
         'BAN', 'UNBAN', 'ROLE_CHANGE', 'COIN_CREDIT', 'COIN_DEBIT',
         'STREAK_RESET', 'ACCOUNT_EDIT', 'SESSION_REVOKE', 'SESSION_REVOKE_ALL',
         'DELETE',
+        // Per-user step-tracking kill switch — distinct from BAN because the
+        // account stays fully usable, only the step pipeline is paused.
+        'STEPS_TRACKING_OFF', 'STEPS_TRACKING_ON',
+        // Admin crediting steps directly to a user. This was being logged from
+        // admin.controller for a long time while missing from this enum, so
+        // every grant threw on write and was swallowed by logAdminAction's
+        // catch — the one admin action that manufactures steps out of nothing
+        // was the one with no audit trail. See the drift test that now guards
+        // this list.
+        'BONUS_STEPS',
       ],
     },
     // Free-text reason / description for the action

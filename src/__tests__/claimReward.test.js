@@ -51,6 +51,9 @@ function buildGamDoc(overrides = {}) {
     migrateOldBadges: jest.fn(),
     isBadgeUnlocked: jest.fn(() => false),
     unlockBadge: jest.fn(),
+    isBadgeClaimed: jest.fn(() => false),
+    isBadgePayoutEligible: jest.fn(() => true),
+    markBadgeClaimed: jest.fn(),
     save: jest.fn().mockResolvedValue(undefined),
     ...overrides,
   };

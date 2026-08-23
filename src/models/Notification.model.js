@@ -1,5 +1,6 @@
 // src/models/Notification.model.js
 const mongoose = require("mongoose");
+const { ALL_TYPES } = require("../utils/notificationPrefs");
 
 const notificationSchema = new mongoose.Schema(
   {
@@ -11,16 +12,15 @@ const notificationSchema = new mongoose.Schema(
     },
     type: {
       type: String,
-      enum: [
-        "GOAL",
-        "HYDRATION",
-        "PRODUCT",
-        "SECURITY",
-        "HEART",
-        "CHALLENGE",
-        "COIN",
-        "SYSTEM",
-      ],
+      // Derived from the shared category list rather than written out here.
+      //
+      // This enum used to be a separate hand-maintained copy, and it drifted:
+      // STREAK, GENERAL and SUPPORT were in use across eight call sites while
+      // none were valid values. Mongoose rejected every such write,
+      // createNotification swallowed the error, and since the push is sent
+      // after the create, no push went out either — streak notifications, the
+      // account-ban notice and support replies were all silently dead.
+      enum: ALL_TYPES,
       required: true,
     },
     title: { type: String, required: true },

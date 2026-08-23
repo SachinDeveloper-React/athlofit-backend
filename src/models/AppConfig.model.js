@@ -183,8 +183,65 @@ const appConfigSchema = new mongoose.Schema(
       enabled: { type: Boolean, default: true },
     },
 
+    // ─── Build-level step-sync gate ──────────────────────────────────────────
+    //
+    // The per-user switch (User.stepsTracking) pauses one account. This pauses
+    // one BUILD, across everyone running it.
+    //
+    // That is the shape the real incident had: a released version with a step
+    // counting bug inflating totals on every device it was installed on.
+    // Switching users off one at a time is not a response to that, and shipping
+    // another release does not help either — a Play Store rollout is gradual
+    // and users update whenever they feel like it, so the bad build keeps
+    // submitting for weeks. This stops it server-side, immediately, with no
+    // release involved.
+    //
+    // Inert by default: `enabled` false and no versions listed, so nothing
+    // changes until someone deliberately blocks a build.
+    stepSync: {
+      enabled: { type: Boolean, default: false },
+      // Exact app versions barred from submitting steps, e.g. ['1.72'].
+      // Exact-match rather than a range because the usual case is one known-bad
+      // build with good builds on either side of it.
+      blockedVersions: { type: [String], default: [] },
+      // Everything BELOW this version is barred. Empty string disables the
+      // check. Use when a bug spans every build up to a fix, rather than one.
+      minVersion: { type: String, default: '' },
+      // Whether clients that send no version header at all are barred.
+      //
+      // Default false, and that default matters: every build released before
+      // version headers existed sends nothing, so turning this on blocks all of
+      // them. It is here for the case where the bad build is a pre-telemetry
+      // one and there is no other way to identify it — a deliberate, informed
+      // choice, never a default.
+      blockUnknownVersion: { type: Boolean, default: false },
+      // Shown to the user in place of their step count. Should tell them to
+      // update, since that is the only thing that will clear it.
+      message: {
+        type: String,
+        default:
+          'Step tracking is paused on this version of the app. Please update to the latest version to continue earning.',
+      },
+    },
+
     // ─── Streak protection settings (admin-controlled) ───────────────────────
     streak: {
+      // ── Whether reaching a streak milestone pays its coin reward ──────────
+      //
+      // Off by default, deliberately. Streak badges have never actually paid
+      // out (awardBadges marked them unlocked and claimReward read that same
+      // flag as "already claimed"), so switching payouts on at the same time as
+      // the fix would hand the entire existing user base a backlog worth up to
+      // 25,400 coins each.
+      //
+      // Turning this ON later does NOT open that backlog. Payout eligibility is
+      // stamped onto each badge AT UNLOCK TIME from this flag, so a badge
+      // earned while payouts were off stays unpayable forever — only milestones
+      // reached after the switch is flipped are worth coins. That is what makes
+      // enabling it a safe, forward-only decision rather than an instant
+      // liability.
+      badgeCoinsEnabled: { type: Boolean, default: false },
+
       // Freeze: earned every N consecutive streak days (milestone).
       freezeEarnEvery:  { type: Number, default: 7 },
       // Max freezes a user can store at any time.

@@ -5,6 +5,7 @@
 
 const admin = require('../config/firebase.admin');
 const User  = require('../models/User.model');
+const { isPushAllowed } = require('./notificationPrefs');
 
 /**
  * Send a push notification to a single user.
@@ -14,11 +15,21 @@ const User  = require('../models/User.model');
  * @param {string} opts.title
  * @param {string} opts.body
  * @param {Record<string,string>} [opts.data]   — forwarded to app for deep linking
+ * @param {string} [opts.type]                   — notification category, checked
+ *        against the user's per-category preferences. Omit only for pushes that
+ *        genuinely have no category.
  */
-async function sendPushToUser(userId, { title, body, data = {} }) {
+async function sendPushToUser(userId, { title, body, data = {}, type = null }) {
   try {
-    const user = await User.findById(userId).select('fcmToken notificationsEnabled');
-    if (!user?.fcmToken || !user.notificationsEnabled) return;
+    const user = await User.findById(userId)
+      .select('fcmToken notificationsEnabled notificationPrefs');
+    if (!user?.fcmToken) return;
+
+    // Master switch plus the per-category preference. `type` is optional so the
+    // few callers that send an untyped push still work — an unknown type is
+    // allowed through rather than blocked, so a newly added category is never
+    // silently undeliverable.
+    if (!isPushAllowed(user, type)) return;
 
     // Stringify all data values (FCM requirement)
     const stringData = Object.fromEntries(

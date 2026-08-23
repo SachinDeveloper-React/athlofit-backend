@@ -2,6 +2,7 @@
 const express = require("express");
 const router = express.Router();
 const multer = require("multer");
+const rateLimit = require("express-rate-limit");
 const {
   getProfile,
   updateProfile,
@@ -18,6 +19,10 @@ const {
   deleteAddress,
   uploadAvatar,
   updateFcmToken,
+  exportMyData,
+  emailMyData,
+  getNotificationPreferences,
+  updateNotificationPreferences,
   requestAccountDeletion,
   cancelAccountDeletion,
   getDeletionStatus,
@@ -92,6 +97,32 @@ router.get("/addresses", getAddresses);
 router.post("/addresses", addAddress);
 router.patch("/addresses/:addressId", updateAddress);
 router.delete("/addresses/:addressId", deleteAddress);
+
+// ─── Notification preferences ─────────────────────────────────────────────────
+// Per-category push control. The master switch stays on PATCH /user/fcm-token
+// for backwards compatibility; this endpoint also accepts `masterEnabled`.
+router.get("/notification-preferences", getNotificationPreferences);
+router.patch("/notification-preferences", updateNotificationPreferences);
+
+// ─── Data export ──────────────────────────────────────────────────────────────
+// Reads every collection this user appears in, so it is by far the most
+// expensive endpoint here. Rate-limited hard: a genuine "download my data" is
+// something a person does once, while an unthrottled one is a cheap way to pin
+// the database. Keyed per user rather than per IP so one person on a shared
+// network cannot exhaust everyone else's allowance.
+const exportLimiter = rateLimit({
+  windowMs: 24 * 60 * 60 * 1000,
+  max: 3,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: (req) => String(req.user?._id || req.ip),
+  message: {
+    success: false,
+    message: "Data export is limited to 3 requests per day. Please try again later.",
+  },
+});
+router.get("/export-data", exportLimiter, exportMyData);
+router.post("/export-data/email", exportLimiter, emailMyData);
 
 // ─── Account deletion ─────────────────────────────────────────────────────────
 router.post("/request-deletion", requestAccountDeletion);
