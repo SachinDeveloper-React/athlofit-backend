@@ -10,7 +10,6 @@ const {
   toDayLabel,
   toDateWithDayLabel,
   todayISO,
-  isConsecutiveDay,
   resolveClientDate,
   isValidISODate,
   toClientDate,
@@ -575,11 +574,6 @@ const syncHealthData = async (req, res, next) => {
       });
     }
 
-    // Update streak if goal was met (depends on Gamification doc, so runs after)
-    if (totalGoalMet) {
-      await _updateStreak(req.user._id, today, gam);
-    }
-
     // FIX #3: Use resolveClientDate for "actualToday" — respects the user's timezone
     let actualToday = resolveClientDate(timezone);
 
@@ -596,6 +590,20 @@ const syncHealthData = async (req, res, next) => {
     // Coins are ONLY awarded for today's actual date — never for past-day background syncs.
     // With client timezone, we no longer need the 24-hour tolerance hack.
     const isTodaySync = today === actualToday;
+
+    // Update streak if goal was met (depends on Gamification doc and on
+    // `actualToday`, so it runs after both).
+    //
+    // A future-dated sync is never allowed to move the streak. `date` is only
+    // validated for shape, so a device with a wrong clock — or a client asking
+    // for tomorrow — could otherwise push `lastActiveDate` ahead and either
+    // gift a day or strand the streak in a date the user cannot reach.
+    // Backfilled PAST dates still run: _updateStreak itself refuses anything at
+    // or behind `lastActiveDate`, and a genuinely missed-then-backfilled day
+    // must still be able to extend the streak.
+    if (totalGoalMet && today <= actualToday) {
+      await _updateStreak(req.user._id, today, gam);
+    }
     // BUG-FIX: Do NOT set lastActiveDate here unconditionally.
     // lastActiveDate must only be set when the step goal is met (handled by
     // _updateStreak above). Setting it on every sync — even when the goal hasn't
@@ -1324,106 +1332,73 @@ const getTodayHealth = async (req, res, next) => {
 // Gamification.findOne when the caller already has the document in memory.
 async function _updateStreak(userId, date, existingGam = null) {
   const BadgeDefinition = require('../models/BadgeDefinition.model');
+  const { getStreakConfig, advanceStreak } = require('../utils/streak');
   const gam = existingGam || (await Gamification.findOne({ user: userId }));
   if (!gam) return;
 
-  const wasConsecutive = isConsecutiveDay(gam.lastActiveDate, date);
-  const isSameDay = gam.lastActiveDate === date;
+  // The whole streak transition — forward-only guard, increment, gap protection,
+  // best-streak watermark — lives in utils/streak.js so it can be tested without
+  // dragging the push-notification stack in. See advanceStreak's header for why
+  // the forward-only rule is what stops the streak inflating without bound.
+  const sCfg = await getStreakConfig();
+  const move = advanceStreak(gam, date, sCfg);
 
-  let dirty = false;
+  // Nothing moved: a repeat sync of the day already counted, or one of the
+  // backfilled past days both sync workers re-post every 15 minutes.
+  if (!move.changed) return;
 
-  if (!isSameDay) {
-    if (!gam.lastActiveDate) {
-      // First-ever sync or lastActiveDate was cleared — preserve existing streak
-      // rather than resetting it. Only set lastActiveDate going forward.
-      gam.lastActiveDate = date;
-      dirty = true;
-      if (gam.streakDays === 0) {
-        gam.streakDays = 1;
-        dirty = true;
-      }
-    } else if (wasConsecutive) {
-      gam.streakDays += 1;
-      gam.lastActiveDate = date;
-      dirty = true;
-
-      // Grant freeze/life protections after streak grows.
-      const { getStreakConfig, grantProtections } = require('../utils/streak');
-      const sCfg = await getStreakConfig();
-      grantProtections(gam, sCfg);
-    } else {
-      // Known gap — attempt freeze/life protection before breaking.
-      const { getStreakConfig, attemptProtect } = require('../utils/streak');
-      const sCfg = await getStreakConfig();
-      const protection = attemptProtect(gam, sCfg);
-
-      if (protection.protected) {
-        // Streak saved! Mark today as active, do NOT reset.
-        gam.lastActiveDate = date;
-      } else {
-        // Streak broken — attemptProtect already set streakDays to 0.
-        // Now start a new streak at 1 for today's activity.
-        gam.streakDays = 1;
-        gam.lastActiveDate = date;
-
-        // Send motivational push notification (fire-and-forget).
-        try {
-          createNotification(userId, {
-            type: 'STREAK',
-            title: "💪 Don't worry — start fresh!",
-            message:
-              'Your streak broke, but every step counts. Get back on track today!',
-            data: { screen: 'Tracker' },
-          });
-        } catch (_) {
-          /* non-critical */
-        }
-      }
-      dirty = true;
-    }
-
-    if (gam.streakDays > gam.bestStreakDays) {
-      gam.bestStreakDays = gam.streakDays;
-      dirty = true;
-    }
-    // Load active badge definitions and award any newly unlocked badges
-    const badgeDefs = await BadgeDefinition.find({ isActive: true }).sort({
-      order: 1,
-    });
-    const prevUnlocked = new Set(
-      (gam.badgeList || []).filter(b => b.unlockedAt).map(b => b.key),
-    );
-    // Payout eligibility is stamped at unlock time from this flag, so it has to
-    // be read here rather than at claim time — that is what keeps enabling
-    // payouts later a forward-only change instead of releasing the backlog.
-    const badgeCfg = await getCachedAppConfig();
-    const badgeCoinsEnabled = badgeCfg?.streak?.badgeCoinsEnabled === true;
-    gam.awardBadges(badgeDefs, { payoutEnabled: badgeCoinsEnabled });
-    // Check if awardBadges changed anything
-    const newlyUnlocked = badgeDefs.filter(def => {
-      const badge = (gam.badgeList || []).find(b => b.key === def.key);
-      return badge?.unlockedAt && !prevUnlocked.has(def.key);
-    });
-    if (newlyUnlocked.length > 0) dirty = true;
-
-    if (dirty) await gam.save();
-
-    // Push for any badge newly unlocked this sync
-    for (const def of newlyUnlocked) {
+  if (move.broke) {
+    // Send motivational push notification (fire-and-forget).
+    try {
       createNotification(userId, {
-        type: 'GOAL',
-        title: `${def.emoji} Badge Unlocked: ${def.title}!`,
-        // Only mentions coins when there are actually coins. The old copy said
-        // "earned N coins" unconditionally, which was untrue twice over: the
-        // claim was refused, and with payouts disabled there is nothing to
-        // claim at all. Promising money the server will not pay is worse than
-        // saying nothing about money.
-        message: badgeCoinsEnabled
-          ? `You hit a ${def.threshold}-day streak! Open Achievements to claim your ${def.coinReward} coins.`
-          : `You hit a ${def.threshold}-day streak and unlocked the ${def.title} badge!`,
-        data: { screen: 'Achievements' },
+        type: 'STREAK',
+        title: "💪 Don't worry — start fresh!",
+        message:
+          'Your streak broke, but every step counts. Get back on track today!',
+        data: { screen: 'Tracker' },
       });
+    } catch (_) {
+      /* non-critical */
     }
+  }
+
+  // Load active badge definitions and award any newly unlocked badges
+  const badgeDefs = await BadgeDefinition.find({ isActive: true }).sort({
+    order: 1,
+  });
+  const prevUnlocked = new Set(
+    (gam.badgeList || []).filter(b => b.unlockedAt).map(b => b.key),
+  );
+  // Payout eligibility is stamped at unlock time from this flag, so it has to
+  // be read here rather than at claim time — that is what keeps enabling
+  // payouts later a forward-only change instead of releasing the backlog.
+  const badgeCfg = await getCachedAppConfig();
+  const badgeCoinsEnabled = badgeCfg?.streak?.badgeCoinsEnabled === true;
+  gam.awardBadges(badgeDefs, { payoutEnabled: badgeCoinsEnabled });
+  // Which badges awardBadges just unlocked (for the push below).
+  const newlyUnlocked = badgeDefs.filter(def => {
+    const badge = (gam.badgeList || []).find(b => b.key === def.key);
+    return badge?.unlockedAt && !prevUnlocked.has(def.key);
+  });
+  // advanceStreak reported a change, so this always has something to persist —
+  // the badge pass may have added more on top.
+  await gam.save();
+
+  // Push for any badge newly unlocked this sync
+  for (const def of newlyUnlocked) {
+    createNotification(userId, {
+      type: 'GOAL',
+      title: `${def.emoji} Badge Unlocked: ${def.title}!`,
+      // Only mentions coins when there are actually coins. The old copy said
+      // "earned N coins" unconditionally, which was untrue twice over: the
+      // claim was refused, and with payouts disabled there is nothing to
+      // claim at all. Promising money the server will not pay is worse than
+      // saying nothing about money.
+      message: badgeCoinsEnabled
+        ? `You hit a ${def.threshold}-day streak! Open Achievements to claim your ${def.coinReward} coins.`
+        : `You hit a ${def.threshold}-day streak and unlocked the ${def.title} badge!`,
+      data: { screen: 'Achievements' },
+    });
   }
 }
 

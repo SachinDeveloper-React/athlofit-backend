@@ -9,6 +9,7 @@
     "seed": "node src/seed.js",
     "lint": "eslint src/**/*.js",
     "test": "jest",
+    "repair:streaks": "node scripts/repair-inflated-streaks.js",
     "diagnose:steps": "node src/scripts/diagnoseStepGap.js",
     "explain:steps": "node src/scripts/explainSteps.js"
   },

@@ -124,4 +124,81 @@ function restoreStreak(gam, cfg) {
   return { success: true, cost, restoredTo: gam.streakDays };
 }
 
-module.exports = { getStreakConfig, grantProtections, attemptProtect, restoreStreak, isoWeekKey };
+/**
+ * Apply one goal-met day to the streak.
+ *
+ * ── The streak cursor only ever moves FORWARD ────────────────────────────────
+ *
+ * This is the whole reason the transition lives here as one function instead of
+ * inline in the sync handler: without the guard below the streak inflates
+ * without bound, and the path that does it is completely routine traffic.
+ *
+ * Both sync workers backfill the last seven days on every run — the Android
+ * WidgetUpdateWorker every 15 minutes, the JS background fetch alongside it —
+ * posting one POST /health/sync per day, oldest first, each carrying an explicit
+ * past `date`. Every one of those days whose goal was met reaches this function.
+ *
+ * So a batch that reopens at `today - 6` while `lastActiveDate` is already
+ * `today` read as a six-day GAP. attemptProtect() spent a freeze, which sets
+ * `freezeActiveUntil = now + 24h`; from then on its first branch protected every
+ * later rewind for free — no break, nothing consumed. The rewind therefore only
+ * moved the cursor back to `today - 6`, and the five days that followed in the
+ * same batch each looked consecutive and added +1. Net +6 per batch, ~96 batches
+ * a day, and grantProtections() handed back a fresh freeze each time the streak
+ * crossed another multiple of seven, so the loop refuelled itself. That is how
+ * an account reached a 1,057-day streak on an app not remotely that old.
+ *
+ * Requiring a strictly later date makes an increment cost a new calendar day,
+ * which is the invariant a "day streak" actually encodes. A backfilled day that
+ * is still ahead of the cursor — yesterday's goal met but never synced — is
+ * unaffected and extends the streak normally.
+ *
+ * Mutates `gam` in place; the caller saves.
+ *
+ * @param {object} gam    Gamification document.
+ * @param {string} date   "YYYY-MM-DD" of the goal-met day being applied.
+ * @param {object} cfg    getStreakConfig() result.
+ * @returns {{changed: boolean, broke: boolean, protectedBy: string|null}}
+ *   `changed` false means the day was a repeat or a rewind and nothing moved.
+ */
+function advanceStreak(gam, date, cfg) {
+  const { isConsecutiveDay } = require('./date');
+  const unchanged = { changed: false, broke: false, protectedBy: null };
+
+  if (gam.lastActiveDate && date <= gam.lastActiveDate) return unchanged;
+
+  let result;
+  if (!gam.lastActiveDate) {
+    // First-ever sync, or lastActiveDate was cleared — preserve any existing
+    // streak rather than resetting it, and just start tracking from here.
+    gam.lastActiveDate = date;
+    if (!gam.streakDays) gam.streakDays = 1;
+    result = { changed: true, broke: false, protectedBy: null };
+  } else if (isConsecutiveDay(gam.lastActiveDate, date)) {
+    gam.streakDays += 1;
+    gam.lastActiveDate = date;
+    grantProtections(gam, cfg);
+    result = { changed: true, broke: false, protectedBy: null };
+  } else {
+    // A real gap — the user missed at least one whole day. Spend a freeze or a
+    // life before breaking.
+    const protection = attemptProtect(gam, cfg);
+    gam.lastActiveDate = date;
+    if (!protection.protected) {
+      // attemptProtect already zeroed streakDays; this day starts the new one.
+      gam.streakDays = 1;
+    }
+    result = {
+      changed: true,
+      broke: !protection.protected,
+      protectedBy: protection.method || null,
+    };
+  }
+
+  if (gam.streakDays > (gam.bestStreakDays || 0)) {
+    gam.bestStreakDays = gam.streakDays;
+  }
+  return result;
+}
+
+module.exports = { getStreakConfig, grantProtections, attemptProtect, advanceStreak, restoreStreak, isoWeekKey };

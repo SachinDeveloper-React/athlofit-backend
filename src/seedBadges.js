@@ -114,14 +114,14 @@ const DEFAULT_BADGES = [
 
 async function seed() {
   try {
-    await mongoose.connect(process.env.MONGODB_URI || process.env.MONGO_URI);
+    await mongoose.connect(process.env.MONGO_URI || process.env.MONGO_URI);
     console.log('Connected to MongoDB');
 
     for (const badge of DEFAULT_BADGES) {
       await BadgeDefinition.findOneAndUpdate(
         { key: badge.key },
         { $setOnInsert: badge }, // only insert, never overwrite admin changes
-        { upsert: true, new: true }
+        { upsert: true, new: true },
       );
       console.log(`✓ "${badge.key}" (${badge.threshold}d) — upserted`);
     }

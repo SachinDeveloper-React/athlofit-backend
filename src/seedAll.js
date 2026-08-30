@@ -49,7 +49,7 @@ const getWeekKey = (daysAgo = 0) => {
 async function seedUsers() {
   console.log('\n📦 Seeding Users...');
   await User.deleteMany({});
-  
+
   const users = await User.create([
     {
       name: 'John Doe',
@@ -109,7 +109,7 @@ async function seedUsers() {
       notificationsEnabled: true,
     },
   ]);
-  
+
   console.log(`✅ Created ${users.length} users`);
   return users;
 }
@@ -117,7 +117,7 @@ async function seedUsers() {
 async function seedGamification(users) {
   console.log('\n📦 Seeding Gamification...');
   await Gamification.deleteMany({});
-  
+
   const today = getDateString();
   const gamifications = await Gamification.create([
     {
@@ -129,9 +129,18 @@ async function seedGamification(users) {
       lastActiveDate: today,
       lastCoinDate: today,
       badges: {
-        starter: { unlocked: true, unlockedAt: new Date(Date.now() - 20 * 24 * 60 * 60 * 1000) },
-        consistent: { unlocked: true, unlockedAt: new Date(Date.now() - 14 * 24 * 60 * 60 * 1000) },
-        finisher: { unlocked: true, unlockedAt: new Date(Date.now() - 6 * 24 * 60 * 60 * 1000) },
+        starter: {
+          unlocked: true,
+          unlockedAt: new Date(Date.now() - 20 * 24 * 60 * 60 * 1000),
+        },
+        consistent: {
+          unlocked: true,
+          unlockedAt: new Date(Date.now() - 14 * 24 * 60 * 60 * 1000),
+        },
+        finisher: {
+          unlocked: true,
+          unlockedAt: new Date(Date.now() - 6 * 24 * 60 * 60 * 1000),
+        },
         elite: { unlocked: false },
       },
     },
@@ -144,8 +153,14 @@ async function seedGamification(users) {
       lastActiveDate: today,
       lastCoinDate: today,
       badges: {
-        starter: { unlocked: true, unlockedAt: new Date(Date.now() - 11 * 24 * 60 * 60 * 1000) },
-        consistent: { unlocked: true, unlockedAt: new Date(Date.now() - 5 * 24 * 60 * 60 * 1000) },
+        starter: {
+          unlocked: true,
+          unlockedAt: new Date(Date.now() - 11 * 24 * 60 * 60 * 1000),
+        },
+        consistent: {
+          unlocked: true,
+          unlockedAt: new Date(Date.now() - 5 * 24 * 60 * 60 * 1000),
+        },
         finisher: { unlocked: false },
         elite: { unlocked: false },
       },
@@ -159,14 +174,26 @@ async function seedGamification(users) {
       lastActiveDate: today,
       lastCoinDate: today,
       badges: {
-        starter: { unlocked: true, unlockedAt: new Date(Date.now() - 44 * 24 * 60 * 60 * 1000) },
-        consistent: { unlocked: true, unlockedAt: new Date(Date.now() - 38 * 24 * 60 * 60 * 1000) },
-        finisher: { unlocked: true, unlockedAt: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000) },
-        elite: { unlocked: true, unlockedAt: new Date(Date.now() - 15 * 24 * 60 * 60 * 1000) },
+        starter: {
+          unlocked: true,
+          unlockedAt: new Date(Date.now() - 44 * 24 * 60 * 60 * 1000),
+        },
+        consistent: {
+          unlocked: true,
+          unlockedAt: new Date(Date.now() - 38 * 24 * 60 * 60 * 1000),
+        },
+        finisher: {
+          unlocked: true,
+          unlockedAt: new Date(Date.now() - 30 * 24 * 60 * 60 * 1000),
+        },
+        elite: {
+          unlocked: true,
+          unlockedAt: new Date(Date.now() - 15 * 24 * 60 * 60 * 1000),
+        },
       },
     },
   ]);
-  
+
   console.log(`✅ Created ${gamifications.length} gamification profiles`);
   return gamifications;
 }
@@ -174,16 +201,76 @@ async function seedGamification(users) {
 async function seedBadgeDefinitions() {
   console.log('\n📦 Seeding Badge Definitions...');
   await BadgeDefinition.deleteMany({});
-  
+
   const badges = [
-    { key: 'starter', title: 'Starter', rule: '1 day streak', emoji: '🥉', color: '#cd7f32', threshold: 1, coinReward: 0, order: 0, isActive: true },
-    { key: 'consistent', title: 'Consistent', rule: '7 day streak', emoji: '🥈', color: '#aaaaaa', threshold: 7, coinReward: 200, order: 1, isActive: true },
-    { key: 'finisher', title: 'Finisher', rule: '15 day streak', emoji: '🥇', color: '#ffd700', threshold: 15, coinReward: 400, order: 2, isActive: true },
-    { key: 'elite', title: 'Elite', rule: '30 day streak', emoji: '👑', color: '#a855f7', threshold: 30, coinReward: 800, order: 3, isActive: true },
-    { key: 'champion', title: 'Champion', rule: '60 day streak', emoji: '🏆', color: '#f59e0b', threshold: 60, coinReward: 1500, order: 4, isActive: true },
-    { key: 'legend', title: 'Legend', rule: '90 day streak', emoji: '🔱', color: '#06b6d4', threshold: 90, coinReward: 2500, order: 5, isActive: true },
+    {
+      key: 'starter',
+      title: 'Starter',
+      rule: '1 day streak',
+      emoji: '🥉',
+      color: '#cd7f32',
+      threshold: 1,
+      coinReward: 0,
+      order: 0,
+      isActive: true,
+    },
+    {
+      key: 'consistent',
+      title: 'Consistent',
+      rule: '7 day streak',
+      emoji: '🥈',
+      color: '#aaaaaa',
+      threshold: 7,
+      coinReward: 200,
+      order: 1,
+      isActive: true,
+    },
+    {
+      key: 'finisher',
+      title: 'Finisher',
+      rule: '15 day streak',
+      emoji: '🥇',
+      color: '#ffd700',
+      threshold: 15,
+      coinReward: 400,
+      order: 2,
+      isActive: true,
+    },
+    {
+      key: 'elite',
+      title: 'Elite',
+      rule: '30 day streak',
+      emoji: '👑',
+      color: '#a855f7',
+      threshold: 30,
+      coinReward: 800,
+      order: 3,
+      isActive: true,
+    },
+    {
+      key: 'champion',
+      title: 'Champion',
+      rule: '60 day streak',
+      emoji: '🏆',
+      color: '#f59e0b',
+      threshold: 60,
+      coinReward: 1500,
+      order: 4,
+      isActive: true,
+    },
+    {
+      key: 'legend',
+      title: 'Legend',
+      rule: '90 day streak',
+      emoji: '🔱',
+      color: '#06b6d4',
+      threshold: 90,
+      coinReward: 2500,
+      order: 5,
+      isActive: true,
+    },
   ];
-  
+
   const created = await BadgeDefinition.insertMany(badges);
   console.log(`✅ Created ${created.length} badge definitions`);
   return created;
@@ -192,16 +279,16 @@ async function seedBadgeDefinitions() {
 async function seedHealthActivities(users) {
   console.log('\n📦 Seeding Health Activities...');
   await HealthActivity.deleteMany({});
-  
+
   const activities = [];
-  
+
   // Create 30 days of health data for each user
   for (const user of users) {
     for (let i = 0; i < 30; i++) {
       const date = getDateString(i);
       const baseSteps = user.dailyStepGoal || 8000;
       const steps = Math.floor(baseSteps * (0.7 + Math.random() * 0.6)); // 70-130% of goal
-      
+
       activities.push({
         user: user._id,
         date,
@@ -219,7 +306,7 @@ async function seedHealthActivities(users) {
       });
     }
   }
-  
+
   const created = await HealthActivity.insertMany(activities);
   console.log(`✅ Created ${created.length} health activity records`);
   return created;
@@ -228,9 +315,9 @@ async function seedHealthActivities(users) {
 async function seedBmiRecords(users) {
   console.log('\n📦 Seeding BMI Records...');
   await BmiRecord.deleteMany({});
-  
+
   const records = [];
-  
+
   // Create 10 BMI records for each user (weekly measurements)
   for (const user of users) {
     for (let i = 0; i < 10; i++) {
@@ -238,12 +325,12 @@ async function seedBmiRecords(users) {
       const weight = user.weight + (Math.random() - 0.5) * 5; // slight variation
       const height = user.height / 100; // convert cm to m
       const bmi = weight / (height * height);
-      
+
       let category = 'normal';
       if (bmi < 18.5) category = 'underweight';
       else if (bmi >= 25 && bmi < 30) category = 'overweight';
       else if (bmi >= 30) category = 'obese';
-      
+
       records.push({
         user: user._id,
         date,
@@ -254,7 +341,7 @@ async function seedBmiRecords(users) {
       });
     }
   }
-  
+
   const created = await BmiRecord.insertMany(records);
   console.log(`✅ Created ${created.length} BMI records`);
   return created;
@@ -263,7 +350,7 @@ async function seedBmiRecords(users) {
 async function seedNutritionPreferences(users) {
   console.log('\n📦 Seeding Nutrition Preferences...');
   await NutritionPreference.deleteMany({});
-  
+
   const preferences = await NutritionPreference.create([
     {
       user: users[0]._id,
@@ -287,7 +374,7 @@ async function seedNutritionPreferences(users) {
       favourites: [],
     },
   ]);
-  
+
   console.log(`✅ Created ${preferences.length} nutrition preferences`);
   return preferences;
 }
@@ -295,27 +382,27 @@ async function seedNutritionPreferences(users) {
 async function seedMealLogs(users, foods) {
   console.log('\n📦 Seeding Meal Logs...');
   await MealLog.deleteMany({});
-  
+
   if (!foods || foods.length === 0) {
     console.log('⚠️  No foods available, skipping meal logs');
     return [];
   }
-  
+
   const mealTypes = ['breakfast', 'lunch', 'dinner', 'snacks'];
   const logs = [];
-  
+
   // Create 7 days of meal logs for each user
   for (const user of users) {
     for (let day = 0; day < 7; day++) {
       const date = getDateString(day);
-      
+
       // 2-4 meals per day
       const mealsToday = Math.floor(2 + Math.random() * 3);
       const selectedMeals = mealTypes.slice(0, mealsToday);
-      
+
       for (const mealType of selectedMeals) {
         const food = foods[Math.floor(Math.random() * foods.length)];
-        
+
         logs.push({
           user: user._id,
           mealType,
@@ -332,7 +419,7 @@ async function seedMealLogs(users, foods) {
       }
     }
   }
-  
+
   const created = await MealLog.insertMany(logs);
   console.log(`✅ Created ${created.length} meal logs`);
   return created;
@@ -341,25 +428,46 @@ async function seedMealLogs(users, foods) {
 async function seedNotifications(users) {
   console.log('\n📦 Seeding Notifications...');
   await Notification.deleteMany({});
-  
+
   const notifications = [];
   const types = ['GOAL', 'HYDRATION', 'CHALLENGE', 'COIN', 'SECURITY'];
   const messages = {
-    GOAL: ['🎯 You reached your daily step goal!', '👏 Great job! Goal achieved!', '🏆 Daily goal completed!'],
-    HYDRATION: ['💧 Time to drink water!', '🌊 Stay hydrated!', '💦 Hydration reminder'],
-    CHALLENGE: ['🏅 New challenge available!', '⭐ Challenge completed!', '🎖️ You earned a challenge reward!'],
-    COIN: ['🪙 You earned 50 coins!', '💰 Coin reward unlocked!', '✨ Bonus coins added!'],
-    SECURITY: ['🔒 New login detected', '🛡️ Password changed successfully', '✅ Account verified'],
+    GOAL: [
+      '🎯 You reached your daily step goal!',
+      '👏 Great job! Goal achieved!',
+      '🏆 Daily goal completed!',
+    ],
+    HYDRATION: [
+      '💧 Time to drink water!',
+      '🌊 Stay hydrated!',
+      '💦 Hydration reminder',
+    ],
+    CHALLENGE: [
+      '🏅 New challenge available!',
+      '⭐ Challenge completed!',
+      '🎖️ You earned a challenge reward!',
+    ],
+    COIN: [
+      '🪙 You earned 50 coins!',
+      '💰 Coin reward unlocked!',
+      '✨ Bonus coins added!',
+    ],
+    SECURITY: [
+      '🔒 New login detected',
+      '🛡️ Password changed successfully',
+      '✅ Account verified',
+    ],
   };
-  
+
   for (const user of users) {
     // Create 5-10 notifications per user
     const count = Math.floor(5 + Math.random() * 6);
     for (let i = 0; i < count; i++) {
       const type = types[Math.floor(Math.random() * types.length)];
       const messageList = messages[type];
-      const message = messageList[Math.floor(Math.random() * messageList.length)];
-      
+      const message =
+        messageList[Math.floor(Math.random() * messageList.length)];
+
       notifications.push({
         user: user._id,
         type,
@@ -370,7 +478,7 @@ async function seedNotifications(users) {
       });
     }
   }
-  
+
   const created = await Notification.insertMany(notifications);
   console.log(`✅ Created ${created.length} notifications`);
   return created;
@@ -379,7 +487,7 @@ async function seedNotifications(users) {
 async function seedReferrals(users) {
   console.log('\n📦 Seeding Referrals...');
   await Referral.deleteMany({});
-  
+
   // User 1 referred User 2
   const referral = await Referral.create({
     referrer: users[0]._id,
@@ -390,7 +498,7 @@ async function seedReferrals(users) {
     refereeBonusAwarded: true,
     refereeBonus: 100,
   });
-  
+
   console.log(`✅ Created 1 referral`);
   return [referral];
 }
@@ -398,7 +506,7 @@ async function seedReferrals(users) {
 async function seedAchievements() {
   console.log('\n📦 Seeding Achievements...');
   await Achievement.deleteMany({});
-  
+
   const achievements = await Achievement.create([
     {
       key: 'first_10k_steps',
@@ -437,7 +545,7 @@ async function seedAchievements() {
       icon: 'ShoppingBag',
     },
   ]);
-  
+
   console.log(`✅ Created ${achievements.length} achievements`);
   return achievements;
 }
@@ -445,7 +553,7 @@ async function seedAchievements() {
 async function seedAppConfig() {
   console.log('\n📦 Seeding App Config...');
   await AppConfig.deleteMany({});
-  
+
   const config = await AppConfig.create({
     key: 'global',
     coin: {
@@ -482,7 +590,7 @@ async function seedAppConfig() {
       website: 'www.athlofit.com/faq',
     },
   });
-  
+
   console.log(`✅ Created app config`);
   return config;
 }
@@ -490,52 +598,58 @@ async function seedAppConfig() {
 async function seedFaqs() {
   console.log('\n📦 Seeding FAQs...');
   await Faq.deleteMany({});
-  
+
   const faqs = await Faq.create([
     {
       category: 'General',
       question: 'What is AthloFit?',
-      answer: 'AthloFit is a comprehensive fitness and health tracking app that helps you monitor your daily activities, nutrition, and wellness goals.',
+      answer:
+        'AthloFit is a comprehensive fitness and health tracking app that helps you monitor your daily activities, nutrition, and wellness goals.',
       order: 1,
       isActive: true,
     },
     {
       category: 'General',
       question: 'How do I get started?',
-      answer: 'Simply sign up with your email, complete your profile with basic health information, and start tracking your activities!',
+      answer:
+        'Simply sign up with your email, complete your profile with basic health information, and start tracking your activities!',
       order: 2,
       isActive: true,
     },
     {
       category: 'Coins',
       question: 'How do I earn coins?',
-      answer: 'You can earn coins by completing daily step goals, staying hydrated, completing challenges, and maintaining streaks.',
+      answer:
+        'You can earn coins by completing daily step goals, staying hydrated, completing challenges, and maintaining streaks.',
       order: 3,
       isActive: true,
     },
     {
       category: 'Coins',
       question: 'What can I do with coins?',
-      answer: 'Coins can be used to purchase products from our shop, including fitness equipment, supplements, and apparel.',
+      answer:
+        'Coins can be used to purchase products from our shop, including fitness equipment, supplements, and apparel.',
       order: 4,
       isActive: true,
     },
     {
       category: 'Health',
       question: 'How accurate is the step tracking?',
-      answer: 'We integrate with Apple Health and Google Fit to provide the most accurate step tracking available on your device.',
+      answer:
+        'We integrate with Apple Health and Google Fit to provide the most accurate step tracking available on your device.',
       order: 5,
       isActive: true,
     },
     {
       category: 'Nutrition',
       question: 'Can I log custom meals?',
-      answer: 'Yes! You can log meals from our extensive food catalog or create custom entries with your own nutritional information.',
+      answer:
+        'Yes! You can log meals from our extensive food catalog or create custom entries with your own nutritional information.',
       order: 6,
       isActive: true,
     },
   ]);
-  
+
   console.log(`✅ Created ${faqs.length} FAQs`);
   return faqs;
 }
@@ -543,7 +657,7 @@ async function seedFaqs() {
 async function seedLegalContent() {
   console.log('\n📦 Seeding Legal Content...');
   await LegalContent.deleteMany({});
-  
+
   const legal = await LegalContent.create([
     {
       type: 'terms',
@@ -592,7 +706,7 @@ You have the right to access, update, or delete your personal information at any
       version: '1.0',
     },
   ]);
-  
+
   console.log(`✅ Created ${legal.length} legal documents`);
   return legal;
 }
@@ -600,14 +714,15 @@ You have the right to access, update, or delete your personal information at any
 async function seedSupportTickets(users) {
   console.log('\n📦 Seeding Support Tickets...');
   await SupportTicket.deleteMany({});
-  
+
   const tickets = await SupportTicket.create([
     {
       user: users[0]._id,
       name: users[0].name,
       email: users[0].email,
       subject: 'Unable to sync health data',
-      message: 'My step count is not syncing properly from Apple Health. Can you help?',
+      message:
+        'My step count is not syncing properly from Apple Health. Can you help?',
       status: 'in_progress',
       adminNotes: 'Investigating sync issue',
     },
@@ -616,7 +731,8 @@ async function seedSupportTickets(users) {
       name: users[1].name,
       email: users[1].email,
       subject: 'Question about coin rewards',
-      message: 'How long does it take for challenge rewards to appear in my account?',
+      message:
+        'How long does it take for challenge rewards to appear in my account?',
       status: 'resolved',
       adminNotes: 'Explained reward timing - instant upon completion',
     },
@@ -630,7 +746,7 @@ async function seedSupportTickets(users) {
       adminNotes: '',
     },
   ]);
-  
+
   console.log(`✅ Created ${tickets.length} support tickets`);
   return tickets;
 }
@@ -641,10 +757,10 @@ async function seedAll() {
   try {
     console.log('🌱 Starting comprehensive database seed...\n');
     console.log('📡 Connecting to MongoDB...');
-    
-    await mongoose.connect(process.env.MONGO_URI || process.env.MONGODB_URI);
+
+    await mongoose.connect(process.env.MONGO_URI || process.env.MONGO_URI);
     console.log('✅ Connected to MongoDB\n');
-    
+
     // Seed in order (respecting dependencies)
     const users = await seedUsers();
     await seedGamification(users);
@@ -652,33 +768,41 @@ async function seedAll() {
     await seedHealthActivities(users);
     await seedBmiRecords(users);
     await seedNutritionPreferences(users);
-    
+
     // Check if foods exist (from seedNutrition.js)
     const foods = await Food.find({});
     if (foods.length > 0) {
       console.log(`\n📦 Found ${foods.length} existing foods`);
       await seedMealLogs(users, foods);
     } else {
-      console.log('\n⚠️  No foods found. Run seedNutrition.js first to seed meal logs.');
+      console.log(
+        '\n⚠️  No foods found. Run seedNutrition.js first to seed meal logs.',
+      );
     }
-    
+
     // Check if challenges exist (from seedChallenges.js)
     const challenges = await Challenge.find({});
     if (challenges.length > 0) {
       console.log(`\n📦 Found ${challenges.length} existing challenges`);
     } else {
-      console.log('\n⚠️  No challenges found. Run seedChallenges.js to seed challenges.');
+      console.log(
+        '\n⚠️  No challenges found. Run seedChallenges.js to seed challenges.',
+      );
     }
-    
+
     // Check if shop data exists (from seedShop.js)
     const categories = await Category.find({});
     const products = await Product.find({});
     if (categories.length > 0 && products.length > 0) {
-      console.log(`\n📦 Found ${categories.length} categories and ${products.length} products`);
+      console.log(
+        `\n📦 Found ${categories.length} categories and ${products.length} products`,
+      );
     } else {
-      console.log('\n⚠️  No shop data found. Run seedShop.js to seed categories and products.');
+      console.log(
+        '\n⚠️  No shop data found. Run seedShop.js to seed categories and products.',
+      );
     }
-    
+
     await seedNotifications(users);
     await seedReferrals(users);
     await seedAchievements();
@@ -686,17 +810,25 @@ async function seedAll() {
     await seedFaqs();
     await seedLegalContent();
     await seedSupportTickets(users);
-    
+
     console.log('\n' + '='.repeat(60));
     console.log('✅ DATABASE SEED COMPLETE!');
     console.log('='.repeat(60));
     console.log('\n📊 Summary:');
     console.log(`   Users: ${await User.countDocuments()}`);
-    console.log(`   Gamification Profiles: ${await Gamification.countDocuments()}`);
-    console.log(`   Badge Definitions: ${await BadgeDefinition.countDocuments()}`);
-    console.log(`   Health Activities: ${await HealthActivity.countDocuments()}`);
+    console.log(
+      `   Gamification Profiles: ${await Gamification.countDocuments()}`,
+    );
+    console.log(
+      `   Badge Definitions: ${await BadgeDefinition.countDocuments()}`,
+    );
+    console.log(
+      `   Health Activities: ${await HealthActivity.countDocuments()}`,
+    );
     console.log(`   BMI Records: ${await BmiRecord.countDocuments()}`);
-    console.log(`   Nutrition Preferences: ${await NutritionPreference.countDocuments()}`);
+    console.log(
+      `   Nutrition Preferences: ${await NutritionPreference.countDocuments()}`,
+    );
     console.log(`   Meal Logs: ${await MealLog.countDocuments()}`);
     console.log(`   Foods: ${await Food.countDocuments()}`);
     console.log(`   Food Synonyms: ${await FoodSynonym.countDocuments()}`);
@@ -709,19 +841,19 @@ async function seedAll() {
     console.log(`   FAQs: ${await Faq.countDocuments()}`);
     console.log(`   Legal Documents: ${await LegalContent.countDocuments()}`);
     console.log(`   Support Tickets: ${await SupportTicket.countDocuments()}`);
-    
+
     console.log('\n🔑 Test Credentials:');
     console.log('   User: john@example.com / Password123!');
     console.log('   User: jane@example.com / Password123!');
     console.log('   Admin: admin@athlofit.com / Admin123!');
-    
+
     console.log('\n💡 Next Steps:');
     console.log('   1. Run: node src/seedNutrition.js (if not already done)');
     console.log('   2. Run: node src/seedChallenges.js (if not already done)');
     console.log('   3. Run: node src/seedShop.js (if not already done)');
     console.log('   4. Run: node src/seedSynonyms.js (if not already done)');
     console.log('   5. Start your server: npm start\n');
-    
+
     process.exit(0);
   } catch (error) {
     console.error('\n❌ Seed failed:', error);
