@@ -257,7 +257,7 @@ describe('validateSteps — the 5,000-step ratchet', () => {
 describe('validateSteps — first accepted value of the day', () => {
   it('bounds the first value by how much of the local day has elapsed', () => {
     // No accepted increase yet and nothing stored, so the whole figure has to
-    // stand on its own. 02:00 local allows 2h * 9,000 = 18,000.
+    // stand on its own, bounded by how much of the day has elapsed.
     const result = validateSteps({
       ...base,
       incomingSteps: 40_000,
@@ -277,10 +277,81 @@ describe('validateSteps — first accepted value of the day', () => {
         incomingSteps: 40_000,
         existingSteps: 0,
         lastStepIncreaseAt: null,
-        timezone: 'UTC', // 02:00 local => 2h * 9,000 = 18,000
+        // 02:00 local => 6,000 + (50,000 - 6,000) * 2/24 = 9,667.
+        timezone: 'UTC',
       });
-      expect(result.clampedSteps).toBe(18_000);
+      expect(result.clampedSteps).toBe(9_667);
       expect(result.flagged).toBe(true);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  // ── Regression: the ceiling used to expire before lunch ───────────────────
+  //
+  // The bound was `max(3_000, hours * 9_000)`. 50,000 / 9,000 is 5.6 hours, so
+  // from 05:36 onward it sat above MAX_DAILY_STEPS and never bound anything. A
+  // client's first sync of the day could hand over any figure under the daily cap
+  // in one post and be paid passive step coins for all of it — the "0 → 26,872
+  // (+25.46 coins)" row in the ledger that started this.
+  it('still binds late in the day, where the old sustained rate had expired', () => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-08-17T20:40:00Z'));
+    try {
+      const result = validateSteps({
+        ...base,
+        incomingSteps: 49_000,
+        existingSteps: 0,
+        lastStepIncreaseAt: null,
+        timezone: 'UTC',
+        syncDate: '2026-08-17',
+      });
+
+      // 20:40 => 6,000 + 44,000 * (1240/1440) = 43,889. The old rule allowed
+      // 186,000 here, i.e. the absolute daily cap and nothing else.
+      expect(result.clampedSteps).toBe(43_889);
+      expect(result.flagged).toBe(true);
+      expect(result.reason).toMatch(/First accepted value/);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('accepts a genuine day of walking that was only synced in the evening', () => {
+    // The bound has to stay generous enough for the honest version of the same
+    // shape: the app was killed all day and reads the whole total at 20:40.
+    jest.useFakeTimers().setSystemTime(new Date('2026-08-17T20:40:00Z'));
+    try {
+      const result = validateSteps({
+        ...base,
+        incomingSteps: 15_800,
+        existingSteps: 0,
+        lastStepIncreaseAt: null,
+        timezone: 'UTC',
+        syncDate: '2026-08-17',
+      });
+
+      expect(result.clampedSteps).toBe(15_800);
+      expect(result.flagged).toBe(false);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('leaves room for a front-loaded morning run', () => {
+    // 8,000 steps by 02:00 is a real thing people do, and the intercept exists
+    // so the bound does not reject it.
+    jest.useFakeTimers().setSystemTime(new Date('2026-08-17T02:00:00Z'));
+    try {
+      const result = validateSteps({
+        ...base,
+        incomingSteps: 8_000,
+        existingSteps: 0,
+        lastStepIncreaseAt: null,
+        timezone: 'UTC',
+      });
+
+      expect(result.clampedSteps).toBe(8_000);
+      expect(result.flagged).toBe(false);
     } finally {
       jest.useRealTimers();
     }
@@ -294,7 +365,7 @@ describe('validateSteps — first accepted value of the day', () => {
         incomingSteps: 2_500,
         existingSteps: 0,
         lastStepIncreaseAt: null,
-        timezone: 'UTC', // 5 minutes in — the 3,000 floor applies
+        timezone: 'UTC', // 5 minutes in — the midnight burst allowance applies
       });
       expect(result.clampedSteps).toBe(2_500);
       expect(result.flagged).toBe(false);
@@ -330,7 +401,9 @@ describe('validateSteps — past-date syncs get the whole day, not today so far'
         lastStepIncreaseAt: null,
         timezone: 'UTC',
       });
-      expect(result.clampedSteps).toBe(3_000); // FIRST_SYNC_FLOOR
+      // 00:10 => 6,000 + 44,000 * (10/1440) = 6,306, the midnight allowance
+      // plus the sliver of the day that has actually happened.
+      expect(result.clampedSteps).toBe(6_306);
       expect(result.flagged).toBe(true);
     } finally {
       jest.useRealTimers();
@@ -356,8 +429,9 @@ describe('validateSteps — past-date syncs get the whole day, not today so far'
   });
 
   it('still applies the absolute daily cap to a past date', () => {
-    // A full day allows 24h * 9,000 = 216,000 by the sustained rate, so the daily
-    // cap has to be what binds — otherwise "past date" would mean "unvalidated".
+    // A full day's first-sync ceiling lands exactly on MAX_DAILY_STEPS, so the
+    // daily cap is what binds and what gets reported — otherwise "past date"
+    // would mean "unvalidated".
     jest.useFakeTimers().setSystemTime(justAfterMidnight);
     try {
       const result = validateSteps({
@@ -377,7 +451,8 @@ describe('validateSteps — past-date syncs get the whole day, not today so far'
   });
 
   it('does not loosen the bound for TODAY', () => {
-    // Passing today's date must behave exactly as before: 10 minutes in, the floor.
+    // Passing today's date must behave exactly as before: 10 minutes in, the
+    // midnight allowance — not a whole day's worth.
     jest.useFakeTimers().setSystemTime(justAfterMidnight);
     try {
       const result = validateSteps({
@@ -388,7 +463,7 @@ describe('validateSteps — past-date syncs get the whole day, not today so far'
         timezone: 'UTC',
         syncDate: '2026-08-17',
       });
-      expect(result.clampedSteps).toBe(3_000);
+      expect(result.clampedSteps).toBe(6_306);
       expect(result.flagged).toBe(true);
     } finally {
       jest.useRealTimers();
@@ -408,7 +483,7 @@ describe('validateSteps — past-date syncs get the whole day, not today so far'
         timezone: 'UTC',
         syncDate: '2026-08-18',
       });
-      expect(result.clampedSteps).toBe(3_000);
+      expect(result.clampedSteps).toBe(6_306);
       expect(result.flagged).toBe(true);
     } finally {
       jest.useRealTimers();

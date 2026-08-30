@@ -34,6 +34,7 @@ const {
   runDeletionJob,
   getUserSyncLogs,
   setSyncDebug,
+  getUserStepProvenance,
 } = require('../controllers/admin.controller');
 
 const {
@@ -136,6 +137,18 @@ router.post(
   validate,
   setSyncDebug,
 );
+// ── Step attribution ─────────────────────────────────────────────────────────
+// GET /admin/users/:id/step-provenance — where each day's steps came from, and
+// what is behind every increase. `/sync-logs` shows that 17,000 steps arrived;
+// this shows which app recorded them, over what clock hours, and how many days
+// late they were delivered.
+router.get(
+  '/users/:id/step-provenance',
+  param('id').isMongoId(),
+  validate,
+  getUserStepProvenance,
+);
+
 router.get('/users/:id/sessions', getUserSessions);
 router.delete('/users/:id/sessions/:sessionId', revokeUserSession);
 router.post('/users/:id/sessions/revoke-all', revokeAllUserSessions);

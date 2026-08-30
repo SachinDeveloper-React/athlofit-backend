@@ -27,7 +27,16 @@ const { todayISO } = require('../utils/date');
 const { logCoinTransaction } = require('../utils/logCoinTransaction');
 const { isCoinBlocked } = require('../utils/cheatPenalty');
 const { isStepsTrackingEnabled } = require('../utils/stepsTracking');
-const { computePassiveCoinDelta } = require('../utils/passiveCoins');
+const {
+  computePassiveCoinDelta,
+  describePassiveCoinCap,
+} = require('../utils/passiveCoins');
+const {
+  DEFAULT_RATE_PER_100_STEPS,
+  DEFAULT_DAILY_EARN_LIMIT,
+  DEFAULT_MAX_DAILY_REWARDS,
+  DEFAULT_UNVERIFIED_DAILY_CAP,
+} = require('../constants/coinDefaults');
 
 // ─── Core distribution function ──────────────────────────────────────────────
 
@@ -39,9 +48,21 @@ async function distributePassiveCoins() {
   let cfg = await AppConfig.findOne({ key: 'global' });
   if (!cfg) cfg = await AppConfig.create({ key: 'global' });
 
-  const rate = cfg.coin_config?.steps?.rate_per_100_steps ?? 0.5;
-  const dailyEarnLimit = cfg.coin?.dailyEarnLimit ?? 200;
-  const unverifiedDailyCap = cfg.coin?.unverifiedDailyCap ?? 50;
+  const rate =
+    cfg.coin_config?.steps?.rate_per_100_steps ?? DEFAULT_RATE_PER_100_STEPS;
+  const dailyEarnLimit = cfg.coin?.dailyEarnLimit ?? DEFAULT_DAILY_EARN_LIMIT;
+  const unverifiedDailyCap =
+    cfg.coin?.unverifiedDailyCap ?? DEFAULT_UNVERIFIED_DAILY_CAP;
+
+  // The passive daily cap and the per-step rate are stored independently and
+  // nothing compared them, so the cap quietly stopped being reachable (0.095 per
+  // 100 steps pays at most 47.5 coins/day against a limit of 200). This run is
+  // the recurring place that sees both values, so it is where the mismatch gets
+  // said out loud instead of being inferred from payouts.
+  const capState = describePassiveCoinCap(rate, dailyEarnLimit);
+  if (!capState.capBinds) {
+    console.warn(`[CRON:PassiveCoins] ${capState.summary}`);
+  }
 
   // Find all users who have health activity today (meaning they synced steps)
   // bonusSteps is selected so walked steps can be derived — see the comment on
@@ -152,7 +173,7 @@ async function distributePassiveCoins() {
 
       // Also check we don't exceed the overall daily cap (all coin sources)
       const currentEarned = isNewDay ? 0 : (gam.coinsEarnedToday || 0);
-      const overallCap = cfg.coin?.maxDailyRewards ?? 250;
+      const overallCap = cfg.coin?.maxDailyRewards ?? DEFAULT_MAX_DAILY_REWARDS;
       const overallRemaining = Math.max(0, overallCap - currentEarned);
       const finalCoins = parseFloat(Math.min(actualCoins, overallRemaining).toFixed(4));
 

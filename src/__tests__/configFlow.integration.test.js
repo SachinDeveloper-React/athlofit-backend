@@ -4,6 +4,9 @@
 
 const { getAppConfig, updateAppConfig } = require('../controllers/config.controller');
 const AppConfig = require('../models/AppConfig.model');
+const {
+  DEFAULT_RATE_PER_100_STEPS,
+} = require('../constants/coinDefaults');
 
 jest.mock('../models/AppConfig.model');
 
@@ -127,8 +130,13 @@ describe('Config Flow Integration: GET → PATCH → GET', () => {
 
       const config = res.json.mock.calls[0][0].data.config;
 
-      // Fallback defaults from the controller's ?? operators
-      expect(config.coin_config.steps.rate_per_100_steps).toBe(0.00095);
+      // Fallback defaults from the controller's ?? operators. This used to be
+      // 0.00095 here and 0.5 in every other reader, so a document missing the
+      // field made the app show a rate 526x below what the server paid — the
+      // whole point of constants/coinDefaults.js.
+      expect(config.coin_config.steps.rate_per_100_steps).toBe(
+        DEFAULT_RATE_PER_100_STEPS,
+      );
       expect(config.coin_config.rewards.daily_step_goal_reached.enabled).toBe(true);
       expect(config.coin_config.rewards.daily_step_goal_reached.coin_value).toBe(50);
     });

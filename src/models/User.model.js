@@ -305,6 +305,29 @@ const userSchema = new mongoose.Schema(
         delete ret.otpFlow;
         delete ret.tokenVersion;
         delete ret.__v;
+
+        // Which staff member switched on sync tracing, banned the account, or
+        // paused step tracking. GET /user/profile returns the whole user
+        // document, so without this the admin's own ObjectId was handed to the
+        // account they were investigating on every profile fetch.
+        //
+        // utils/exportUserData.js already strips exactly these three for exactly
+        // this reason — identifying a moderator to the person they moderated is
+        // how moderators get targeted — but it does so with a `.select()` on a
+        // lean query, which never reaches this transform. So the rule existed and
+        // was applied on the one path a user has to ask for, and not on the one
+        // the app calls constantly. Applying it here covers every endpoint that
+        // serialises a user, including ones not yet written.
+        //
+        // Only the actor is removed. That an action HAPPENED stays visible — it
+        // is about the user and they are entitled to know it, which is the same
+        // line the export draws.
+        if (ret.syncDebug) delete ret.syncDebug.enabledBy;
+        if (ret.banInfo) delete ret.banInfo.bannedBy;
+        if (ret.stepsTracking) {
+          delete ret.stepsTracking.disabledBy;
+          delete ret.stepsTracking.enabledBy;
+        }
         return ret;
       },
     },

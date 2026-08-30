@@ -45,6 +45,7 @@ function isTracing(user) {
  *
  * @param {object} p
  * @param {boolean} p.tracing       verbose mode on for this user
+ * @param {boolean} p.stepsProvided the payload carried a step count at all
  * @param {boolean} p.rejected      the sync was refused (kill switch / build gate)
  * @param {string}  p.severity      validator severity
  * @param {boolean} p.flagged       validator raised a flag
@@ -56,6 +57,7 @@ function isTracing(user) {
  */
 function resolveLogReason({
   tracing,
+  stepsProvided = true,
   rejected,
   severity,
   flagged,
@@ -65,6 +67,26 @@ function resolveLogReason({
   existingSteps,
 }) {
   if (rejected) return 'rejected';
+
+  // ── Syncs carrying no steps at all ────────────────────────────────────────
+  //
+  // Hydration and vitals post to the same endpoint with no `steps` field, and
+  // these used to be dropped before reaching this function — the caller only
+  // logged when steps were provided, so verbose tracing could not see them
+  // either.
+  //
+  // That hid the single most diagnostic state a stalled account can be in: the
+  // app is alive and talking to the server, but has no step data to send. From
+  // the logs it was indistinguishable from an app that had stopped syncing
+  // entirely, and the two have completely different causes — one is a device
+  // scheduling problem, the other is Health Connect returning nothing. A real
+  // account sat in exactly this state (a HealthActivity row written for the day
+  // with 0 steps, no sync log to explain it) and there was no way to tell which.
+  //
+  // Still only kept while someone is actively watching the account: every
+  // hydration log would otherwise become a permanent write on the hot path,
+  // which is the volume problem this module exists to avoid.
+  if (!stepsProvided) return tracing ? 'trace_no_steps' : null;
   if (severity === 'implausible') return 'implausible';
   // The validator changed the number. Whatever else is true, the stored figure
   // is not what the device said, and that difference is the single most useful
@@ -86,6 +108,7 @@ function resolveLogReason({
  */
 function recordSyncLog(req, {
   date,
+  stepsProvided = true,
   incomingSteps = 0,
   existingSteps = 0,
   clampedSteps = 0,
@@ -96,10 +119,15 @@ function recordSyncLog(req, {
   corrected = false,
   rejected = false,
   timezone = null,
+  // Normalised provenance block, or null when the build does not send one.
+  // Purely descriptive — it never influences whether the sync is recorded, only
+  // what the recorded row says about itself.
+  source = null,
 }) {
   try {
     const logReason = resolveLogReason({
       tracing: isTracing(req.user),
+      stepsProvided,
       rejected,
       severity,
       flagged,
@@ -126,6 +154,9 @@ function recordSyncLog(req, {
       platform: req.deviceCtx?.platform || null,
       clientSource: req.deviceCtx?.lastSource || null,
       timezone: timezone || null,
+      stepReader: source?.reader || null,
+      stepMethod: source?.method || null,
+      stepPrimaryOrigin: source?.primaryOrigin || null,
       logReason,
     }).catch(() => {});
   } catch {

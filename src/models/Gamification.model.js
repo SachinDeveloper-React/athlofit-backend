@@ -16,6 +16,16 @@ const gamificationSchema = new mongoose.Schema(
     lastActiveDate: { type: String, default: null }, // ISO "YYYY-MM-DD"
     lastCoinDate: { type: String, default: null },    // ISO "YYYY-MM-DD"
     stepGoalCoinDate: { type: String, default: null }, // ISO "YYYY-MM-DD" — tracks last date step-goal coins were awarded (BUG-017)
+    // ISO "YYYY-MM-DD" — last date the "goal reached" notification was sent.
+    //
+    // Deliberately separate from stepGoalCoinDate. The two used to be the same
+    // key because the notification was sent from inside the coin award, which
+    // fused two different events: the goal being MET, and a bonus being PAID.
+    // With the bonus configured to 0 they came apart badly — the award claimed
+    // the day for nothing and announced "you earned 0 coins!" — and once the
+    // award correctly stopped claiming a zero, the notification had no key of
+    // its own left and would have fired on every sync after the goal was hit.
+    stepGoalNotifiedDate: { type: String, default: null },
     lastWaterCoinDate: { type: String, default: null }, // ISO "YYYY-MM-DD"
 
     // ─── Passive step coin throttle (3-hour intervals) ──────────────────

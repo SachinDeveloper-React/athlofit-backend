@@ -57,9 +57,27 @@ const syncLogSchema = new mongoose.Schema(
     clientSource: { type: String, default: null }, // 'app' | 'native_service' | 'worker'
     timezone: { type: String, default: null },
 
+    // ── Where the steps came from ───────────────────────────────────────────
+    //
+    // A compact echo of the block the client sends (the full breakdown lives on
+    // StepProvenance, which is per-day and kept for 90 days rather than 7).
+    // Duplicated here deliberately: the sync trail is the view an investigation
+    // opens FIRST, and "the device sent 17,000" is a different finding from
+    // "the device sent 17,000 that Samsung Health recorded between 06:00 and
+    // 21:00" — without these three fields the row cannot distinguish them.
+    //
+    // Null on every row written by a build that predates the client change, so
+    // an absent reader means "this build does not say", not "no source".
+    stepReader: { type: String, default: null },  // health_connect | native_sensor | server
+    stepMethod: { type: String, default: null },  // single-origin | coverage-dedup | sensor | ...
+    stepPrimaryOrigin: { type: String, default: null }, // package that contributed most
+
     // Why this particular sync was worth recording — 'flagged', 'clamped',
-    // 'corrected', 'rejected', 'large_jump', or 'trace' (verbose mode on).
-    // Lets a reader tell a deliberately-sampled row from an anomalous one.
+    // 'corrected', 'rejected', 'large_jump', 'trace' (verbose mode on), or
+    // 'trace_no_steps' (verbose mode, and the payload carried no steps at all —
+    // a hydration or vitals post). Lets a reader tell a deliberately-sampled row
+    // from an anomalous one, and 'trace_no_steps' specifically distinguishes an
+    // app that is syncing without step data from one that has stopped syncing.
     logReason: { type: String, default: null },
   },
   { timestamps: true },

@@ -23,8 +23,17 @@ const { validateSteps } = require('../utils/stepValidation');
 const { getCachedAppConfig } = require('../utils/appConfigCache');
 const { checkTimezoneManipulation } = require('../utils/timezoneGuard');
 const { recordCheatFlag, isCoinBlocked } = require('../utils/cheatPenalty');
-const { computePassiveCoinDelta } = require('../utils/passiveCoins');
+const {
+  computePassiveCoinDelta,
+  passiveCoinsForSteps,
+} = require('../utils/passiveCoins');
+const {
+  DEFAULT_RATE_PER_100_STEPS,
+  DEFAULT_MAX_DAILY_REWARDS,
+  DEFAULT_UNVERIFIED_DAILY_CAP,
+} = require('../constants/coinDefaults');
 const { resolveGoalMet } = require('../utils/goalMet');
+const { resolveStepGoalAward } = require('../utils/stepGoalAward');
 const {
   STEPS_DISABLED_CODE,
   isStepsTrackingEnabled,
@@ -35,6 +44,10 @@ const {
   checkStepSyncVersion,
 } = require('../utils/versionGate');
 const { recordSyncLog } = require('../utils/syncLog');
+const {
+  normalizeStepSource,
+  recordStepProvenance,
+} = require('../utils/stepProvenance');
 
 // ─── Client build stamp for coin ledger entries ──────────────────────────────
 //
@@ -56,7 +69,7 @@ function clientStamp(req) {
 function getEffectiveDailyCap(user, configMax, unverifiedCap) {
   const isVerified = user.emailVerified;
   if (!isVerified) {
-    const cap = unverifiedCap ?? 50;
+    const cap = unverifiedCap ?? DEFAULT_UNVERIFIED_DAILY_CAP;
     return Math.min(cap, configMax);
   }
   return configMax;
@@ -143,6 +156,13 @@ const syncHealthData = async (req, res, next) => {
       // over-count. Lets validateSteps accept the decrease instead of raising it
       // back to the stored high-water mark. See stepValidation.js Rule 3.
       stepsCorrection,
+      // Where the client says this figure came from — which reader produced it,
+      // which Health Connect data origins contributed, and what clock times the
+      // underlying records cover. Diagnostic only: it is recorded verbatim and
+      // never consulted by validation or by the coin award, so a device cannot
+      // change what it is paid by describing itself differently. See
+      // utils/stepProvenance.js.
+      stepSource,
     } = req.body;
 
     // FIX #3: Use client timezone for "today" calculation when available.
@@ -381,22 +401,57 @@ const syncHealthData = async (req, res, next) => {
     // measured against.
     const stepsIncreased = deviceSteps > previousWalked;
 
+    // ── Step provenance ──────────────────────────────────────────────────────
+    //
+    // Normalised once and used twice: the compact form goes on the SyncLog row
+    // below, the full form into the per-day ledger. Returns null for a build too
+    // old to send the block, which the ledger records as its own state — "steps
+    // arrived and nothing said where from" is a finding, and is not the same as
+    // a device that read no records.
+    const provenance = normalizeStepSource(stepSource);
+
     // Record what the device sent versus what we kept. Placed here, after
     // `totalSteps`, so one row carries the whole chain — incoming → clamped →
     // stored — which is the comparison every step investigation starts from.
     // Fire-and-forget, and self-limiting: see utils/syncLog.js for which syncs
     // are actually written.
-    if (stepsProvided) {
-      recordSyncLog(req, {
+    // Called for EVERY sync, not only ones carrying steps. A hydration- or
+    // vitals-only post still says something worth knowing — that the app is
+    // alive and reaching the server — and dropping those here meant verbose
+    // tracing could not see them either, leaving "syncing but sending no steps"
+    // indistinguishable from "not syncing at all". resolveLogReason keeps the
+    // volume down: a step-less sync is still only written while tracing is on.
+    recordSyncLog(req, {
+      date: today,
+      stepsProvided,
+      incomingSteps: Math.round(Number(steps) || 0),
+      existingSteps: previousWalked,
+      clampedSteps: validatedSteps,
+      storedSteps: totalSteps,
+      flagged: stepValidation.flagged,
+      severity: stepValidation.severity,
+      reason: stepValidation.reason,
+      corrected: stepValidation.corrected,
+      timezone,
+      source: provenance,
+    });
+
+    // ── Per-day attribution ledger ───────────────────────────────────────────
+    //
+    // Only on an actual increase. A re-send of the same count or a rejected
+    // lower figure has nothing to explain, and recording them would bury the
+    // jumps that do. Fire-and-forget, like every other diagnostic on this path.
+    //
+    // This is what makes a 17,000-step jump readable afterwards: one row saying
+    // how much moved, which app on the phone counted it, which clock hours the
+    // underlying records span, and how many days late it was delivered.
+    if (stepsIncreased) {
+      recordStepProvenance(req, {
         date: today,
-        incomingSteps: Math.round(Number(steps) || 0),
-        existingSteps: previousWalked,
-        clampedSteps: validatedSteps,
-        storedSteps: totalSteps,
-        flagged: stepValidation.flagged,
-        severity: stepValidation.severity,
-        reason: stepValidation.reason,
-        corrected: stepValidation.corrected,
+        from: previousWalked,
+        to: deviceSteps,
+        bonusSteps,
+        source: provenance,
         timezone,
       });
     }
@@ -719,50 +774,59 @@ const syncHealthData = async (req, res, next) => {
       const stepGoalCoins = cfg.rewards.stepGoalCoins ?? 50;
       const effectiveCap = getEffectiveDailyCap(
         req.user,
-        cfg.coin.maxDailyRewards ?? 500,
+        cfg.coin.maxDailyRewards ?? DEFAULT_MAX_DAILY_REWARDS,
         cfg.coin.unverifiedDailyCap,
       );
-      const remainingAllowance = effectiveCap - (gam.coinsEarnedToday || 0);
-      const actualStepGoalCoins = Math.round(
-        Math.min(stepGoalCoins, Math.max(0, remainingAllowance)),
-      );
+      // Claim the day only if there are coins to hand over. Claiming it for
+      // zero permanently denies the bonus — stepGoalCoinDate is the same
+      // idempotency key the manual claim endpoint checks — and with the bonus
+      // switched off in config that was happening to every user, every day,
+      // along with a "you earned 0 coins!" push. See utils/stepGoalAward.js.
+      const { coins: actualStepGoalCoins, shouldClaim } = resolveStepGoalAward({
+        stepGoalCoins,
+        effectiveCap,
+        coinsEarnedToday: gam.coinsEarnedToday,
+      });
 
-      const atomicResult = await Gamification.findOneAndUpdate(
-        {
-          user: req.user._id,
-          // Atomic condition: only update if stepGoalCoinDate is NOT today
-          $or: [
-            { stepGoalCoinDate: { $ne: today } },
-            { stepGoalCoinDate: null },
-          ],
-        },
-        {
-          $set: { stepGoalCoinDate: today },
-          $inc: {
-            coinsBalance: actualStepGoalCoins,
-            coinsEarnedToday: actualStepGoalCoins,
+      let atomicResult = null;
+      if (shouldClaim) {
+        atomicResult = await Gamification.findOneAndUpdate(
+          {
+            user: req.user._id,
+            // Atomic condition: only update if stepGoalCoinDate is NOT today
+            $or: [
+              { stepGoalCoinDate: { $ne: today } },
+              { stepGoalCoinDate: null },
+            ],
           },
-          $push: {
-            claimHistory: {
-              $each: [
-                {
-                  rewardId: 'steps_daily_auto',
-                  amount: actualStepGoalCoins,
-                  source: 'Daily Step Goal — Auto Reward',
-                  createdAt: new Date(),
-                },
-              ],
-              $slice: -50, // keep last 50 entries
+          {
+            $set: { stepGoalCoinDate: today },
+            $inc: {
+              coinsBalance: actualStepGoalCoins,
+              coinsEarnedToday: actualStepGoalCoins,
+            },
+            $push: {
+              claimHistory: {
+                $each: [
+                  {
+                    rewardId: 'steps_daily_auto',
+                    amount: actualStepGoalCoins,
+                    source: 'Daily Step Goal — Auto Reward',
+                    createdAt: new Date(),
+                  },
+                ],
+                $slice: -50, // keep last 50 entries
+              },
             },
           },
-        },
-        { new: true },
-      );
+          { new: true },
+        );
+      }
 
       if (atomicResult) {
         // We won the race — coins were awarded atomically
         gam = atomicResult; // refresh local reference
-        goalCoinsAwarded = actualStepGoalCoins > 0;
+        goalCoinsAwarded = true;
         awardedGoalCoins = actualStepGoalCoins;
 
         // Mark the goal bonus as paid for THIS date, so a later re-sync of the
@@ -775,33 +839,66 @@ const syncHealthData = async (req, res, next) => {
           /* non-fatal: retro path re-checks anyway */
         });
 
-        // Log coin transaction
-        if (actualStepGoalCoins > 0) {
-          logCoinTransaction({
-            userId: req.user._id,
-            type: 'EARNED',
-            amount: actualStepGoalCoins,
-            balanceAfter: gam.coinsBalance,
-            source: 'DAILY_STEP_GOAL_AUTO',
-            description: `Daily Step Goal — ${dailyGoal.toLocaleString()} steps reached`,
-            metadata: {
-              steps: validatedSteps ?? 0,
-              date: today,
-              rewardId: 'steps_daily_auto',
-              ...clientStamp(req),
-            },
-          });
-        }
-
-        // ── Persist + push: step goal reached ──────────────────────────────
-        createNotification(req.user._id, {
-          type: 'GOAL',
-          title: '🎯 Daily Step Goal Reached!',
-          message: `You hit your ${dailyGoal.toLocaleString()} step goal and earned ${actualStepGoalCoins} coins!`,
-          data: { screen: 'Steps' },
+        // Log coin transaction. No amount check here any more: the claim above
+        // only runs when there are coins to pay, so reaching this point means a
+        // real award happened.
+        logCoinTransaction({
+          userId: req.user._id,
+          type: 'EARNED',
+          amount: actualStepGoalCoins,
+          balanceAfter: gam.coinsBalance,
+          source: 'DAILY_STEP_GOAL_AUTO',
+          description: `Daily Step Goal — ${dailyGoal.toLocaleString()} steps reached`,
+          metadata: {
+            steps: validatedSteps ?? 0,
+            date: today,
+            rewardId: 'steps_daily_auto',
+            ...clientStamp(req),
+          },
         });
       }
       // If atomicResult is null, another concurrent request already awarded coins — no-op.
+    }
+
+    // ── Notify: step goal reached ────────────────────────────────────────────
+    //
+    // Keyed on its own date rather than riding along with the coin award,
+    // because meeting the goal and being paid for it are no longer the same
+    // event. Fused, it had to pick one of two wrong behaviours: announce
+    // "you earned 0 coins!" whenever the bonus was switched off, or disappear
+    // entirely once the award correctly stopped claiming a zero. It also cannot
+    // borrow stepGoalCoinDate as its key any more — with no coins there is no
+    // coin claim, so without a key of its own this would fire on every sync for
+    // the rest of the day.
+    //
+    // Not gated on userCoinBlocked: the goal was met either way, and this
+    // notification no longer promises anything about coins.
+    if (totalGoalMet && isTodaySync && gam.stepGoalNotifiedDate !== today) {
+      const notifyClaim = await Gamification.findOneAndUpdate(
+        {
+          user: req.user._id,
+          $or: [
+            { stepGoalNotifiedDate: { $ne: today } },
+            { stepGoalNotifiedDate: null },
+          ],
+        },
+        { $set: { stepGoalNotifiedDate: today } },
+        { new: true },
+      );
+
+      // A loser of the race sends nothing — the winner already notified.
+      if (notifyClaim) {
+        gam = notifyClaim; // refresh local reference
+        createNotification(req.user._id, {
+          type: 'GOAL',
+          title: '🎯 Daily Step Goal Reached!',
+          message:
+            awardedGoalCoins > 0
+              ? `You hit your ${dailyGoal.toLocaleString()} step goal and earned ${awardedGoalCoins} coins!`
+              : `You hit your ${dailyGoal.toLocaleString()} step goal. Keep it going!`,
+          data: { screen: 'Steps' },
+        });
+      }
     }
 
     // Passive step-based coins — awarded for ALL steps regardless of goal status.
@@ -813,7 +910,7 @@ const syncHealthData = async (req, res, next) => {
         cfg.coin.dailyEarnLimit,
         cfg.coin.unverifiedDailyCap,
       );
-      const rate = cfg.coin_config?.steps?.rate_per_100_steps ?? 0.5;
+      const rate = cfg.coin_config?.steps?.rate_per_100_steps ?? DEFAULT_RATE_PER_100_STEPS;
 
       // Watermark-based calculation.
       // lastPassiveCoinSteps = the step count at which coins were last calculated.
@@ -937,7 +1034,7 @@ const syncHealthData = async (req, res, next) => {
       const daysAgo = daysBetween(today, actualToday); // positive = today is in the past
 
       if (daysAgo != null && daysAgo > 0 && daysAgo <= 7) {
-        const rate = cfg.coin_config?.steps?.rate_per_100_steps ?? 0.5;
+        const rate = cfg.coin_config?.steps?.rate_per_100_steps ?? DEFAULT_RATE_PER_100_STEPS;
         const dailyEarnLimit = getEffectiveDailyCap(
           req.user,
           cfg.coin.dailyEarnLimit,
@@ -981,12 +1078,45 @@ const syncHealthData = async (req, res, next) => {
           { stepCoinWatermark: null },
           { stepCoinWatermark: { $exists: false } },
         ];
+        // Claim the goal bonus only when there is a bonus to claim. Setting
+        // retroGoalCoinAwarded for a zero-value award marks the day paid for
+        // ever, so a later sync — or the bonus being switched back on — can
+        // never repair it. Same rule the same-day path applies above; see
+        // utils/stepGoalAward.js.
+        //
+        // The bonus is also held to the same daily coin ceiling the same-day
+        // path applies. It could not simply reuse `coinsEarnedToday`, which
+        // counts TODAY's earnings — charging a past date's bonus against today's
+        // allowance would be a different bug — so the date's own step earnings
+        // are reconstructed from its final step total instead. Hydration coins
+        // for a past date are not recoverable, so this under-counts slightly and
+        // may pay a little more than the same-day path would have. That is the
+        // conservative direction to be wrong in, and it is strictly better than
+        // the previous behaviour of applying no ceiling here at all.
+        const retroEffectiveCap = getEffectiveDailyCap(
+          req.user,
+          cfg.coin.maxDailyRewards ?? DEFAULT_MAX_DAILY_REWARDS,
+          cfg.coin.unverifiedDailyCap,
+        );
+        const retroStepCoinsForDate = passiveCoinsForSteps(
+          retroWalkedSteps,
+          rate,
+          dailyEarnLimit,
+        );
+
+        const { coins: retroGoalPayable } = resolveStepGoalAward({
+          stepGoalCoins,
+          effectiveCap: retroEffectiveCap,
+          coinsEarnedToday: retroStepCoinsForDate,
+        });
+        const claimingGoalBonus = totalGoalMet && retroGoalPayable > 0;
+
         // `$ne: true` already matches a missing field, so this needs no extra arm.
-        if (totalGoalMet)
+        if (claimingGoalBonus)
           claimConditions.push({ retroGoalCoinAwarded: { $ne: true } });
 
         const claimUpdate = { $max: { stepCoinWatermark: retroWalkedSteps } };
-        if (totalGoalMet) claimUpdate.$set = { retroGoalCoinAwarded: true };
+        if (claimingGoalBonus) claimUpdate.$set = { retroGoalCoinAwarded: true };
 
         const preClaim = await HealthActivity.findOneAndUpdate(
           { user: req.user._id, date: today, $or: claimConditions },
@@ -1009,7 +1139,7 @@ const syncHealthData = async (req, res, next) => {
           });
 
           const retroGoalCoins =
-            totalGoalMet && !goalAlreadyPaid ? stepGoalCoins : 0;
+            claimingGoalBonus && !goalAlreadyPaid ? retroGoalPayable : 0;
           const totalRetro = parseFloat(
             (retroPassive + retroGoalCoins).toFixed(4),
           );

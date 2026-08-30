@@ -7,6 +7,12 @@ const LegalContent = require("../models/LegalContent.model");
 const SupportTicket = require("../models/SupportTicket.model");
 const { success, error } = require("../utils/response");
 const { resolveUpdateRequirement } = require("../utils/versionGate");
+const { describePassiveCoinCap } = require("../utils/passiveCoins");
+const {
+  DEFAULT_RATE_PER_100_STEPS,
+  MAX_COIN_RATE_PER_100_STEPS,
+  DEFAULT_DAILY_EARN_LIMIT,
+} = require("../constants/coinDefaults");
 
 const { LEGAL_TYPES } = LegalContent;
 
@@ -141,8 +147,12 @@ const getAppConfig = async (req, res, next) => {
       },
       coin_config: {
         steps: {
+          // Was 0.00095 here while every other reader defaulted to 0.5, so a
+          // missing field made the app display a rate 526x below what the
+          // server was paying. See constants/coinDefaults.js.
           rate_per_100_steps:
-            cfg.coin_config?.steps?.rate_per_100_steps ?? 0.00095,
+            cfg.coin_config?.steps?.rate_per_100_steps ??
+            DEFAULT_RATE_PER_100_STEPS,
         },
         rewards: {
           daily_step_goal_reached: {
@@ -190,14 +200,25 @@ const updateAppConfig = async (req, res, next) => {
     // ─── Validate coin_config fields before persisting ──────────────────────────
     if (setMap["coin_config.steps.rate_per_100_steps"] !== undefined) {
       const rate = Number(setMap["coin_config.steps.rate_per_100_steps"]);
-      if (isNaN(rate) || rate <= 0 || rate > 1000) {
+      // The old bound was 1000, which at MAX_DAILY_STEPS is 500,000 coins in a
+      // single day — far past anything a typo should be able to reach, let alone
+      // an intended setting. MAX_COIN_RATE_PER_100_STEPS still leaves several
+      // orders of magnitude of headroom over the rates actually in use.
+      if (isNaN(rate) || rate <= 0 || rate > MAX_COIN_RATE_PER_100_STEPS) {
         return error(
           res,
-          "rate_per_100_steps must be a positive number (max 1000)",
+          `rate_per_100_steps must be a positive number (max ${MAX_COIN_RATE_PER_100_STEPS})`,
           400,
         );
       }
       setMap["coin_config.steps.rate_per_100_steps"] = rate;
+    }
+    if (setMap["coin.dailyEarnLimit"] !== undefined) {
+      const limit = Number(setMap["coin.dailyEarnLimit"]);
+      if (isNaN(limit) || limit < 0) {
+        return error(res, "dailyEarnLimit must be a non-negative number", 400);
+      }
+      setMap["coin.dailyEarnLimit"] = limit;
     }
     if (
       setMap["coin_config.rewards.daily_step_goal_reached.coin_value"] !==
@@ -224,7 +245,34 @@ const updateAppConfig = async (req, res, next) => {
       require('../utils/appConfigCache').invalidateAppConfigCache();
     } catch (_) { /* cache module optional */ }
 
-    return success(res, "App config updated", cfg);
+    // ── Report whether the passive daily cap can still bind ──────────────────
+    // The per-step rate and dailyEarnLimit are stored independently and were
+    // never compared, so the cap silently stopped being reachable: 0.095/100
+    // steps pays at most 47.5 coins/day, against a limit of 200. Whoever edits
+    // either value is the one person positioned to notice, so they are told
+    // here — in the response and in the log — rather than finding out from a
+    // payout months later.
+    const touchedCoinEconomy =
+      setMap["coin_config.steps.rate_per_100_steps"] !== undefined ||
+      setMap["coin.dailyEarnLimit"] !== undefined;
+
+    let passiveCoinCap;
+    if (touchedCoinEconomy) {
+      passiveCoinCap = describePassiveCoinCap(
+        cfg.coin_config?.steps?.rate_per_100_steps ?? DEFAULT_RATE_PER_100_STEPS,
+        cfg.coin?.dailyEarnLimit ?? DEFAULT_DAILY_EARN_LIMIT,
+      );
+      const log = passiveCoinCap.capBinds ? console.log : console.warn;
+      log(`[Config] ${passiveCoinCap.summary}`);
+    }
+
+    // `cfg` is a Mongoose document in production but a plain object under test
+    // and wherever findOneAndUpdate is given `lean`, so the conversion has to be
+    // optional — assuming the document shape here turned a config edit into a
+    // 500.
+    const body = typeof cfg?.toObject === "function" ? cfg.toObject() : cfg;
+
+    return success(res, "App config updated", { ...body, passiveCoinCap });
   } catch (err) {
     next(err);
   }

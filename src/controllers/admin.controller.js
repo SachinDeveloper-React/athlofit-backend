@@ -17,6 +17,8 @@ const { DEFAULT_REASON } = require('../utils/stepsTracking');
 const { purgeUserData } = require('../utils/purgeUserData');
 const { processAccountDeletions } = require('../crons/accountDeletion');
 const SyncLog = require('../models/SyncLog.model');
+const StepProvenance = require('../models/StepProvenance.model');
+const { describeEntry } = require('../utils/stepProvenance');
 
 const escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -1131,6 +1133,133 @@ const setSyncDebug = async (req, res, next) => {
   }
 };
 
+// ─── GET /admin/users/:id/step-provenance ────────────────────────────────────
+//
+// Where a user's steps came from, day by day and increase by increase.
+//
+// The view that answers the question the sync trail cannot: a single sync added
+// 17,000 steps — were those walked that day, and which app on the phone counted
+// them? `/sync-logs` shows the jump; only this shows what is behind it.
+//
+// Query: ?date=YYYY-MM-DD for one day, or ?from=&to= for a range (default: the
+// last 7 days present). ?minDelta=N hides increases smaller than N, for reading
+// a busy day's shape without 90 rows of ordinary quarter-hourly deltas.
+const getUserStepProvenance = async (req, res, next) => {
+  try {
+    const filter = { user: req.params.id };
+    if (req.query.date) {
+      filter.date = String(req.query.date);
+    } else if (req.query.from || req.query.to) {
+      filter.date = {};
+      if (req.query.from) filter.date.$gte = String(req.query.from);
+      if (req.query.to) filter.date.$lte = String(req.query.to);
+    }
+
+    const minDelta = Math.max(0, parseInt(req.query.minDelta ?? '0', 10) || 0);
+    const limitDays = Math.min(90, Math.max(1, parseInt(req.query.days ?? '7', 10) || 7));
+
+    const days = await StepProvenance.find(filter)
+      .sort({ date: -1 })
+      .limit(limitDays)
+      .lean();
+
+    return success(res, 'Step provenance fetched', {
+      total: days.length,
+      // Stated explicitly so an empty result is not read as "this user walked
+      // nothing". Provenance only exists for days synced by a build that sends
+      // the block; older days have step totals and no attribution, and those
+      // are two different answers.
+      note:
+        'Only days synced by a build that reports its step source appear here. ' +
+        'An absent day means no attribution was recorded, not that no steps were walked.',
+      days: days.map((d) => {
+        const entries = (d.entries || []).filter((e) => e.delta >= minDelta);
+
+        // The single largest increase of the day — almost always the row the
+        // question is actually about.
+        const biggest = entries.reduce(
+          (max, e) => (!max || e.delta > max.delta ? e : max),
+          null,
+        );
+
+        // Steps that arrived on a later day than they belong to. This is the
+        // direct answer to "was the user offline and did this include previous
+        // days?" — for the day being read, how much of it was backfilled.
+        const lateSteps = entries
+          .filter((e) => e.daysLate > 0)
+          .reduce((sum, e) => sum + e.delta, 0);
+
+        return {
+          date: d.date,
+          walkedSteps: d.walkedSteps,
+          bonusSteps: d.bonusSteps,
+          totalSteps: d.totalSteps,
+          timezone: d.timezone,
+          readers: d.readers,
+          firstSyncAt: d.firstSyncAt,
+          lastSyncAt: d.lastSyncAt,
+
+          // ── Attribution ────────────────────────────────────────────────────
+          // `contributed` is what an origin actually added; `steps` is what it
+          // reported. They differ when an origin was judged a mirror of another
+          // — the steps were seen and deliberately not double-counted, which is
+          // the answer to most "my steps are missing" reports.
+          origins: (d.origins || []).map((o) => ({
+            packageName: o.packageName,
+            steps: o.steps,
+            contributed: o.contributed,
+            countedAsDuplicate: o.contributed === 0 && o.steps > 0,
+            disjointFraction: Math.round((o.disjointFraction || 0) * 100) / 100,
+          })),
+
+          // 24 numbers, index 0 = 00:00 local. When the steps were RECORDED,
+          // not when they were delivered — the difference between "walked all
+          // day, synced once at night" and "17,000 stamped inside one record".
+          hourly: d.hourly || [],
+
+          summary: {
+            increases: d.increaseCount,
+            recorded: entries.length,
+            // Non-zero means the ledger is truncated and the earliest increases
+            // of the day are gone. Surfaced so a reader never mistakes a capped
+            // ledger for a complete one.
+            dropped: d.droppedEntries || 0,
+            largestIncrease: biggest ? biggest.delta : 0,
+            largestIncreaseExplained: biggest ? describeEntry(biggest) : null,
+            backfilledSteps: lateSteps,
+          },
+
+          entries: entries
+            .slice()
+            .reverse() // newest first, matching every other admin trail
+            .map((e) => ({
+              at: e.at,
+              from: e.from,
+              to: e.to,
+              delta: e.delta,
+              reader: e.reader,
+              method: e.method,
+              primaryOrigin: e.primaryOrigin,
+              origins: e.origins,
+              recordedFrom: e.recordedFrom,
+              recordedTo: e.recordedTo,
+              recordCount: e.recordCount,
+              daysLate: e.daysLate,
+              offlineMinutes: e.offlineMinutes,
+              appVersion: e.appVersion,
+              clientSource: e.clientSource,
+              // One line of plain English, so the common case does not require
+              // reading eight fields to understand one row.
+              explain: describeEntry(e),
+            })),
+        };
+      }),
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
 module.exports = {
   getUsers,
   getUserById,
@@ -1159,4 +1288,5 @@ module.exports = {
   runDeletionJob,
   getUserSyncLogs,
   setSyncDebug,
+  getUserStepProvenance,
 };

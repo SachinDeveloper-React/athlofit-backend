@@ -46,4 +46,65 @@ function computePassiveCoinDelta({ currentSteps, watermark, rate, dailyEarnLimit
   return { coins, totalForToday, alreadyAwarded };
 }
 
-module.exports = { passiveCoinsForSteps, computePassiveCoinDelta };
+// ─── Is the daily cap actually a cap? ────────────────────────────────────────
+//
+// `dailyEarnLimit` is the only lever that bounds passive earnings independently
+// of the per-step rate, and for a long time it was not bounding anything. The
+// two settings are stored separately and were never compared, so nothing in the
+// system noticed when they drifted out of range of each other:
+//
+//   rate 0.095/100 steps x 500 buckets (MAX_DAILY_STEPS) = 47.5 coins/day max,
+//   against a dailyEarnLimit of 200 — unreachable by a factor of four.
+//
+// A cap that cannot be hit is not a safety net, it is a setting that looks like
+// one. If the rate were ever raised without touching the limit, the first sign
+// would be the payouts themselves.
+//
+// These helpers make the relationship computable so it can be logged at boot and
+// checked whenever an admin edits either value. They deliberately do not CHANGE
+// the cap: what the economy should pay is a product decision, and silently
+// lowering someone's configured limit would be its own surprise.
+
+const { MAX_DAILY_STEPS } = require('./stepValidation');
+
+/**
+ * The most passive coins a single day can possibly pay at `rate`, ignoring the
+ * configured cap. Bounded by the anti-cheat's absolute daily step limit, since
+ * no larger step count is ever accepted.
+ *
+ * @param {number} rate coins per 100 steps
+ * @param {number} [maxDailySteps]
+ * @returns {number}
+ */
+function maxAchievablePassiveCoins(rate, maxDailySteps = MAX_DAILY_STEPS) {
+  return parseFloat(
+    (Math.floor(Math.max(0, maxDailySteps) / 100) * Math.max(0, rate)).toFixed(4),
+  );
+}
+
+/**
+ * Describes whether `dailyEarnLimit` can ever bind at the configured rate.
+ *
+ * @returns {{ rate: number, dailyEarnLimit: number, maxAchievable: number,
+ *   capBinds: boolean, summary: string }}
+ */
+function describePassiveCoinCap(rate, dailyEarnLimit, maxDailySteps = MAX_DAILY_STEPS) {
+  const maxAchievable = maxAchievablePassiveCoins(rate, maxDailySteps);
+  const capBinds = dailyEarnLimit < maxAchievable;
+
+  const summary = capBinds
+    ? `dailyEarnLimit ${dailyEarnLimit} binds — a day can otherwise reach ` +
+      `${maxAchievable} coins at ${rate}/100 steps.`
+    : `dailyEarnLimit ${dailyEarnLimit} can never bind: ${maxDailySteps.toLocaleString()} ` +
+      `steps at ${rate}/100 pays at most ${maxAchievable} coins/day. The per-step ` +
+      `rate is the only thing limiting passive earnings.`;
+
+  return { rate, dailyEarnLimit, maxAchievable, capBinds, summary };
+}
+
+module.exports = {
+  passiveCoinsForSteps,
+  computePassiveCoinDelta,
+  maxAchievablePassiveCoins,
+  describePassiveCoinCap,
+};

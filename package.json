@@ -8,7 +8,9 @@
     "dev": "nodemon src/server.js",
     "seed": "node src/seed.js",
     "lint": "eslint src/**/*.js",
-    "test": "jest"
+    "test": "jest",
+    "diagnose:steps": "node src/scripts/diagnoseStepGap.js",
+    "explain:steps": "node src/scripts/explainSteps.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1068.0",

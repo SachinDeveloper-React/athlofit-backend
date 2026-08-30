@@ -14,8 +14,10 @@
 //   2. Rate ceiling: existing walked steps plus what could physically have been
 //      walked since steps were last accepted (or since local midnight, if none
 //      have been yet today).
-//   3. First-sync ceiling: a tighter sustained rate for the first accepted value
-//      of the day, since there is no prior point to measure a delta from.
+//   3. First-sync ceiling: for the first accepted value of the day there is no
+//      prior point to measure a delta from, so the total is bounded by how much
+//      of its day has elapsed — interpolating from a burst allowance at midnight
+//      to the full daily cap at 24h.
 //   4. No-decrease rule (handled separately, after the ceilings): steps should
 //      not decrease within a day, allowing a small tolerance for sensor jitter.
 //      Overridable via `allowCorrection` so a client that over-reported can
@@ -56,11 +58,34 @@ const MAX_STEPS_PER_HOUR = 12_000; // ~200 steps/min sustained (running)
 const MAX_STEPS_PER_MINUTE = 220; // absolute burst (sprinting)
 const DECREASE_TOLERANCE = 100; // allow small sensor corrections
 
-// First accepted value of the day: ~150 steps/min sustained. Tighter than the
-// burst rate because there is no earlier accepted point to measure against.
-const MAX_FIRST_SYNC_STEPS_PER_HOUR = 9_000;
-// Floor so the very start of the day is not unusably tight (00:05 would allow 12).
-const FIRST_SYNC_FLOOR = 3_000;
+// ── First accepted value of the day ─────────────────────────────────────────
+//
+// This bound used to be `max(3_000, hours * 9_000)` — a sustained 150 steps/min
+// for however much of the day had elapsed. That is a rate no human holds for a
+// whole day, and the arithmetic made it worse: 50,000 / 9,000 is 5.6 hours, so
+// from mid-morning onward the bound exceeded MAX_DAILY_STEPS and stopped binding
+// altogether. From 05:36 until midnight the ONLY limit on the first sync of a day
+// was the absolute daily cap, so a client could hand over 50,000 steps in a single
+// post and be paid passive coins for all of them without the rule ever engaging.
+// That is the "0 → 26,872 in one transaction" row in the coin ledger.
+//
+// The replacement interpolates between two figures the system already commits to:
+// what could plausibly arrive at any single moment, and what a whole day may hold.
+//
+//   * At 00:00 the bound is FIRST_SYNC_BURST_ALLOWANCE. An intercept is needed
+//     because the client and server do not agree on the day boundary to the
+//     minute — timezone strings, clock skew and a device that just crossed
+//     midnight all put real steps in the first minutes of a "day" — and because
+//     an early-morning run is genuinely front-loaded.
+//   * At 24:00 the bound is exactly MAX_DAILY_STEPS, so a past date whose whole
+//     day happened is judged by the daily cap and nothing tighter. (Exactly, not
+//     approximately: the ceilings are combined with a strict `<`, so a tie leaves
+//     the daily cap as the binding rule and its reason as the one reported.)
+//
+// In between it is linear, which keeps it BELOW the daily cap for the first 22
+// hours of every day — so unlike the old version it actually does something for
+// the whole day rather than expiring before lunch.
+const FIRST_SYNC_BURST_ALLOWANCE = 6_000;
 
 /**
  * Validates incoming step count and returns a safe value.
@@ -202,17 +227,18 @@ function validateSteps({
     // the value being judged could belong to any of the last seven days: the
     // Android widget worker re-posts that whole window every 15 minutes. So a
     // past-date sync landing at 00:10 was measured against ten minutes, and a
-    // genuine 12,000-step day with no row yet was clamped to the FIRST_SYNC_FLOOR
-    // of 3,000, flagged as a cheat, and paid retroactive coins on the clamped
+    // genuine 12,000-step day with no row yet was clamped to the midnight
+    // allowance, flagged as a cheat, and paid retroactive coins on the clamped
     // figure. minutesElapsedOnDate() gives a past date its full 1,440 minutes, at
     // which point the absolute daily cap is what binds — which is correct, since a
     // whole day genuinely did happen.
     const minutesOnDate = minutesElapsedOnDate(syncDate, timezone);
     const hoursOnDate = minutesOnDate / 60;
     const isWholeDay = minutesOnDate >= 24 * 60;
-    const maxFirstSync = Math.max(
-      FIRST_SYNC_FLOOR,
-      Math.ceil(hoursOnDate * MAX_FIRST_SYNC_STEPS_PER_HOUR),
+    const dayFraction = Math.min(1, Math.max(0, hoursOnDate / 24));
+    const maxFirstSync = Math.ceil(
+      FIRST_SYNC_BURST_ALLOWANCE +
+        (MAX_DAILY_STEPS - FIRST_SYNC_BURST_ALLOWANCE) * dayFraction,
     );
     ceilings.push({
       limit: Math.max(existingWalked, maxFirstSync),
@@ -309,4 +335,4 @@ function validateSteps({
   };
 }
 
-module.exports = { validateSteps };
+module.exports = { validateSteps, MAX_DAILY_STEPS };
