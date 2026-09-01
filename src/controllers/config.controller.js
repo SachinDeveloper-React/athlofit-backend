@@ -8,11 +8,81 @@ const SupportTicket = require("../models/SupportTicket.model");
 const { success, error } = require("../utils/response");
 const { resolveUpdateRequirement } = require("../utils/versionGate");
 const { describePassiveCoinCap } = require("../utils/passiveCoins");
+const { describeDailyRewardCap } = require("../utils/dailyCoinCap");
+const Challenge = require("../models/Challenge.model");
 const {
   DEFAULT_RATE_PER_100_STEPS,
   MAX_COIN_RATE_PER_100_STEPS,
   DEFAULT_DAILY_EARN_LIMIT,
+  DEFAULT_MAX_DAILY_REWARDS,
 } = require("../constants/coinDefaults");
+
+/**
+ * Adds up what one day of rewards can pay, from LIVE config and LIVE challenges.
+ *
+ * Kept next to the config endpoints rather than in the util so the util stays
+ * pure and testable; this half is the database read.
+ *
+ * Only ACTIVE challenges count — a deactivated one pays nobody, so including it
+ * would inflate the ceiling an admin is being asked to size against.
+ */
+async function summariseDailyRewardCap(cfg) {
+  // Never fatal. This is advice for whoever is editing the config, and a
+  // problem reading the challenge collection must not stop the config itself
+  // being saved — the same rule the rest of the diagnostics on this codebase
+  // follow. Returning null lets the caller omit the field rather than report a
+  // ceiling computed from challenges it could not actually see.
+  let active;
+  try {
+    active = await Challenge.find({ isActive: true })
+      .select("type coinReward")
+      .lean();
+  } catch (err) {
+    console.warn(`[Config] could not read challenges for cap summary: ${err.message}`);
+    return null;
+  }
+
+  const sumOf = (type) =>
+    active
+      .filter((c) => c.type === type)
+      .reduce((total, c) => total + (c.coinReward || 0), 0);
+
+  return describeDailyRewardCap({
+    maxDailyRewards: cfg.coin?.maxDailyRewards ?? DEFAULT_MAX_DAILY_REWARDS,
+    dailyEarnLimit: cfg.coin?.dailyEarnLimit ?? DEFAULT_DAILY_EARN_LIMIT,
+    stepGoalCoins:
+      cfg.coin_config?.rewards?.daily_step_goal_reached?.coin_value ??
+      cfg.rewards?.stepGoalCoins ??
+      0,
+    hydrationGoalCoins: cfg.rewards?.hydrationGoalCoins ?? 0,
+    dailyChallengeCoins: sumOf("daily"),
+    weeklyChallengeCoins: sumOf("weekly"),
+  });
+}
+
+/**
+ * GET /config/coin-economy — admin only.
+ *
+ * What the admin panel needs BEFORE editing a cap, not after: the ceilings as
+ * configured, what a day can actually pay at those settings, and whether the cap
+ * binds. Without it, setting `maxDailyRewards` is guesswork against numbers
+ * spread over the config document and the challenge collection.
+ */
+const getCoinEconomy = async (req, res, next) => {
+  try {
+    const cfg = (await AppConfig.findOne({ key: "global" }).lean()) || {};
+    const [dailyRewardCap, passiveCoinCap] = [
+      await summariseDailyRewardCap(cfg),
+      describePassiveCoinCap(
+        cfg.coin_config?.steps?.rate_per_100_steps ?? DEFAULT_RATE_PER_100_STEPS,
+        cfg.coin?.dailyEarnLimit ?? DEFAULT_DAILY_EARN_LIMIT,
+      ),
+    ];
+    return success(res, "Coin economy", { dailyRewardCap, passiveCoinCap });
+  } catch (err) {
+    return next(err);
+  }
+};
 
 const { LEGAL_TYPES } = LegalContent;
 
@@ -220,6 +290,23 @@ const updateAppConfig = async (req, res, next) => {
       }
       setMap["coin.dailyEarnLimit"] = limit;
     }
+    // maxDailyRewards and unverifiedDailyCap had no validation at all, unlike
+    // dailyEarnLimit right above them — so a typo could store a negative number
+    // or a string, and every award path would then quietly pay nothing. They are
+    // the ceilings the whole coin economy is measured against; they deserve at
+    // least as much checking as the limit they sit next to.
+    for (const key of ["coin.maxDailyRewards", "coin.unverifiedDailyCap"]) {
+      if (setMap[key] === undefined) continue;
+      const value = Number(setMap[key]);
+      if (isNaN(value) || value < 0) {
+        return error(
+          res,
+          `${key.split(".")[1]} must be a non-negative number`,
+          400,
+        );
+      }
+      setMap[key] = value;
+    }
     if (
       setMap["coin_config.rewards.daily_step_goal_reached.coin_value"] !==
       undefined
@@ -254,9 +341,14 @@ const updateAppConfig = async (req, res, next) => {
     // payout months later.
     const touchedCoinEconomy =
       setMap["coin_config.steps.rate_per_100_steps"] !== undefined ||
-      setMap["coin.dailyEarnLimit"] !== undefined;
+      setMap["coin.dailyEarnLimit"] !== undefined ||
+      setMap["coin.maxDailyRewards"] !== undefined ||
+      setMap["coin.unverifiedDailyCap"] !== undefined ||
+      setMap["rewards.stepGoalCoins"] !== undefined ||
+      setMap["rewards.hydrationGoalCoins"] !== undefined;
 
     let passiveCoinCap;
+    let dailyRewardCap;
     if (touchedCoinEconomy) {
       passiveCoinCap = describePassiveCoinCap(
         cfg.coin_config?.steps?.rate_per_100_steps ?? DEFAULT_RATE_PER_100_STEPS,
@@ -264,6 +356,16 @@ const updateAppConfig = async (req, res, next) => {
       );
       const log = passiveCoinCap.capBinds ? console.log : console.warn;
       log(`[Config] ${passiveCoinCap.summary}`);
+
+      // The same service for the OVERALL ceiling. Read from live challenge
+      // content rather than from constants, because what a day can pay depends
+      // on the challenges this deployment actually has active — a number derived
+      // from the seed file would be wrong the moment an admin adds one.
+      dailyRewardCap = await summariseDailyRewardCap(cfg);
+      if (dailyRewardCap) {
+        const capLog = dailyRewardCap.capBinds ? console.log : console.warn;
+        capLog(`[Config] ${dailyRewardCap.summary}`);
+      }
     }
 
     // `cfg` is a Mongoose document in production but a plain object under test
@@ -272,7 +374,11 @@ const updateAppConfig = async (req, res, next) => {
     // 500.
     const body = typeof cfg?.toObject === "function" ? cfg.toObject() : cfg;
 
-    return success(res, "App config updated", { ...body, passiveCoinCap });
+    return success(res, "App config updated", {
+      ...body,
+      passiveCoinCap,
+      dailyRewardCap,
+    });
   } catch (err) {
     next(err);
   }
@@ -866,6 +972,7 @@ const checkVersion = async (req, res, next) => {
 module.exports = {
   getAppConfig,
   updateAppConfig,
+  getCoinEconomy,
   getTerms,
   updateTerms,
   getPrivacy,

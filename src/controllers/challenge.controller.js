@@ -11,6 +11,9 @@ const { sendPushToUser } = require('../utils/pushNotification');
 const { createNotification } = require('../utils/createNotification');
 const { logCoinTransaction } = require('../utils/logCoinTransaction');
 const { isCoinBlocked } = require('../utils/cheatPenalty');
+const { getCachedAppConfig } = require('../utils/appConfigCache');
+const { getEffectiveDailyCap, allowanceFor } = require('../utils/dailyCoinCap');
+const { DEFAULT_MAX_DAILY_REWARDS } = require('../constants/coinDefaults');
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -164,7 +167,54 @@ const syncChallengeProgress = async (userId) => {
     // Count distinct days with at least one meal logged
     const weeklyNutritionDays  = new Set(weeklyMealLogs.map(m => m.date)).size;
 
-    const gam = await ensureGamDoc(userId);
+    // Loaded once for the whole loop rather than per challenge. `user` was
+    // previously fetched inside the coin-block branch on every completed
+    // challenge; it is now also needed for the daily cap, which reads
+    // `emailVerified`.
+    const [gamDoc, cfg, user] = await Promise.all([
+      ensureGamDoc(userId),
+      getCachedAppConfig(),
+      User.findById(userId).select('coinBlockedUntil emailVerified').lean(),
+    ]);
+
+    // Reassigned as coins are credited, so each iteration measures itself
+    // against the allowance the previous ones have already spent.
+    let gam = gamDoc;
+
+    // ── Roll the day's coin counters over if this is the first thing to run ──
+    //
+    // `coinsEarnedToday` is only meaningful next to `lastCoinDate`; when the date
+    // is stale the counter still holds YESTERDAY's total. Reading it as-is would
+    // measure today's challenge rewards against a day the user has already
+    // finished, and refuse them.
+    //
+    // That is reachable, because this function is not only called from the health
+    // sync. nutrition.controller.js calls it on every meal log, and a user who
+    // logs breakfast before their phone syncs steps arrives here with the reset
+    // still pending — so the allowance has to be correct here rather than assumed
+    // to have been fixed upstream.
+    //
+    // Deliberately the SAME atomic, guarded reset health.controller.js performs,
+    // `lastPassiveCoinSteps` included. Resetting only the fields this function
+    // cares about would move `lastCoinDate` to today and make the health sync skip
+    // its own reset, stranding the passive watermark at yesterday's step count and
+    // costing the user a day of step coins. Whichever path runs first wins; the
+    // other sees the date already current and does nothing.
+    const coinDay = todayISO();
+    if (gam.lastCoinDate !== coinDay) {
+      const resetDoc = await Gamification.findOneAndUpdate(
+        { user: userId, lastCoinDate: { $ne: coinDay } },
+        {
+          $set: {
+            coinsEarnedToday: 0,
+            lastCoinDate: coinDay,
+            lastPassiveCoinSteps: 0,
+          },
+        },
+        { new: true },
+      );
+      gam = resetDoc || (await Gamification.findOne({ user: userId })) || gam;
+    }
     let coinsToAdd = 0;
     const newlyCompleted = []; // challenges that just got completed this sync
 
@@ -258,7 +308,6 @@ const syncChallengeProgress = async (userId) => {
         // ── Anti-cheat: skip coin award if user is penalized ─────────────────
         // No-op for everyone while features.cheatPenaltyEnabled is off, since
         // nothing writes coinBlockedUntil in that state.
-        const user = await User.findById(userId).select('coinBlockedUntil');
         const coinBlockStatus = isCoinBlocked(user || {});
         if (coinBlockStatus.isBlocked) {
           // Challenge is marked complete but coins are NOT awarded due to penalty.
@@ -276,47 +325,117 @@ const syncChallengeProgress = async (userId) => {
           continue;
         }
 
-        // BUG-023 fix: save gam (coins) BEFORE marking isRewarded on UserChallenge.
-        // If gam.save() fails, isRewarded stays false so the user can retry.
-        // If we marked isRewarded first and gam.save() failed, coins would never be credited.
-        gam.coinsBalance = Math.round(gam.coinsBalance + challenge.coinReward);
-        gam.claimHistory.push({
-          rewardId: `challenge_${challenge._id}_${periodKey}`,
-          amount: challenge.coinReward,
-          source: `Challenge: ${challenge.title}`,
-          createdAt: new Date(),
+        // ── The daily coin ceiling ────────────────────────────────────────
+        //
+        // This block used to credit `challenge.coinReward` in full, with no cap
+        // check of any kind, and without adding it to `coinsEarnedToday`. Both
+        // halves mattered. Uncapped, the seeded content alone offers 675 coins a
+        // day across the fifteen daily challenges against a configured
+        // `maxDailyRewards`; and because the coins never reached
+        // `coinsEarnedToday`, they did not consume the allowance the step-goal
+        // and hydration claims measure themselves against either. Challenge
+        // rewards were invisible to every cap in the system, including their own.
+        //
+        // Challenges are farmable — a daily one repeats every day — so unlike a
+        // streak badge they belong inside the ceiling. See utils/dailyCoinCap.js.
+        const owed = Math.max(
+          0,
+          challenge.coinReward - (existing?.rewardedAmount || 0),
+        );
+        const cap = getEffectiveDailyCap(
+          user,
+          cfg.coin?.maxDailyRewards ?? DEFAULT_MAX_DAILY_REWARDS,
+          cfg.coin?.unverifiedDailyCap,
+        );
+        const { payable: actualCoins, capped } = allowanceFor({
+          requested: owed,
+          coinsEarnedToday: gam.coinsEarnedToday || 0,
+          cap,
         });
-        if (gam.claimHistory.length > 50) gam.claimHistory.shift();
 
-        await gam.save(); // save coins first — if this throws, isRewarded is NOT set
+        // Paid in full only when the ceiling did not bite. A partially paid
+        // challenge is deliberately left unlocked so a later sync in the same
+        // period can top it up — marking it rewarded here is what would destroy
+        // the remainder, which is the failure mode the badge path documents.
+        const paidInFull =
+          (existing?.rewardedAmount || 0) + actualCoins >= challenge.coinReward;
+
+        // Atomic, unlike the read-modify-write this replaced. Every other credit
+        // path in the codebase uses $inc; this one read `gam.coinsBalance` into
+        // memory, added to it and saved, so a concurrent claim landing in between
+        // was silently overwritten.
+        //
+        // BUG-023 still holds: credit the coins BEFORE marking the challenge, so
+        // a failure here leaves it unrewarded and retryable rather than marked
+        // paid with nothing credited.
+        if (actualCoins > 0) {
+          const credited = await Gamification.findOneAndUpdate(
+            { user: userId },
+            {
+              $inc: {
+                coinsBalance: actualCoins,
+                coinsEarnedToday: actualCoins,
+              },
+              $push: {
+                claimHistory: {
+                  $each: [{
+                    rewardId: `challenge_${challenge._id}_${periodKey}`,
+                    amount: actualCoins,
+                    source: `Challenge: ${challenge.title}`,
+                    createdAt: new Date(),
+                  }],
+                  $slice: -50,
+                },
+              },
+            },
+            { new: true },
+          );
+          if (!credited) continue;
+          gam = credited; // keep the running allowance in step for later iterations
+        } else if (capped) {
+          // Nothing left in today's allowance. Leave the challenge completed and
+          // unrewarded so it can still be paid if allowance frees up (a hydration
+          // reset reverses coins, for one), and so the ledger does not claim it
+          // was paid.
+          continue;
+        }
 
         const doc = await UserChallenge.findOneAndUpdate(
           { user: userId, challenge: challenge._id, periodKey },
-          { $set: { isRewarded: true, rewardedAt: new Date() } },
+          {
+            $inc: { rewardedAmount: actualCoins },
+            $set: paidInFull
+              ? { isRewarded: true, rewardedAt: new Date() }
+              : {},
+          },
           { new: true },
         );
         if (!doc) continue;
 
-        coinsToAdd += challenge.coinReward;
+        coinsToAdd += actualCoins;
         newlyCompleted.push({
           title:      challenge.title,
           emoji:      challenge.emoji,
-          coinReward: challenge.coinReward,
+          coinReward: actualCoins,
         });
 
         // Log coin transaction for challenge completion
         logCoinTransaction({
           userId,
           type: 'EARNED',
-          amount: challenge.coinReward,
+          amount: actualCoins,
           balanceAfter: gam.coinsBalance,
           source: 'CHALLENGE',
-          description: `Challenge: ${challenge.title}`,
+          description: capped
+            ? `Challenge: ${challenge.title} (capped at the daily coin limit)`
+            : `Challenge: ${challenge.title}`,
           metadata: {
             rewardId: `challenge_${challenge._id}_${periodKey}`,
             challengeId: challenge._id,
             periodKey,
             date: todayISO(),
+            fullReward: challenge.coinReward,
+            capped,
           },
         });
 
@@ -324,7 +443,7 @@ const syncChallengeProgress = async (userId) => {
         createNotification(userId, {
           type:    'CHALLENGE',
           title:   `${challenge.emoji} Challenge Complete!`,
-          message: `You finished "${challenge.title}" and earned ${challenge.coinReward} coins!`,
+          message: `You finished "${challenge.title}" and earned ${actualCoins} coins!`,
           data:    { screen: 'ChallengeDetail', params: JSON.stringify({ challengeId: challenge._id.toString() }) },
         });
       }

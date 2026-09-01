@@ -10,6 +10,21 @@ const {
 
 jest.mock('../models/AppConfig.model');
 
+// updateAppConfig now reports what a day of rewards can actually pay, which
+// means reading the live challenge set. Without a mock the query has no
+// connection to buffer against and the request hangs past the test timeout.
+jest.mock('../models/Challenge.model', () => ({
+  find: jest.fn(() => ({
+    select: jest.fn(() => ({
+      lean: jest.fn().mockResolvedValue([
+        { type: 'daily', coinReward: 30 },
+        { type: 'daily', coinReward: 60 },
+        { type: 'weekly', coinReward: 200 },
+      ]),
+    })),
+  })),
+}));
+
 // --- Helpers ---
 
 function mockRes() {

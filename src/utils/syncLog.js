@@ -87,6 +87,10 @@ function resolveLogReason({
   // hydration log would otherwise become a permanent write on the hot path,
   // which is the volume problem this module exists to avoid.
   if (!stepsProvided) return tracing ? 'trace_no_steps' : null;
+  // A device that has stopped measuring. Kept ahead of every other reason
+  // because it is the only one that says the sync itself is untrustworthy rather
+  // than merely large, and it is the row an investigation needs to find first.
+  if (severity === 'stuck_source') return 'stuck_source';
   if (severity === 'implausible') return 'implausible';
   // The validator changed the number. Whatever else is true, the stored figure
   // is not what the device said, and that difference is the single most useful

@@ -1,4 +1,5 @@
 const HealthActivity = require('../models/HealthActivity.model');
+const { getEffectiveDailyCap } = require('../utils/dailyCoinCap');
 const BmiRecord = require('../models/BmiRecord.model');
 const Gamification = require('../models/Gamification.model');
 const User = require('../models/User.model');
@@ -18,7 +19,10 @@ const { syncChallengeProgress } = require('./challenge.controller');
 const { sendPushToUser } = require('../utils/pushNotification');
 const { createNotification } = require('../utils/createNotification');
 const { logCoinTransaction } = require('../utils/logCoinTransaction');
-const { validateSteps } = require('../utils/stepValidation');
+const {
+  validateSteps,
+  trackClientCadence,
+} = require('../utils/stepValidation');
 const { getCachedAppConfig } = require('../utils/appConfigCache');
 const { checkTimezoneManipulation } = require('../utils/timezoneGuard');
 const { recordCheatFlag, isCoinBlocked } = require('../utils/cheatPenalty');
@@ -29,7 +33,6 @@ const {
 const {
   DEFAULT_RATE_PER_100_STEPS,
   DEFAULT_MAX_DAILY_REWARDS,
-  DEFAULT_UNVERIFIED_DAILY_CAP,
 } = require('../constants/coinDefaults');
 const { resolveGoalMet } = require('../utils/goalMet');
 const { resolveStepGoalAward } = require('../utils/stepGoalAward');
@@ -65,14 +68,6 @@ function clientStamp(req) {
 }
 
 // ─── Unverified user daily coin cap ──────────────────────────────────────────
-function getEffectiveDailyCap(user, configMax, unverifiedCap) {
-  const isVerified = user.emailVerified;
-  if (!isVerified) {
-    const cap = unverifiedCap ?? DEFAULT_UNVERIFIED_DAILY_CAP;
-    return Math.min(cap, configMax);
-  }
-  return configMax;
-}
 
 // ─── GET /health/weekly-steps?from=YYYY-MM-DD&to=YYYY-MM-DD ──────────────────
 const getWeeklySteps = async (req, res, next) => {
@@ -311,6 +306,32 @@ const syncHealthData = async (req, res, next) => {
     // Deleting dead code that we have decided against beats leaving it commented
     // out; git history keeps the original if it is ever wanted back.
 
+    // ── Is the client still measuring anything? ──────────────────────────────
+    //
+    // Runs on the raw incoming figure, before any clamping, and only when this
+    // sync actually carries steps — a hydration-only post has no total to compare
+    // and must not be allowed to reset a streak the next real sync depends on.
+    //
+    // The result feeds validateSteps as a ceiling and is persisted below, so the
+    // next sync can measure against what the client itself last said rather than
+    // against a total this one may be about to freeze.
+    const cadence = stepsProvided
+      ? trackClientCadence({
+          incomingSteps: steps,
+          lastIncomingSteps: existing?.lastIncomingSteps ?? null,
+          lastIncomingDelta: existing?.lastIncomingDelta || 0,
+          repeatedDeltaCount: existing?.repeatedDeltaCount || 0,
+        })
+      : null;
+
+    if (cadence?.stuck) {
+      console.warn(
+        `[HealthSync] Stuck step source for user ${req.user._id} on ${today}: ` +
+          `+${cadence.delta} repeated ${cadence.repeatedDeltaCount + 1}× — ` +
+          `holding stored total, no coins awarded`,
+      );
+    }
+
     const stepValidation = validateSteps({
       incomingSteps: steps,
       existingSteps: existing?.steps || 0,
@@ -328,6 +349,7 @@ const syncHealthData = async (req, res, next) => {
       syncDate: today,
       dailyGoal,
       allowCorrection: stepsCorrection === true,
+      cadence,
     });
 
     // Use the clamped (safe) step value instead of raw client input
@@ -493,6 +515,18 @@ const syncHealthData = async (req, res, next) => {
         existing?.goalSnapshot > 0 ? existing.goalSnapshot : dailyGoal,
       // Only advanced on a real increase — see `stepsIncreased` above.
       ...(stepsIncreased ? { lastStepIncreaseAt: new Date() } : {}),
+      // Cadence bookkeeping, written on every sync that carried steps —
+      // INCLUDING one the stuck-source rule just refused. That is deliberate: the
+      // rule needs to keep seeing the raw figures to know when the device starts
+      // measuring again, and skipping the write on a refused sync would freeze the
+      // streak at the value that triggered it and never release.
+      ...(cadence
+        ? {
+            lastIncomingSteps: cadence.lastIncomingSteps,
+            lastIncomingDelta: cadence.lastIncomingDelta,
+            repeatedDeltaCount: cadence.repeatedDeltaCount,
+          }
+        : {}),
       // Which build wrote this row. Only stamped when the caller actually
       // identified itself; otherwise the previous stamp is left in place rather
       // than being wiped to null by an older client that happens to sync later.

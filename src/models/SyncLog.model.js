@@ -44,7 +44,8 @@ const syncLogSchema = new mongoose.Schema(
 
     // ── Validator verdict ───────────────────────────────────────────────────
     flagged: { type: Boolean, default: false },
-    severity: { type: String, default: 'none' }, // 'none' | 'clamped' | 'implausible'
+    // 'none' | 'clamped' | 'implausible' | 'stuck_source'
+    severity: { type: String, default: 'none' },
     reason: { type: String, default: null },
     corrected: { type: Boolean, default: false },
 

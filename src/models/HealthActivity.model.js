@@ -58,6 +58,24 @@ const healthActivitySchema = new mongoose.Schema(
     // by syncing more often.
     lastStepIncreaseAt: { type: Date, default: null },
 
+    // ── Cadence tracking, for recognising a source that has stopped measuring ─
+    //
+    // These follow the RAW client total rather than the stored one. That
+    // distinction is the whole point: once the stuck-source rule binds, the
+    // stored total stops moving, so a delta measured against it would start
+    // growing and the constant-delta pattern would vanish on the next sync —
+    // releasing the guard it had just triggered. Measured against what the
+    // client itself last said, the pattern stays visible for as long as the
+    // device keeps producing it. See trackClientCadence in stepValidation.js.
+    //
+    // null (not 0) means "no previous raw total recorded", which is a different
+    // state from a client that genuinely reported 0: the first sync of a day and
+    // a row written by a build too old to record one both have nothing to
+    // measure against, and must not be read as a zero-step baseline.
+    lastIncomingSteps: { type: Number, default: null },
+    lastIncomingDelta: { type: Number, default: 0 },
+    repeatedDeltaCount: { type: Number, default: 0 },
+
     // Whether the one-off retroactive step-goal bonus has been paid for this
     // date. Separate from the watermark because the goal bonus is a flat amount
     // awarded once, not a function of the step count.

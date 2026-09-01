@@ -11,7 +11,9 @@ const appConfigSchema = new mongoose.Schema(
     coin: {
       conversionRate:  { type: Number, default: 10 },   // coins per ₹1
       dailyEarnLimit:  { type: Number, default: 200 },  // max passive coins/day from steps
-      maxDailyRewards: { type: Number, default: 250 },  // max claimable coins/day
+      // See constants/coinDefaults.js for how this number is derived. Existing
+      // documents keep their stored value — a schema default only applies on insert.
+      maxDailyRewards: { type: Number, default: 950 },  // max claimable coins/day
       unverifiedDailyCap: { type: Number, default: 50 }, // max coins/day for unverified users
       coinsPerStepKm:  { type: Number, default: 1 },
       purchaseEnabled: { type: Boolean, default: true },

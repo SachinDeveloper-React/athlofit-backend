@@ -140,19 +140,26 @@ describe('validateSteps — hard limits', () => {
     ).toBe(0);
   });
 
-  it('clamps an implausible jump to what could physically have been walked', () => {
-    // This previously asserted 6,000 — existing 1,000 plus a flat 5,000 — which
+  it('clamps an implausible jump to what the day could plausibly hold', () => {
+    // This asserted 6,000 originally — existing 1,000 plus a flat 5,000 — which
     // was the bug rather than the rule: the rapid-jump branch ASSIGNED
     // `existingWalked + 5000`, so an implausible report was granted 5,000 steps
-    // instead of being cut down. One minute allows 220 steps, and that is now the
-    // answer.
+    // instead of being cut down.
+    //
+    // It then asserted 1,220: the one-minute delta window, which was the only
+    // bound applied once a date had an accepted increase. The rate ceiling is now
+    // the looser of the delta bound and the day bound, so what answers here is
+    // the day bound — 12:00 local => 6,000 + 44,000 * 12/24 = 28,000. Still a
+    // clamp, still flagged, and still far below the 40,000 claimed; what changed
+    // is that the same figure is now judged the same way whether or not this
+    // account happened to sync earlier today.
     const result = validateSteps({
       ...base,
       incomingSteps: 40_000,
       existingSteps: 1_000,
       lastStepIncreaseAt: minsAgo(1),
     });
-    expect(result.clampedSteps).toBe(1_220);
+    expect(result.clampedSteps).toBe(28_000);
     expect(result.flagged).toBe(true);
   });
 
@@ -177,37 +184,60 @@ describe('validateSteps — the 5,000-step ratchet', () => {
   const RATCHET_SYNCS = 12;
   const INFLATED = 45_000;
 
-  it('repeated syncs of an inflated value cannot ratchet the total up', () => {
+  // ── What "cannot ratchet" means now ─────────────────────────────────────────
+  //
+  // These two used to assert that twelve rapid syncs of an inflated figure added
+  // under 1,000 steps in total, because the delta window was the only bound in
+  // play once a date had an accepted increase.
+  //
+  // The rate ceiling now takes the looser of the delta bound and the day bound,
+  // so the first sync goes straight to the day bound — 28,000 at the suite's
+  // frozen noon. That is not a regression of the reported bug, for two reasons.
+  // The bug was UNBOUNDED climbing: `existing + 5000` every 20 seconds, forever,
+  // all the way to whatever the client claimed. What replaces it is a hard
+  // ceiling the client cannot climb past by talking more. And 28,000 at noon was
+  // already reachable in a single post by any account that had simply not synced
+  // yet that day — the old rule made the figure depend on the account's sync
+  // history rather than on whether it was plausible.
+  //
+  // So what these now pin is the property that actually matters: the ceiling
+  // holds no matter how often it is pushed, and the inflated figure is never
+  // reached.
+  it('repeated syncs of an inflated value cannot climb past the day ceiling', () => {
     let stored = 0;
-    const accepted = [];
 
     for (let i = 0; i < RATCHET_SYNCS; i++) {
-      const r = validateSteps({
+      stored = validateSteps({
         ...base,
         incomingSteps: INFLATED,
         existingSteps: stored,
-        // 20 seconds apart, the app's actual sync throttle. Under the old rule this
-        // window skipped the rate check entirely and still granted 5,000.
+        // 20 seconds apart, the app's old sync throttle. Under the original rule
+        // this window skipped the rate check entirely and still granted 5,000.
         lastStepIncreaseAt: minsAgo(20 / 60),
-      });
-      accepted.push(r.clampedSteps - stored);
-      stored = r.clampedSteps;
+      }).clampedSteps;
     }
 
-    // No single sync may add anything close to 5,000.
-    for (const delta of accepted) {
-      expect(delta).toBeLessThanOrEqual(Math.ceil((20 / 60) * 220));
-    }
-
-    // Twelve syncs over ~4 minutes must not have produced thousands of steps.
-    expect(stored).toBeLessThan(1_000);
+    // 12:00 local => 6,000 + 44,000 * 12/24 = 28,000, plus the 20-second delta
+    // window each sync is separately allowed. Twelve syncs may not compound into
+    // anything near the 45,000 claimed.
+    const dayCeiling = 28_000;
+    const perSyncSlack = Math.ceil((20 / 60) * 220) * RATCHET_SYNCS;
+    expect(stored).toBeLessThanOrEqual(dayCeiling + perSyncSlack);
     expect(stored).toBeLessThan(INFLATED);
   });
 
   it('syncing more often does not earn more steps', () => {
     // Same wall-clock span, different sync cadences. The accepted total must not
-    // depend on how often the client talks to the server — that dependency was the
-    // whole exploit.
+    // SCALE with how often the client talks to the server — that dependency was
+    // the whole exploit, and it is the property the change to the ceiling must not
+    // weaken.
+    //
+    // Exact equality is not the right assertion and never was: each sync's delta
+    // allowance is `ceil(windowMinutes * 220)`, so a cadence with more syncs
+    // collects more rounding-up, and the two runs also divide the span into
+    // different numbers of windows. What has to hold is that both stay under what
+    // the elapsed span could physically produce — 30 times the syncs must not buy
+    // anything like 30 times the steps.
     const spanMinutes = 10;
 
     const runCadence = syncCount => {
@@ -227,11 +257,15 @@ describe('validateSteps — the 5,000-step ratchet', () => {
     const few = runCadence(2); // every 5 minutes
     const many = runCadence(60); // every 10 seconds
 
-    // Both bounded by the same physical rate over the same span, so they land in
-    // the same ballpark rather than scaling with sync count.
-    const bound = Math.ceil(spanMinutes * 220) + 220; // +1 window of slack
+    // The day ceiling at the frozen noon, plus everything the span could hold.
+    const bound = 28_000 + Math.ceil(spanMinutes * 220);
     expect(few).toBeLessThanOrEqual(bound);
     expect(many).toBeLessThanOrEqual(bound);
+
+    // And the 30x cadence buys well under 2x the steps above the ceiling, rather
+    // than scaling with the sync count.
+    expect(many - 28_000).toBeLessThan((few - 28_000) * 2);
+    expect(many).toBeLessThan(INFLATED);
   });
 
   it('a hydration-only sync cannot shrink the window a real sync is judged against', () => {
@@ -310,7 +344,7 @@ describe('validateSteps — first accepted value of the day', () => {
       // 186,000 here, i.e. the absolute daily cap and nothing else.
       expect(result.clampedSteps).toBe(43_889);
       expect(result.flagged).toBe(true);
-      expect(result.reason).toMatch(/First accepted value/);
+      expect(result.reason).toMatch(/Total too high for the day/);
     } finally {
       jest.useRealTimers();
     }
@@ -523,22 +557,50 @@ describe('validateSteps — past-date syncs get the whole day, not today so far'
     }
   });
 
-  it('leaves the delta ceiling in charge once a date has an accepted increase', () => {
-    // syncDate only feeds the first-accepted-value branch. A past date that already
-    // has a row is measured from lastStepIncreaseAt, and that must not change.
+  it('accepts a past date backlog that the day it belongs to had time for', () => {
+    // This used to assert the opposite — that a past date with an accepted increase
+    // stayed under the delta ceiling and was cut to 5,440. That was the clearest
+    // case of the asymmetry the day ceiling now removes: the delta window here is
+    // "2 minutes since we last accepted steps", and it was being applied to steps
+    // that were walked YESTERDAY. A whole day genuinely did elapse for 2026-08-16,
+    // so 12,000 is an ordinary figure for it, and the fact that this row already
+    // had one accepted increase says nothing about whether the rest is plausible.
+    //
+    // A first sync for the same past date was already accepted in full before this
+    // change. Now the second one is too.
     jest.useFakeTimers().setSystemTime(justAfterMidnight);
     try {
       const result = validateSteps({
         ...base,
         incomingSteps: 12_000,
         existingSteps: 5_000,
-        lastStepIncreaseAt: minsAgo(2), // 2 min => 440 steps allowed
+        lastStepIncreaseAt: minsAgo(2), // 2 min => only 440 by the delta bound
         timezone: 'UTC',
         syncDate: '2026-08-16',
       });
-      expect(result.clampedSteps).toBe(5_440);
+      expect(result.clampedSteps).toBe(12_000);
+      expect(result.flagged).toBe(false);
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
+  it('still bounds a past date by its own whole day, not by the daily cap alone', () => {
+    // The looser bound is the DAY's, not "anything goes". A past date gets its
+    // full 1,440 minutes, at which point MAX_DAILY_STEPS is what binds — and it
+    // still binds.
+    jest.useFakeTimers().setSystemTime(justAfterMidnight);
+    try {
+      const result = validateSteps({
+        ...base,
+        incomingSteps: 90_000,
+        existingSteps: 5_000,
+        lastStepIncreaseAt: minsAgo(2),
+        timezone: 'UTC',
+        syncDate: '2026-08-16',
+      });
+      expect(result.clampedSteps).toBe(50_000);
       expect(result.flagged).toBe(true);
-      expect(result.reason).toMatch(/Rate too high/);
     } finally {
       jest.useRealTimers();
     }
@@ -572,23 +634,48 @@ describe('validateSteps — severity separates routine clamping from cheating', 
     });
 
   describe('honest submissions are never graded implausible', () => {
+    // These three are the backlog shapes the severity split was introduced for.
+    // They used to be accepted only in part — clamped and flagged on every sync
+    // until the server walked up to them — and the split's job was to make sure
+    // that clamping was never mistaken for cheating.
+    //
+    // With the day ceiling now applying alongside the delta ceiling, all three
+    // are simply accepted: 18h elapsed allows 6,000 + 44,000 * 18/24 = 39,000,
+    // and none of them claims anywhere near that. The property under test is
+    // unchanged and satisfied more strongly — an honest backlog is not merely
+    // graded gently, it is no longer clamped at all.
     it.each([
       [8_000, 5_000, 'smartwatch flushes a 3,000-step backlog'],
       [12_000, 2_000, 'app reopened after the OS killed it'],
       [20_000, 3_000, 'a full day of walking arrives in one read'],
     ])(
-      '%i steps over a stored %i → clamped, not implausible (%s)',
+      '%i steps over a stored %i → accepted outright (%s)',
       (incoming, existing) => {
         jest.useFakeTimers().setSystemTime(new Date('2026-08-17T18:00:00Z')); // 18h elapsed
         try {
           const result = check(incoming, existing);
-          expect(result.flagged).toBe(true);
-          expect(result.severity).toBe('clamped');
+          expect(result.clampedSteps).toBe(incoming);
+          expect(result.flagged).toBe(false);
+          expect(result.severity).toBe('none');
         } finally {
           jest.useRealTimers();
         }
       },
     );
+
+    it('grades a figure over the day ceiling as clamped, never implausible', () => {
+      // Above what the elapsed day allows but below what a human could physically
+      // have walked in it. Routine, and must stay unpunishable.
+      jest.useFakeTimers().setSystemTime(new Date('2026-08-17T18:00:00Z'));
+      try {
+        const result = check(45_000, 3_000); // ceiling is 39,000
+        expect(result.clampedSteps).toBe(39_000);
+        expect(result.flagged).toBe(true);
+        expect(result.severity).toBe('clamped');
+      } finally {
+        jest.useRealTimers();
+      }
+    });
 
     it('grades an unclamped submission as none', () => {
       const result = check(5_000, 5_000);
@@ -631,12 +718,16 @@ describe('validateSteps — severity separates routine clamping from cheating', 
     });
 
     it('does not call that same figure implausible late in the day', () => {
-      // The identical 40,000 at 20:00 (1,200 min → 264,000 physical ceiling) is
-      // merely clamped by the daily cap, not evidence of anything.
+      // The identical 40,000 at 20:00 is an ordinary total for twenty hours of
+      // walking (the day ceiling there is 6,000 + 44,000 * 20/24 = 42,667), so it
+      // is now accepted outright rather than clamped. Either way, the point of the
+      // pairing with the 02:00 case above stands: the SAME number is evidence of
+      // cheating at 2am and of nothing at all at 8pm.
       jest.useFakeTimers().setSystemTime(new Date('2026-08-17T20:00:00Z'));
       try {
         const result = check(40_000, 1_000);
-        expect(result.severity).toBe('clamped');
+        expect(result.severity).not.toBe('implausible');
+        expect(result.severity).toBe('none');
       } finally {
         jest.useRealTimers();
       }
@@ -710,5 +801,204 @@ describe('validateSteps — severity separates routine clamping from cheating', 
         jest.useRealTimers();
       }
     });
+  });
+});
+
+// ─── The stuck source ────────────────────────────────────────────────────────
+//
+// Every other rule in this file bounds how FAST steps may arrive. None of them
+// can say whether the number arriving is a measurement at all, and a real
+// account fell straight through that gap: eight consecutive 15-minute syncs
+// each reporting exactly +2,270 steps, 18,160 in total, every one accepted
+// because 2,270 is comfortably under the 3,311 a 15-minute window allows.
+//
+// These tests pin the rule to the property that actually gave it away — that
+// the deltas did not vary with the length of the windows they spanned — and to
+// the two things it must not do: punish the user, or keep refusing a device
+// that has started working again.
+describe('stuck source detection', () => {
+  const {
+    trackClientCadence,
+    STUCK_DELTA_MIN_STEPS,
+    STUCK_DELTA_REPEATS,
+  } = require('../utils/stepValidation');
+
+  /** Runs a series of raw client totals through the tracker, keeping its state. */
+  const runCadence = (totals, seed = null) => {
+    let state = {
+      lastIncomingSteps: seed,
+      lastIncomingDelta: 0,
+      repeatedDeltaCount: 0,
+    };
+    return totals.map((incomingSteps) => {
+      state = trackClientCadence({ incomingSteps, ...state });
+      return state;
+    });
+  };
+
+  describe('trackClientCadence', () => {
+    it('seeds silently when there is no previous raw total', () => {
+      const [first] = runCadence([27_794]);
+      expect(first).toMatchObject({
+        delta: 0,
+        lastIncomingSteps: 27_794,
+        repeatedDeltaCount: 0,
+        stuck: false,
+      });
+    });
+
+    it('binds on the delta after STUCK_DELTA_REPEATS identical ones', () => {
+      // The real incident: 30,008 → 48,168 in exact 2,270 increments.
+      const totals = [30_008, 32_278, 34_548, 36_818, 39_088, 41_358];
+      const states = runCadence(totals, 27_794);
+
+      expect(states.map((s) => s.stuck)).toEqual([
+        false, // +2,214 — first delta, nothing to match
+        false, // +2,270 — first of its kind
+        false, // repeat 1
+        false, // repeat 2
+        true, //  repeat 3 → refused
+        true, //  and stays refused while it continues
+      ]);
+      expect(states[4].repeatedDeltaCount).toBe(STUCK_DELTA_REPEATS);
+    });
+
+    it('releases as soon as the device reports a different delta', () => {
+      const stuck = runCadence(
+        [32_278, 34_548, 36_818, 39_088],
+        30_008,
+      ).at(-1);
+      expect(stuck.stuck).toBe(true);
+
+      const recovered = trackClientCadence({
+        incomingSteps: 40_000, // +912, a real measurement again
+        ...stuck,
+      });
+      expect(recovered.stuck).toBe(false);
+      expect(recovered.repeatedDeltaCount).toBe(0);
+    });
+
+    it('ignores repeats too small to be evidence', () => {
+      // A phone idling on a desk reports the same tiny gain over and over. That
+      // is ordinary, and freezing someone's day over it would be absurd.
+      const small = STUCK_DELTA_MIN_STEPS - 1;
+      const totals = [1, 2, 3, 4, 5, 6].map((n) => 5_000 + n * small);
+      expect(runCadence(totals, 5_000).some((s) => s.stuck)).toBe(false);
+    });
+
+    it('does not let a re-send or a behind device build a streak', () => {
+      // Same count twice, then a lower figure from a second device.
+      const states = runCadence([20_000, 20_000, 18_000, 20_000], 20_000);
+      expect(states.some((s) => s.stuck)).toBe(false);
+      expect(states.every((s) => s.repeatedDeltaCount === 0)).toBe(true);
+    });
+
+    it('leaves a real walker alone across a whole day of syncs', () => {
+      // Steady brisk walking, with the step-level jitter a real counter has.
+      const jitter = [2_270, 2_268, 2_271, 2_269, 2_273, 2_270, 2_266, 2_272];
+      let total = 5_000;
+      const totals = jitter.map((d) => (total += d));
+      expect(runCadence(totals, 5_000).some((s) => s.stuck)).toBe(false);
+    });
+  });
+
+  describe('validateSteps under a stuck source', () => {
+    const stuckCadence = {
+      delta: 2_270,
+      repeatedDeltaCount: STUCK_DELTA_REPEATS,
+      stuck: true,
+    };
+
+    it('holds the stored total exactly where it is', () => {
+      const r = validateSteps({
+        ...base,
+        incomingSteps: 39_088,
+        existingSteps: 36_818,
+        cadence: stuckCadence,
+      });
+      expect(r.clampedSteps).toBe(36_818);
+      expect(r.severity).toBe('stuck_source');
+      expect(r.flagged).toBe(true);
+      expect(r.reason).toMatch(/not measuring/i);
+    });
+
+    it('never grades a stuck source as cheating, even past the daily cap', () => {
+      // This is the case that matters. A stuck counter keeps climbing, and
+      // graded by magnitude alone it eventually crosses MAX_DAILY_STEPS and is
+      // handed to recordCheatFlag — flagging someone for their phone's fault.
+      const r = validateSteps({
+        ...base,
+        incomingSteps: 90_000,
+        existingSteps: 48_168,
+        cadence: stuckCadence,
+      });
+      expect(r.severity).toBe('stuck_source');
+      expect(r.severity).not.toBe('implausible');
+      expect(r.clampedSteps).toBe(48_168);
+    });
+
+    it('changes nothing when the cadence is healthy', () => {
+      const healthy = { delta: 2_270, repeatedDeltaCount: 1, stuck: false };
+      const r = validateSteps({
+        ...base,
+        incomingSteps: 39_088,
+        existingSteps: 36_818,
+        cadence: healthy,
+      });
+      expect(r.clampedSteps).toBe(39_088);
+      expect(r.severity).toBe('none');
+    });
+
+    it('is a no-op for callers that pass no cadence at all', () => {
+      const r = validateSteps({
+        ...base,
+        incomingSteps: 39_088,
+        existingSteps: 36_818,
+      });
+      expect(r.clampedSteps).toBe(39_088);
+      expect(r.severity).toBe('none');
+    });
+  });
+
+  it('bounds the damage of the real incident', () => {
+    // Replay of the ledger: the device reports its own total every ~15 minutes,
+    // climbing by exactly 2,270 each time, and the server applies both rules
+    // together the way the controller does.
+    jest.useFakeTimers({ now: new Date('2026-09-01T14:57:00.000Z') });
+    try {
+      let stored = 27_794; // last figure Health Connect corroborated
+      let lastAccepted = new Date();
+      let cadence = {
+        lastIncomingSteps: 27_794,
+        lastIncomingDelta: 0,
+        repeatedDeltaCount: 0,
+      };
+
+      let client = 30_008;
+      for (let i = 0; i < 8; i++) {
+        cadence = trackClientCadence({ incomingSteps: client, ...cadence });
+        const r = validateSteps({
+          ...base,
+          incomingSteps: client,
+          existingSteps: stored,
+          lastStepIncreaseAt: lastAccepted,
+          syncDate: '2026-09-01',
+          cadence,
+        });
+        if (r.clampedSteps > stored) {
+          stored = r.clampedSteps;
+          lastAccepted = new Date();
+        }
+        client += 2_270;
+        jest.advanceTimersByTime(15 * 60 * 1000);
+      }
+
+      // Unguarded this run stored 48,168. The rule lets the first few through —
+      // it cannot know yet — then holds the line for the rest of the day.
+      expect(stored).toBe(36_818);
+      expect(stored).toBeLessThan(48_168);
+    } finally {
+      jest.useRealTimers();
+    }
   });
 });

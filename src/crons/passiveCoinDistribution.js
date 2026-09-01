@@ -31,6 +31,7 @@ const {
   computePassiveCoinDelta,
   describePassiveCoinCap,
 } = require('../utils/passiveCoins');
+const { getEffectiveDailyCap, allowanceFor } = require('../utils/dailyCoinCap');
 const {
   DEFAULT_RATE_PER_100_STEPS,
   DEFAULT_DAILY_EARN_LIMIT,
@@ -332,6 +333,35 @@ async function eodAutoClaimStepGoal() {
         continue;
       }
 
+      // ── The daily ceiling applies here too ───────────────────────────────
+      //
+      // This awarded `stepGoalCoins` in full with no cap check at all — the only
+      // step-goal path that did not. The same-day award in health.controller.js
+      // runs it through resolveStepGoalAward, and the manual claim in
+      // gamification.controller.js computes a remaining allowance; this one
+      // loaded `emailVerified` into userMap and then never used it.
+      const gamDoc = await Gamification.findOne({ user: userId })
+        .select('coinsEarnedToday lastCoinDate')
+        .lean();
+      // Yesterday's total is stale on a new day and must not eat today's
+      // allowance — the passive payout above applies the same reasoning.
+      const earnedToday =
+        gamDoc?.lastCoinDate === today ? gamDoc?.coinsEarnedToday || 0 : 0;
+      const { payable: payableGoalCoins } = allowanceFor({
+        requested: stepGoalCoins,
+        coinsEarnedToday: earnedToday,
+        cap: getEffectiveDailyCap(
+          userDoc,
+          cfg.coin?.maxDailyRewards ?? DEFAULT_MAX_DAILY_REWARDS,
+          cfg.coin?.unverifiedDailyCap,
+        ),
+      });
+
+      if (payableGoalCoins <= 0) {
+        skipped++;
+        continue;
+      }
+
       // Atomically award step goal coins ONLY if not already awarded today
       const atomicResult = await Gamification.findOneAndUpdate(
         {
@@ -344,8 +374,8 @@ async function eodAutoClaimStepGoal() {
         {
           $set: { stepGoalCoinDate: today },
           $inc: {
-            coinsBalance: stepGoalCoins,
-            coinsEarnedToday: stepGoalCoins,
+            coinsBalance: payableGoalCoins,
+            coinsEarnedToday: payableGoalCoins,
           },
           $push: {
             claimHistory: {

@@ -1,5 +1,6 @@
 // src/controllers/gamification.controller.js
 const Gamification = require('../models/Gamification.model');
+const { getEffectiveDailyCap } = require('../utils/dailyCoinCap');
 const BadgeDefinition = require('../models/BadgeDefinition.model');
 const HealthActivity = require('../models/HealthActivity.model');
 const Order = require('../models/Order.model');
@@ -26,14 +27,6 @@ async function getLiveConfig() {
 
 // ─── Helper: get effective daily coin cap based on user verification status ───
 // Unverified users (email not verified) get a lower cap from config.
-function getEffectiveDailyCap(user, configMax, unverifiedCap) {
-  const isVerified = user.emailVerified;
-  if (!isVerified) {
-    const cap = unverifiedCap ?? 50; // fallback if config not set
-    return Math.min(cap, configMax);
-  }
-  return configMax;
-}
 
 // ─── Helper: load active badge defs + ensure user record is migrated ──────────
 const loadBadgeDefs = async () => {

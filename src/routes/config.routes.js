@@ -4,6 +4,7 @@ const router = express.Router();
 const {
   getAppConfig,
   updateAppConfig,
+  getCoinEconomy,
   getTerms,
   updateTerms,
   getPrivacy,
@@ -42,6 +43,9 @@ router.post('/support', (req, res, next) => {
 });
 
 // ── Admin only ────────────────────────────────────────────────────────────────
+// What a day of rewards can actually pay at the current settings, so the
+// admin panel can size the caps against live content instead of guessing.
+router.get('/coin-economy', protect, adminOnly, getCoinEconomy);
 router.patch('/app',    protect, adminOnly, updateAppConfig);
 router.put('/terms',    protect, adminOnly, updateTerms);
 router.put('/privacy',  protect, adminOnly, updatePrivacy);
