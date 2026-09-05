@@ -47,6 +47,7 @@ const coinTransactionSchema = new mongoose.Schema(
         'ACHIEVEMENT',           // Advanced achievement claimed
         'CHALLENGE',             // Challenge completed
         'CHALLENGE_REVERTED',    // Challenge progress reverted — reward clawed back
+        'STEPS_REVERTED',        // Step coins clawed back after a day's steps were corrected
         'REFERRAL_BONUS',        // Referral bonus
         'SHOP_PURCHASE',         // Spent on shop
         'SHOP_REFUND',           // Refund from order cancellation

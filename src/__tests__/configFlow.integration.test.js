@@ -394,4 +394,140 @@ describe('Config Flow Integration: GET → PATCH → GET', () => {
       expect(config.support.email).toBe('support@athlofit.com');
     });
   });
+
+  // The update gate is the one config block where a wrong value is invisible
+  // from the outside: `force` has no dismiss in the app, and "no prompt at all"
+  // is indistinguishable from "no prompt was wanted". Both directions are
+  // pinned here.
+  describe('forceUpdate gate', () => {
+    const withGate = (forceUpdate) =>
+      buildDefaultConfigDoc({ forceUpdate });
+
+    const androidGate = (android) =>
+      withGate({ enabled: true, android, ios: {} });
+
+    it('GET exposes the stored gate so the admin panel can read it back', async () => {
+      // This block used to be omitted from the response entirely. That is how
+      // android sat on '0.0.77' — the package.json version, against clients
+      // reporting versionName '1.77' — for as long as it did: every client
+      // compared as newer, no prompt ever fired, and nothing anywhere showed
+      // the stored value.
+      AppConfig.findOne = jest.fn().mockResolvedValue(
+        androidGate({
+          minVersion: '1.77',
+          latestVersion: '1.78',
+          updateUrl: 'https://play.google.com/store/apps/details?id=com.athlofit.athlofit',
+        }),
+      );
+
+      const res = mockRes();
+      await getAppConfig({}, res, jest.fn());
+
+      const gate = res.json.mock.calls[0][0].data.config.forceUpdate;
+      expect(gate.android.minVersion).toBe('1.77');
+      expect(gate.android.latestVersion).toBe('1.78');
+      expect(gate.android.updateUrl).toContain('com.athlofit.athlofit');
+    });
+
+    it('GET reports an absent gate as empty rather than throwing', async () => {
+      // Documents predating the feature have no forceUpdate block at all.
+      AppConfig.findOne = jest.fn().mockResolvedValue(buildDefaultConfigDoc());
+
+      const res = mockRes();
+      await getAppConfig({}, res, jest.fn());
+
+      const gate = res.json.mock.calls[0][0].data.config.forceUpdate;
+      expect(gate.android.minVersion).toBe('');
+      expect(gate.ios.latestVersion).toBe('');
+    });
+
+    it('rejects a minVersion raised above the STORED latestVersion', async () => {
+      // The trap this whole validation exists for. The admin panel sends one
+      // field at a time, so a lone minVersion looks fine in isolation and only
+      // contradicts what is already in the database. versionGate then clamps it
+      // back down at read time, so the save succeeds, nothing changes, and no
+      // device is ever prompted.
+      AppConfig.findOne = jest
+        .fn()
+        .mockResolvedValue(
+          androidGate({ minVersion: '1.70', latestVersion: '1.77' }),
+        );
+      AppConfig.findOneAndUpdate = jest.fn();
+
+      const res = mockRes();
+      await updateAppConfig(
+        { body: { forceUpdate: { android: { minVersion: '1.80' } } } },
+        res,
+        jest.fn(),
+      );
+
+      expect(res.status).toHaveBeenCalledWith(400);
+      expect(res.json.mock.calls[0][0].message).toContain('cannot exceed latestVersion');
+      expect(AppConfig.findOneAndUpdate).not.toHaveBeenCalled();
+    });
+
+    it('rejects a version that is not dotted-numeric', async () => {
+      // resolveUpdateRequirement refuses to act on an unparseable version, so a
+      // typo like 'v1.78' would store cleanly and then silently gate nobody.
+      AppConfig.findOne = jest
+        .fn()
+        .mockResolvedValue(
+          androidGate({ minVersion: '1.70', latestVersion: '1.77' }),
+        );
+      AppConfig.findOneAndUpdate = jest.fn();
+
+      const res = mockRes();
+      await updateAppConfig(
+        { body: { forceUpdate: { android: { latestVersion: 'v1.78' } } } },
+        res,
+        jest.fn(),
+      );
+
+      expect(res.status).toHaveBeenCalledWith(400);
+      expect(res.json.mock.calls[0][0].message).toContain('dotted numeric version');
+      expect(AppConfig.findOneAndUpdate).not.toHaveBeenCalled();
+    });
+
+    it('accepts a floor and a latest raised together', async () => {
+      const stored = androidGate({ minVersion: '1.70', latestVersion: '1.77' });
+      AppConfig.findOne = jest.fn().mockResolvedValue(stored);
+      AppConfig.findOneAndUpdate = jest.fn().mockResolvedValue(stored);
+
+      const res = mockRes();
+      await updateAppConfig(
+        {
+          body: {
+            forceUpdate: {
+              android: { minVersion: '1.77', latestVersion: '1.78' },
+            },
+          },
+        },
+        res,
+        jest.fn(),
+      );
+
+      expect(res.status).toHaveBeenCalledWith(200);
+      const setMap = AppConfig.findOneAndUpdate.mock.calls[0][1].$set;
+      expect(setMap['forceUpdate.android.minVersion']).toBe('1.77');
+      expect(setMap['forceUpdate.android.latestVersion']).toBe('1.78');
+    });
+
+    it('lets an unrelated field be saved even when a stored version is malformed', async () => {
+      // Only incoming fields are shape-checked. If a pre-existing bad value
+      // could block edits to this block, a config could be wedged with no way
+      // to correct it through the API.
+      const stored = androidGate({ minVersion: 'garbage', latestVersion: '' });
+      AppConfig.findOne = jest.fn().mockResolvedValue(stored);
+      AppConfig.findOneAndUpdate = jest.fn().mockResolvedValue(stored);
+
+      const res = mockRes();
+      await updateAppConfig(
+        { body: { forceUpdate: { android: { updateUrl: 'https://example.com' } } } },
+        res,
+        jest.fn(),
+      );
+
+      expect(res.status).toHaveBeenCalledWith(200);
+    });
+  });
 });

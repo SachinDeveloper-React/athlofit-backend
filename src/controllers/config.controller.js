@@ -6,7 +6,7 @@ const Faq = require("../models/Faq.model");
 const LegalContent = require("../models/LegalContent.model");
 const SupportTicket = require("../models/SupportTicket.model");
 const { success, error } = require("../utils/response");
-const { resolveUpdateRequirement } = require("../utils/versionGate");
+const { resolveUpdateRequirement, compareVersions } = require("../utils/versionGate");
 const { describePassiveCoinCap } = require("../utils/passiveCoins");
 const { describeDailyRewardCap } = require("../utils/dailyCoinCap");
 const Challenge = require("../models/Challenge.model");
@@ -184,6 +184,31 @@ const getAppConfig = async (req, res, next) => {
         blockUnknownVersion: cfg.stepSync?.blockUnknownVersion ?? false,
         message: cfg.stepSync?.message ?? '',
       },
+      // Update gate. Read-only here; written through PATCH /config/app.
+      //
+      // This was the one config block with no way to read back what was stored,
+      // and it is the block where a wrong value is least visible: a verdict of
+      // "no update" looks identical whether it was the intended answer or the
+      // result of versions saved in the wrong numbering scheme. Exactly that
+      // happened — android held '0.0.77' (the package.json version) while every
+      // client reports versionName '1.77', so every client compared as newer
+      // and no prompt ever fired. Nobody could see it because nothing returned
+      // it. Exposing it is what makes that class of mistake noticeable.
+      forceUpdate: {
+        enabled: cfg.forceUpdate?.enabled ?? true,
+        android: {
+          minVersion: cfg.forceUpdate?.android?.minVersion ?? '',
+          latestVersion: cfg.forceUpdate?.android?.latestVersion ?? '',
+          updateUrl: cfg.forceUpdate?.android?.updateUrl ?? '',
+        },
+        ios: {
+          minVersion: cfg.forceUpdate?.ios?.minVersion ?? '',
+          latestVersion: cfg.forceUpdate?.ios?.latestVersion ?? '',
+          updateUrl: cfg.forceUpdate?.ios?.updateUrl ?? '',
+        },
+        title: cfg.forceUpdate?.title ?? '',
+        message: cfg.forceUpdate?.message ?? '',
+      },
       support: {
         email: cfg.support.email,
         website: cfg.support.website,
@@ -316,6 +341,69 @@ const updateAppConfig = async (req, res, next) => {
         return error(res, "coin_value must be a non-negative number", 400);
       }
       setMap["coin_config.rewards.daily_step_goal_reached.coin_value"] = val;
+    }
+
+    // ─── Validate the update gate before persisting ─────────────────────────
+    //
+    // Held to a higher standard than the coin fields above, because the blast
+    // radius is different: `force` has no dismiss button in the app, so a wrong
+    // floor here makes Athlofit unusable for everyone running that platform,
+    // from one write, with no release involved and no way to walk it back on
+    // the devices already showing the modal.
+    if (Object.keys(setMap).some((k) => k.startsWith("forceUpdate."))) {
+      // Partial writes are the normal case — the admin panel sends one field at
+      // a time — so what has to be validated is the MERGED result, not the
+      // payload. Raising minVersion alone is exactly the shape that needs it:
+      // on its own the value looks fine, and only contradicts the latestVersion
+      // already stored in the database.
+      const stored = await getOrCreateConfig();
+
+      for (const platform of ["android", "ios"]) {
+        const effective = (field) => {
+          const key = `forceUpdate.${platform}.${field}`;
+          return setMap[key] !== undefined
+            ? String(setMap[key] ?? "").trim()
+            : String(stored.forceUpdate?.[platform]?.[field] ?? "").trim();
+        };
+
+        const minVersion = effective("minVersion");
+        const latestVersion = effective("latestVersion");
+
+        for (const [field, value] of [
+          ["minVersion", minVersion],
+          ["latestVersion", latestVersion],
+        ]) {
+          // Only the incoming fields are shape-checked. A pre-existing bad
+          // value must not make an unrelated edit to this block impossible to
+          // save — that would leave the config wedged with no way out.
+          if (setMap[`forceUpdate.${platform}.${field}`] === undefined) continue;
+          if (!/^\d+(\.\d+)*$/.test(value)) {
+            return error(
+              res,
+              `forceUpdate.${platform}.${field} must be a dotted numeric version (e.g. "1.78"), got "${value}"`,
+              400,
+            );
+          }
+        }
+
+        // Rejected outright rather than left to the read-time clamp in
+        // versionGate. That clamp is a safety net for values already stored; it
+        // resolves the contradiction silently, so an admin who sets only
+        // minVersion sees a successful save and no prompt on any device, with
+        // nothing anywhere saying why.
+        if (
+          minVersion &&
+          latestVersion &&
+          compareVersions(minVersion, latestVersion) > 0
+        ) {
+          return error(
+            res,
+            `forceUpdate.${platform}.minVersion (${minVersion}) cannot exceed latestVersion (${latestVersion}) — ` +
+              `raise latestVersion in the same request, or users already on the newest build would be hard-blocked`,
+            400,
+          );
+        }
+      }
     }
 
     const cfg = await AppConfig.findOneAndUpdate(

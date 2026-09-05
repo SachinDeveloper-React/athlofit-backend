@@ -10,6 +10,7 @@
     "lint": "eslint src/**/*.js",
     "test": "jest",
     "repair:streaks": "node scripts/repair-inflated-streaks.js",
+    "config:force-update": "node scripts/set-force-update.js",
     "diagnose:steps": "node src/scripts/diagnoseStepGap.js",
     "explain:steps": "node src/scripts/explainSteps.js"
   },

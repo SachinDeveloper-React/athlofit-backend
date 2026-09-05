@@ -23,6 +23,9 @@ const {
   validateSteps,
   trackClientCadence,
 } = require('../utils/stepValidation');
+const { loadStepBaseline } = require('../utils/stepBaselineStore');
+const { resolveOriginTrust } = require('../utils/stepOriginTrust');
+const { loadOriginHistory } = require('../utils/stepOriginTrustStore');
 const { getCachedAppConfig } = require('../utils/appConfigCache');
 const { checkTimezoneManipulation } = require('../utils/timezoneGuard');
 const { recordCheatFlag, isCoinBlocked } = require('../utils/cheatPenalty');
@@ -321,26 +324,99 @@ const syncHealthData = async (req, res, next) => {
           lastIncomingSteps: existing?.lastIncomingSteps ?? null,
           lastIncomingDelta: existing?.lastIncomingDelta || 0,
           repeatedDeltaCount: existing?.repeatedDeltaCount || 0,
+          // The second detector needs a clock. Everything below follows the RAW
+          // client figures across syncs, exactly as lastIncomingSteps does.
+          lastIncomingAt: existing?.lastIncomingAt ?? null,
+          cadenceStreak: existing?.cadenceStreak || 0,
+          cadenceRateMin: existing?.cadenceRateMin ?? null,
+          cadenceRateMax: existing?.cadenceRateMax ?? null,
+          cadenceStreakAt: existing?.cadenceStreakAt ?? null,
         })
       : null;
 
     if (cadence?.stuck) {
       console.warn(
         `[HealthSync] Stuck step source for user ${req.user._id} on ${today}: ` +
-          `+${cadence.delta} repeated ${cadence.repeatedDeltaCount + 1}× — ` +
-          `holding stored total, no coins awarded`,
+          `${cadence.stuckReason} — holding stored total, no coins awarded`,
       );
+    }
+
+    // ── This account's own ceiling ───────────────────────────────────────────
+    //
+    // Computed once per user per date, from the 28 days BEFORE this one, and then
+    // frozen onto the row — so the day's first step sync pays one indexed range
+    // query and every sync after it reads the stored number.
+    //
+    // Only for syncs that carry steps. A hydration-only post has nothing to
+    // validate and must not stamp a baseline onto a row that may later be the
+    // first step sync of the day, since the stamp is what stops the recompute.
+    //
+    // A null result (no history, or a failed read) means "not characterised", and
+    // validateSteps falls back to the population bounds. It never means zero.
+    let stepBaseline = existing?.stepBaseline ?? null;
+    if (stepsProvided && stepBaseline == null) {
+      stepBaseline = await loadStepBaseline({ userId: req.user._id, date: today });
+    }
+
+    // ── Is the source these steps are attributed to one this account uses? ───
+    //
+    // Only affects whether THIS day is allowed to count as history when a future
+    // baseline is computed. It clamps nothing now — see stepOriginTrust.js for
+    // why that is the whole point of it, and what it is and is not worth.
+    //
+    // The provenance block is normalized further down for the ledger; this reads
+    // the raw one because the answer is needed before validation, and it only
+    // looks at two fields it re-checks itself.
+    let originTrust = null;
+    let originHistory =
+      existing?.establishedOrigins == null
+        ? null
+        : {
+            establishedOrigins: existing.establishedOrigins,
+            distinctPrimaries: existing.originChurn || 0,
+          };
+    if (stepsProvided) {
+      const claimedReader =
+        typeof stepSource?.reader === 'string' ? stepSource.reader.trim() : null;
+      const claimedOrigin =
+        typeof stepSource?.primaryOrigin === 'string'
+          ? stepSource.primaryOrigin.trim().slice(0, 120)
+          : null;
+
+      // Two reasons the read is skipped almost always. Readers that carry no
+      // origin claim — the hardware sensor, and every build too old to send the
+      // block — cannot come back untrusted, so the query would tell us nothing.
+      // And once the day's row has the history stamped on it, the answer is
+      // already known: it is a 28-day aggregation over data that cannot change
+      // during the day, so it is computed once and reused, exactly like the
+      // baseline. Without this the widget worker alone would run hundreds of them
+      // per device per day.
+      if (claimedReader === 'health_connect' && existing?.establishedOrigins == null) {
+        originHistory = await loadOriginHistory({
+          userId: req.user._id,
+          date: today,
+        });
+      }
+
+      originTrust = resolveOriginTrust({
+        reader: claimedReader,
+        primaryOrigin: claimedOrigin,
+        history: originHistory || {},
+      });
+
+      if (!originTrust.trusted) {
+        console.warn(
+          `[HealthSync] Untrusted step source for user ${req.user._id} on ${today}: ` +
+            `${originTrust.reason} — day excluded from future baselines`,
+        );
+      }
     }
 
     const stepValidation = validateSteps({
       incomingSteps: steps,
       existingSteps: existing?.steps || 0,
       bonusSteps: existing?.bonusSteps || 0,
-      // The rate window is measured from the last ACCEPTED step increase, not from
-      // updatedAt. updatedAt is bumped by any write to this row — a hydration-only
-      // sync included — which both punished honest users and let a client reset the
-      // window on demand by syncing more often. See stepValidation.js.
-      lastStepIncreaseAt: existing?.lastStepIncreaseAt || null,
+      stepBaseline,
       timezone,
       // The date this sync is writing to, which is not necessarily today — the
       // Android widget worker re-posts the last seven days every 15 minutes. The
@@ -515,6 +591,23 @@ const syncHealthData = async (req, res, next) => {
         existing?.goalSnapshot > 0 ? existing.goalSnapshot : dailyGoal,
       // Only advanced on a real increase — see `stepsIncreased` above.
       ...(stepsIncreased ? { lastStepIncreaseAt: new Date() } : {}),
+      // Frozen on the first step sync of the day and never rewritten, so the
+      // ceiling cannot drift as the day's own total climbs. See the field's note
+      // on HealthActivity.
+      ...(stepBaseline != null && existing?.stepBaseline == null
+        ? { stepBaseline }
+        : {}),
+      // Sticky false: written only to turn the day off, never back on. A day that
+      // carried one untrusted sync is not rehabilitated by a trusted one after it.
+      ...(originTrust && !originTrust.trusted ? { originTrusted: false } : {}),
+      // Frozen on the day's first Health Connect sync and never rewritten, so the
+      // 28-day aggregation behind it runs once per user per day.
+      ...(originHistory && existing?.establishedOrigins == null
+        ? {
+            establishedOrigins: originHistory.establishedOrigins,
+            originChurn: originHistory.distinctPrimaries,
+          }
+        : {}),
       // Cadence bookkeeping, written on every sync that carried steps —
       // INCLUDING one the stuck-source rule just refused. That is deliberate: the
       // rule needs to keep seeing the raw figures to know when the device starts
@@ -525,6 +618,14 @@ const syncHealthData = async (req, res, next) => {
             lastIncomingSteps: cadence.lastIncomingSteps,
             lastIncomingDelta: cadence.lastIncomingDelta,
             repeatedDeltaCount: cadence.repeatedDeltaCount,
+            lastIncomingAt: new Date(cadence.lastIncomingAt),
+            cadenceStreak: cadence.cadenceStreak,
+            cadenceRateMin: cadence.cadenceRateMin,
+            cadenceRateMax: cadence.cadenceRateMax,
+            cadenceStreakAt:
+              cadence.cadenceStreakAt == null
+                ? null
+                : new Date(cadence.cadenceStreakAt),
           }
         : {}),
       // Which build wrote this row. Only stamped when the caller actually

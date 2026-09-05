@@ -47,6 +47,66 @@ const healthActivitySchema = new mongoose.Schema(
     // Walked steps only (bonus excluded), matching the passive-coin rule.
     stepCoinWatermark: { type: Number, default: 0 },
 
+    // ── This account's own daily step ceiling ────────────────────────────────
+    //
+    // computeStepBaseline() over the trailing days that PRECEDE this one, frozen
+    // at the moment the row is first written with steps and never recomputed for
+    // this date afterwards.
+    //
+    // Frozen for two reasons. It must not include today: a ceiling that rises as
+    // today's total rises is not a ceiling, and an inflated sync would raise the
+    // bound that is supposed to refuse it. And recomputing it on every sync would
+    // put a 28-day aggregation on the hottest write path in the app for no gain,
+    // since nothing it reads can change during the day.
+    //
+    // Null on rows written before this existed, and on hydration-only rows that
+    // never carried steps. Both mean "not characterised", and validateSteps
+    // treats that as "apply only the population bounds" rather than as a zero
+    // ceiling — a missing baseline must never read as "this user may walk 0".
+    stepBaseline: { type: Number, default: null },
+
+    // ── Was this day's step source one the account actually uses? ────────────
+    //
+    // False when any sync on this day attributed its steps to a Health Connect
+    // origin the account has no history with — see utils/stepOriginTrust.js for
+    // what that means and why rotation, not the package name, is the signal.
+    //
+    // STICKY FALSE. A day with one untrusted sync is not rehabilitated by a
+    // trusted one afterwards, because the mixture is exactly what the fraudulent
+    // accounts looked like: real steps from a real app alongside injected ones
+    // from an origin that appeared that morning.
+    //
+    // Its only consumer is the baseline window (see stepBaselineStore), which
+    // skips untrusted days. That is what stops a patient spoofer from ratcheting
+    // their own ceiling upward by sitting just under it. It does NOT clamp
+    // anything on its own, today or ever.
+    //
+    // Defaults true, and rows written before this existed have no value at all —
+    // both read as trusted. Making absence mean "untrusted" would silently drop
+    // every user's entire history out of their baseline the day this shipped.
+    // Days that are already known to be fraudulent are corrected by the reversal
+    // tooling, not by a schema default.
+    originTrusted: { type: Boolean, default: true },
+
+    // ── The origin history the trust check reads, frozen for the day ─────────
+    //
+    // Counting how many distinct days each origin has been seen on is a 28-day
+    // aggregation over StepProvenance, and nothing it reads can change during the
+    // day. Running it per sync — which is what the first version did — put that
+    // query on the hottest write path in the app: the widget worker re-posts seven
+    // days every fifteen minutes, so a single device generated hundreds of them a
+    // day for no new information.
+    //
+    // Frozen on the day's first step sync, exactly like stepBaseline, and for the
+    // same second reason: the window must exclude today, so a source cannot vouch
+    // for itself with the very syncs it is being judged on.
+    //
+    // The per-SYNC part still runs every time, because the primary origin can
+    // change during a day — it is a set membership test against these two fields
+    // and touches no database.
+    establishedOrigins: { type: [String], default: undefined },
+    originChurn: { type: Number, default: null },
+
     // When this day's walked step count was last actually accepted UPWARD.
     //
     // Distinct from `updatedAt`, which every write to this row bumps — including
@@ -75,6 +135,26 @@ const healthActivitySchema = new mongoose.Schema(
     lastIncomingSteps: { type: Number, default: null },
     lastIncomingDelta: { type: Number, default: 0 },
     repeatedDeltaCount: { type: Number, default: 0 },
+
+    // ── Rate-invariance streak ──────────────────────────────────────────────
+    //
+    // The second stuck-source detector. Testing deltas for exact equality turned
+    // out to be a threshold an attacker steps over by adding ±1.5% of noise, so
+    // the general form of the same question — has steps/min stopped varying? —
+    // is tracked alongside it. See STUCK_RATE_TOLERANCE in stepValidation.js.
+    //
+    // `lastIncomingAt` is what makes a rate computable at all: the raw totals
+    // were already followed across syncs, but nothing recorded WHEN, so there
+    // was no divisor. It follows lastIncomingSteps exactly — the raw client
+    // figure, not the stored one — for the same reason that field does.
+    //
+    // Min and max rather than a reference rate, so the band is a spread over the
+    // streak and does not depend on which sample happened to start it.
+    lastIncomingAt: { type: Date, default: null },
+    cadenceStreak: { type: Number, default: 0 },
+    cadenceRateMin: { type: Number, default: null },
+    cadenceRateMax: { type: Number, default: null },
+    cadenceStreakAt: { type: Date, default: null },
 
     // Whether the one-off retroactive step-goal bonus has been paid for this
     // date. Separate from the watermark because the goal bonus is a flat amount

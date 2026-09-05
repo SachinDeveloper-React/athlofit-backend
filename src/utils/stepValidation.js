@@ -13,16 +13,17 @@
 //   1. Absolute daily cap.
 //   2. Stuck-source rule: a device reporting a constant rather than a
 //      measurement is held where it is.
-//   3. Rate ceiling — the LOOSER of two sufficient bounds, because a figure is
-//      only implausible when neither can explain it:
-//        a. the DELTA since steps were last accepted, for a device reporting
-//           live as the user moves; and
-//        b. the TOTAL against how much of its day has elapsed, for a source
-//           that reports the day cumulatively from local midnight — which is
-//           what every reader in this system actually does.
-//      See the long note at the ceiling itself for why choosing between them
-//      instead of taking the looser one punished the diligent device.
-//   4. No-decrease rule (handled separately, after the ceilings): steps should
+//   3. Day ceiling: the total against how much of its day has elapsed. A hard
+//      bound — no story about backlogs or sync cadence makes more steps fit into
+//      a day than the day has room for. There used to be a second, DELTA-based
+//      rate ceiling here and the looser of the two won; that let a client syncing
+//      every 15 minutes collect 220 steps/min all day. See the long note at the
+//      ceiling itself.
+//   4. Baseline ceiling: what THIS account walks, from its own trailing days.
+//      The only rule here that is about the user rather than about the species,
+//      and the one the step-spoofing incident needed. See the note at
+//      BASELINE_FLOOR.
+//   5. No-decrease rule (handled separately, after the ceilings): steps should
 //      not decrease within a day, allowing a small tolerance for sensor jitter.
 //      Overridable via `allowCorrection` so a client that over-reported can
 //      repair the record.
@@ -58,7 +59,6 @@
 const { minutesElapsedOnDate } = require('./date');
 
 const MAX_DAILY_STEPS = 50_000; // realistic daily cap (marathon = ~42k steps)
-const MAX_STEPS_PER_HOUR = 12_000; // ~200 steps/min sustained (running)
 const MAX_STEPS_PER_MINUTE = 220; // absolute burst (sprinting)
 const DECREASE_TOLERANCE = 100; // allow small sensor corrections
 
@@ -129,70 +129,343 @@ const FIRST_SYNC_BURST_ALLOWANCE = 6_000;
 const STUCK_DELTA_MIN_STEPS = 500;
 const STUCK_DELTA_REPEATS = 3;
 
+// ── The same fault, one jitter away ─────────────────────────────────────────
+//
+// The rule above tests deltas for EXACT equality, and that turned out to be a
+// threshold an attacker steps over by adding noise. The account that prompted
+// it was later seen posting 2,240 / 2,310 / 2,280 / 2,260 / 2,280 — a spread of
+// roughly ±1.5% — and the streak never got past two, because the fourth
+// identical delta it waits for never arrived. Nineteen consecutive syncs were
+// accepted and the day closed at the daily cap.
+//
+// The original reasoning was right and the test was too literal. What it says is
+// that a figure derived from a hardware counter cannot be independent of how much
+// time elapsed. Equality of DELTAS is one way to see that; equality of RATES is
+// the general form, and it survives jitter.
+//
+// So this measures steps per minute across each sync window and asks whether the
+// spread of the streak stays inside a narrow band:
+//
+//     (max rate - min rate) / midpoint <= STUCK_RATE_TOLERANCE
+//
+// Spread rather than distance from a reference, because a reference has to be
+// picked and both available choices are wrong. Fixing it to the first sample
+// makes the verdict depend on which sample happened to start the run — the same
+// incident data trips the rule or does not, at ±3%, depending on whether the
+// streak begins at 11:44 or 11:59. Updating it to a running mean lets a slowly
+// drifting rate stay "in band" indefinitely by walking the reference along with
+// it. Min and max over the streak have neither problem and are order-independent.
+//
+// ── Why a span and not just a count ─────────────────────────────────────────
+//
+// Sample count alone is not a unit that means anything here, because sync cadence
+// is the client's choice. Six samples from the widget worker is an hour and a
+// half; six from the app's foreground sync can be twelve minutes, which is an
+// ordinary steady walk. Requiring a wall-clock span as well makes the rule say
+// what it means — the rate has not varied for an hour and a half — at any cadence.
+//
+// The thresholds are set so that being wrong is survivable rather than so that
+// it is impossible. Ninety minutes of walking whose 15-minute rates stay within
+// 5% is something a treadmill could produce; a road crossing, a traffic light or
+// sitting down for a minute breaks it, which is why real outdoor walking does
+// not. And the consequence of a false positive is 'stuck_source', which holds
+// the total and explicitly never reaches the cheat path — then releases on the
+// first sample that varies.
+/** Fractional spread of steps/min a streak may hold before it is not a measurement. */
+const STUCK_RATE_TOLERANCE = 0.05;
+/** Consecutive in-band samples needed. */
+const STUCK_RATE_SAMPLES = 6;
+/** Wall-clock minutes the streak must also span, so cadence cannot shortcut it. */
+const STUCK_RATE_MIN_SPAN_MIN = 90;
 /**
- * Follows the client's OWN step deltas across syncs, so a source that has stopped
- * measuring can be recognised.
+ * Shortest window a rate may be computed from. Below this the divisor is small
+ * enough that ordinary timing noise dominates, and a burst of rapid syncs would
+ * produce wild rates that break streaks rather than reveal anything.
+ */
+const STUCK_RATE_MIN_WINDOW_MIN = 2;
+
+// ── What THIS user walks, as opposed to what a human can walk ───────────────
+//
+// Every rule above this point asks the same question: "could a person have
+// walked this?" None of them asks "could this person have walked this?", and
+// that gap is what the step-spoofing incident actually exploited.
+//
+// The evidence. Thirteen accounts carried Health Connect origins with a
+// randomised package suffix. Ten of them had ONE such origin, stable for weeks,
+// and their days ran 43 to 13,830 steps — ordinary people, and the randomised
+// suffix is just how the platform pedometer names itself. The other three
+// rotated between four and nine origins, one of them five in a single day, and
+// their days ran 15,488 to 50,000 with a mean of 31,048. One account posted six
+// consecutive days averaging 34,682 — 26 km every day for a week.
+//
+// Not one of those days was refused. Every one of them was under MAX_DAILY_STEPS,
+// and MAX_DAILY_STEPS is the only bound that spans a whole day. That constant is
+// a backstop against the physically impossible, not a statement about anybody in
+// particular: 50,000 steps is a marathon and a half. Against a population whose
+// honest maximum is 13,830 it leaves a 3.6x corridor that is invisible to
+// validation, and the corridor is where all of the fraud lived.
+//
+// So the ceiling has to know the user. The shape:
+//
+//   limit = clamp(BASELINE_FLOOR, MULTIPLIER * p90(trailing days), MAX_BASELINE)
+//
+// p90 rather than the mean, because the ceiling should be set by a good day and
+// not dragged down by a quiet week. The multiplier is what keeps it a ceiling
+// rather than a target — it has to sit far enough above normal that improving,
+// travelling, or walking a half marathon does not hit it.
+//
+// Three properties this is built for:
+//
+//   * It cannot be jumped. A new account gets BASELINE_FLOOR and nothing more,
+//     so day one is 15,000 and no argument about elapsed hours changes that.
+//   * It can only be climbed slowly. The trailing window is fed by figures this
+//     rule already accepted, so the ceiling at most multiplies once per window —
+//     and a user pinned to their own ceiling every single day is a pattern that
+//     reads clearly in the data, which the old corridor never produced.
+//   * It has a hard roof. MAX_BASELINE_CEILING binds however good the history
+//     looks, so a history that was poisoned before this rule existed cannot
+//     unlock the full daily cap while it is being cleaned up.
+//
+// Being over it is 'clamped', never 'implausible'. The figure is possible for a
+// human and this rule is a statement about a distribution, not about intent —
+// a genuine ultramarathon gets clamped here and must not be punished for it.
+/** Ceiling for an account with too little history to characterise. */
+const BASELINE_FLOOR = 15_000;
+/** How far above a user's own good day the ceiling sits. */
+const BASELINE_MULTIPLIER = 1.75;
+/** Hard roof, whatever the history says. */
+const MAX_BASELINE_CEILING = 30_000;
+/** Days of history below which only the floor applies. */
+const BASELINE_MIN_DAYS = 7;
+/** Trailing days the baseline is computed over. */
+const BASELINE_WINDOW_DAYS = 28;
+
+/**
+ * The per-user daily ceiling, from that user's own recent days.
+ *
+ * Pure, and takes already-loaded totals rather than querying, so the policy is
+ * testable without a database and the caller decides how the window is read.
+ *
+ * @param {number[]} recentDailyWalked - Walked steps (bonus excluded) for the
+ *   trailing days, EXCLUDING the day being validated. Order does not matter.
+ * @returns {number} The ceiling to apply.
+ */
+function computeStepBaseline(recentDailyWalked) {
+  const days = (Array.isArray(recentDailyWalked) ? recentDailyWalked : [])
+    .map(n => Number(n))
+    .filter(n => Number.isFinite(n) && n >= 0);
+
+  // Too new, or too sparse, to say anything about this account. The floor is the
+  // whole rule for them — which is the right default: it is well above what any
+  // honest user in the incident data reached, and well below the corridor.
+  if (days.length < BASELINE_MIN_DAYS) return BASELINE_FLOOR;
+
+  const sorted = [...days].sort((a, b) => a - b);
+  // Nearest-rank p90: the smallest value at or above which the top decile sits.
+  const p90 = sorted[Math.min(sorted.length - 1, Math.ceil(sorted.length * 0.9) - 1)];
+
+  return Math.min(
+    MAX_BASELINE_CEILING,
+    Math.max(BASELINE_FLOOR, Math.ceil(p90 * BASELINE_MULTIPLIER)),
+  );
+}
+
+/**
+ * Follows the client's OWN step figures across syncs, so a source that has
+ * stopped measuring can be recognised.
+ *
+ * Two independent detectors, either of which is sufficient:
+ *
+ *   * REPEATED DELTAS — the same delta to the exact step, several times running.
+ *     Catches a counter being advanced by a fixed quantum regardless of how long
+ *     the window was, which is the strongest possible evidence and needs no clock.
+ *   * INVARIANT RATE — steps per minute holding inside a narrow band for an hour
+ *     and a half. Catches the same fault once jitter has been added to defeat the
+ *     equality test. See the note at STUCK_RATE_TOLERANCE.
+ *
+ * Kept as two rather than replaced by one, because they see different things: a
+ * delta that repeats exactly across windows of DIFFERENT lengths has a constant
+ * delta and a varying rate, so the rate test would miss it.
  *
  * Pure, and separate from validateSteps, because it is bookkeeping the caller has
  * to persist between requests rather than a judgement about this one. The caller
- * stores the returned `lastIncomingSteps`/`lastIncomingDelta`/`repeatedDeltaCount`
- * on the day's row and hands them back on the next sync.
+ * stores everything returned except `delta`, `rate`, `stuck` and `stuckReason` on
+ * the day's row and hands it back on the next sync.
  *
  * Multi-device accounts fail OPEN: two phones posting their own totals produce
- * deltas that do not match each other, the streak resets, and the rule never
- * binds. That is the right direction to fail for a rule whose effect is to stop
- * counting a user's steps.
+ * deltas that do not match each other and rates that jump around, so both streaks
+ * reset and neither rule binds. That is the right direction to fail for a rule
+ * whose effect is to stop counting a user's steps.
  *
  * @param {object} params
  * @param {number} params.incomingSteps - Raw client total for the day, before any clamping.
+ * @param {number|Date} [params.at] - When this sync arrived. Defaults to now.
  * @param {number|null} params.lastIncomingSteps - Raw client total from the previous sync.
+ * @param {number|Date|null} [params.lastIncomingAt] - When that total arrived.
  * @param {number} params.lastIncomingDelta - The delta that produced `repeatedDeltaCount`.
  * @param {number} params.repeatedDeltaCount - How many times that delta has now repeated.
- * @returns {{ delta: number, lastIncomingSteps: number, lastIncomingDelta: number,
- *   repeatedDeltaCount: number, stuck: boolean }}
+ * @param {number} [params.cadenceStreak] - In-band rate samples so far.
+ * @param {number|null} [params.cadenceRateMin] - Lowest rate in the current streak.
+ * @param {number|null} [params.cadenceRateMax] - Highest rate in the current streak.
+ * @param {number|Date|null} [params.cadenceStreakAt] - When the current streak began.
+ * @returns {{ delta: number, rate: number|null, stuck: boolean, stuckReason: string|null,
+ *   lastIncomingSteps: number, lastIncomingAt: number, lastIncomingDelta: number,
+ *   repeatedDeltaCount: number, cadenceStreak: number, cadenceRateMin: number|null,
+ *   cadenceRateMax: number|null, cadenceStreakAt: number|null }}
  */
 function trackClientCadence({
   incomingSteps,
+  at = Date.now(),
   lastIncomingSteps = null,
+  lastIncomingAt = null,
   lastIncomingDelta = 0,
   repeatedDeltaCount = 0,
+  cadenceStreak = 0,
+  cadenceRateMin = null,
+  cadenceRateMax = null,
+  cadenceStreakAt = null,
 }) {
+  const ms = v => (v == null ? null : new Date(v).getTime());
   const incoming = Math.round(Number(incomingSteps) || 0);
+  const now = ms(at) ?? Date.now();
+
+  /** No streak of either kind. Used wherever the evidence has to start over. */
+  const cleared = {
+    lastIncomingSteps: incoming,
+    lastIncomingAt: now,
+    repeatedDeltaCount: 0,
+    cadenceStreak: 0,
+    cadenceRateMin: null,
+    cadenceRateMax: null,
+    cadenceStreakAt: null,
+    stuck: false,
+    stuckReason: null,
+  };
 
   // No previous raw total to measure against — the first sync of a day, or a row
   // written by a build too old to have recorded one. Seed and say nothing.
   if (lastIncomingSteps === null || lastIncomingSteps === undefined) {
-    return {
-      delta: 0,
-      lastIncomingSteps: incoming,
-      lastIncomingDelta: 0,
-      repeatedDeltaCount: 0,
-      stuck: false,
-    };
+    return { ...cleared, delta: 0, rate: null, lastIncomingDelta: 0 };
   }
 
   const delta = incoming - Math.round(Number(lastIncomingSteps) || 0);
 
-  // A re-send of the same count, or a lower figure from a device that is behind.
-  // Neither says anything about cadence, and neither should keep a streak alive.
+  // ── A re-send, or a device that is behind ────────────────────────────────
+  // Nothing moved forward, so there is no evidence of any kind here and both
+  // streaks genuinely start over. This is also what makes multi-device accounts
+  // fail open: a second phone posting its own lower total lands here.
+  if (delta <= 0) {
+    return { ...cleared, delta, rate: null, lastIncomingDelta: delta };
+  }
+
+  // ── A gain too small to say anything ─────────────────────────────────────
+  //
+  // A phone idling on a desk reports +10 all day, and building a streak out of
+  // that would freeze a real user's total over nothing.
+  //
+  // But it does not CLEAR a streak either, and that distinction matters. It used
+  // to: any delta under the threshold reset both detectors, so a single small
+  // sync released a hold outright. Replaying the real incident through this
+  // showed exactly that — the run was held from 14:15, then a +119 sync at 16:31
+  // cleared it and the total climbed again on the very next ceiling. One cheap
+  // sync should not be able to buy back a rule that took ninety minutes of
+  // evidence to trigger.
+  //
+  // So it is treated the way a too-short window is: not a sample. It neither
+  // extends nor breaks anything, and only the markers move.
   if (delta < STUCK_DELTA_MIN_STEPS) {
+    const spanSoFar =
+      cadenceStreakAt == null ? 0 : (now - ms(cadenceStreakAt)) / 60_000;
+    const heldStuck =
+      repeatedDeltaCount >= STUCK_DELTA_REPEATS ||
+      (cadenceStreak >= STUCK_RATE_SAMPLES && spanSoFar >= STUCK_RATE_MIN_SPAN_MIN);
     return {
       delta,
+      rate: null,
       lastIncomingSteps: incoming,
-      lastIncomingDelta: delta,
-      repeatedDeltaCount: 0,
-      stuck: false,
+      lastIncomingAt: now,
+      lastIncomingDelta,
+      repeatedDeltaCount,
+      cadenceStreak,
+      cadenceRateMin,
+      cadenceRateMax,
+      cadenceStreakAt: ms(cadenceStreakAt),
+      stuck: heldStuck,
+      stuckReason: heldStuck
+        ? 'cadence streak still standing; this sync was too small to be evidence either way'
+        : null,
     };
   }
 
+  // ── Detector 1: the same delta, exactly ───────────────────────────────────
   const repeated = delta === lastIncomingDelta ? repeatedDeltaCount + 1 : 0;
+
+  // ── Detector 2: a rate that does not vary ─────────────────────────────────
+  const prevAt = ms(lastIncomingAt);
+  const windowMinutes = prevAt == null ? null : (now - prevAt) / 60_000;
+
+  let streak = cadenceStreak;
+  let rateMin = cadenceRateMin;
+  let rateMax = cadenceRateMax;
+  let streakAt = ms(cadenceStreakAt);
+  let rate = null;
+
+  if (windowMinutes != null && windowMinutes >= STUCK_RATE_MIN_WINDOW_MIN) {
+    rate = delta / windowMinutes;
+
+    const nextMin = rateMin == null ? rate : Math.min(rateMin, rate);
+    const nextMax = rateMax == null ? rate : Math.max(rateMax, rate);
+    const midpoint = (nextMin + nextMax) / 2;
+    const spread = midpoint > 0 ? (nextMax - nextMin) / midpoint : 0;
+
+    if (streak > 0 && spread <= STUCK_RATE_TOLERANCE) {
+      streak += 1;
+      rateMin = nextMin;
+      rateMax = nextMax;
+    } else {
+      // Out of band, or nothing to extend. Either way this sample starts the run.
+      streak = 1;
+      rateMin = rate;
+      rateMax = rate;
+      streakAt = prevAt; // the streak covers the window, so it starts where that did
+    }
+  }
+  // Windows too short to measure are skipped rather than treated as evidence
+  // either way: they neither extend a streak nor break one. A burst of rapid
+  // syncs is a normal thing for the app to do and must not be able to clear a
+  // streak on its own, nor to build one out of timing noise.
+
+  const spanMinutes = streakAt == null ? 0 : (now - streakAt) / 60_000;
+  const rateStuck =
+    streak >= STUCK_RATE_SAMPLES && spanMinutes >= STUCK_RATE_MIN_SPAN_MIN;
+  const deltaStuck = repeated >= STUCK_DELTA_REPEATS;
+
+  let stuckReason = null;
+  if (deltaStuck) {
+    stuckReason =
+      `+${delta} steps reported ${repeated + 1} times in a row, identical to ` +
+      'the step across differently-sized sync windows';
+  } else if (rateStuck) {
+    stuckReason =
+      `${rateMin.toFixed(1)}–${rateMax.toFixed(1)} steps/min held across ` +
+      `${streak} syncs over ${Math.round(spanMinutes)} minutes — a spread of ` +
+      `${((rateMax - rateMin) / ((rateMin + rateMax) / 2) * 100).toFixed(1)}%, ` +
+      'which a counter measuring elapsed time does not produce';
+  }
 
   return {
     delta,
+    rate,
     lastIncomingSteps: incoming,
+    lastIncomingAt: now,
     lastIncomingDelta: delta,
     repeatedDeltaCount: repeated,
-    stuck: repeated >= STUCK_DELTA_REPEATS,
+    cadenceStreak: streak,
+    cadenceRateMin: rateMin,
+    cadenceRateMax: rateMax,
+    cadenceStreakAt: streakAt,
+    stuck: deltaStuck || rateStuck,
+    stuckReason,
   };
 }
 
@@ -203,9 +476,6 @@ function trackClientCadence({
  * @param {number|null|undefined} params.incomingSteps - Raw step count from client
  * @param {number} params.existingSteps - Previously stored step count for today
  * @param {number} params.bonusSteps - Bonus steps (admin-credited, not from device)
- * @param {Date|null} [params.lastStepIncreaseAt] - When this day's step count was
- *   last actually accepted upward. This, not the document's updatedAt, defines the
- *   rate window — see the note in the body.
  * @param {string|null} [params.timezone] - Client timezone, used to bound the
  *   first accepted value of the day by how much of their local day has elapsed.
  * @param {string|null} [params.syncDate] - "YYYY-MM-DD" the row being written, which
@@ -220,6 +490,10 @@ function trackClientCadence({
  * @param {object|null} [params.cadence] - Result of trackClientCadence() for this
  *   sync. When it reports `stuck`, the client's deltas have stopped varying with
  *   the time between syncs, so the total is held where it is.
+ * @param {number|null} [params.stepBaseline] - This user's own daily ceiling, from
+ *   computeStepBaseline() over their trailing days. Omit and only the population
+ *   bounds apply, which is the pre-baseline behaviour — so an older caller that
+ *   does not supply it is weakened, not broken.
  *
  * @returns {{ clampedSteps: number, flagged: boolean,
  *   severity: 'none'|'clamped'|'implausible'|'stuck_source', reason: string|null,
@@ -235,12 +509,12 @@ function validateSteps({
   incomingSteps,
   existingSteps,
   bonusSteps,
-  lastStepIncreaseAt = null,
   timezone = null,
   syncDate = null,
   dailyGoal,
   allowCorrection = false,
   cadence = null,
+  stepBaseline = null,
 }) {
   // If no steps provided or negative, return 0
   if (
@@ -292,99 +566,59 @@ function validateSteps({
     ceilings.push({
       limit: existingWalked,
       severity: 'stuck_source',
-      reason:
-        `Source not measuring: +${cadence.delta} steps reported ` +
-        `${cadence.repeatedDeltaCount + 1} times in a row, identical to the step ` +
-        `across differently-sized sync windows`,
+      // The detector that fired says why, since the two see different faults and
+      // an investigation branches on which one it was.
+      reason: `Source not measuring: ${cadence.stuckReason || 'cadence stopped varying with elapsed time'}`,
     });
   }
 
-  // ── The two rate ceilings, and why the LOOSER one wins ────────────────────
+  // ── The day ceiling, which now actually binds ─────────────────────────────
   //
-  // There are two honest ways to bound how fast steps may arrive, and they
-  // describe two different SHAPES of arrival:
+  // There were two rate ceilings here and the LOOSER of them won:
   //
-  //   * The delta ceiling asks "could these steps have been walked since we last
-  //     accepted any?" — right for a device reporting live as the user moves.
-  //   * The day ceiling asks "is this total plausible for how much of the day has
-  //     elapsed?" — right for a source that reports the day CUMULATIVELY from
-  //     local midnight, which is what every reader in this system actually does.
+  //   * a DELTA ceiling — "could these steps have been walked since we last
+  //     accepted any?", measured from lastStepIncreaseAt; and
+  //   * this DAY ceiling — "is this total plausible for how much of the day has
+  //     elapsed?", measured from local midnight.
   //
-  // These used to be alternatives: the delta ceiling whenever a previous increase
-  // existed, the day ceiling only for the first accepted value of a day. Combining
-  // them with `Math.min` was tried before that and was worse — the delta bound,
-  // measured from local midnight as a stand-in, undercut the day bound and cut a
-  // legitimate 2,500-step report five minutes into the day down to 1,100.
+  // Taking the looser was meant to stop the delta ceiling punishing a device that
+  // had been diligent about syncing: Health Connect reports the day cumulatively,
+  // so a phone that finally read it at 20:51 carried a 4,793-step correction that
+  // the delta ceiling rationed out at 220 a minute across seven clamped syncs.
+  // That reasoning was right about the delta ceiling and wrong about what to do
+  // with it.
   //
-  // But choosing between them by "has anything been accepted yet" produced a
-  // backwards result, and a real account shows it. Health Connect reports the day
-  // from midnight, so when this user's app finally read it at 20:51 local, it
-  // carried a 4,793-step correction covering a morning the phone's own sensor had
-  // missed — 192 timestamped records, an entirely ordinary day's walking. The
-  // delta ceiling saw "4,793 steps since the last sync" and rationed it out at 220
-  // a minute across seven consecutive clamped syncs, taking 46 minutes to arrive
-  // at a figure it would have accepted instantly from a device that had simply
-  // stayed quiet until then. Same user, same day, same steps, same evidence — and
-  // the only thing separating "accept it all now" from "wait 46 minutes" was
-  // whether the phone had been diligent enough to sync earlier.
+  // What it produced: the delta ceiling allows `existingWalked + windowMinutes *
+  // 220` and, because the burst rate applies to any window under an hour, a client
+  // syncing every 15 minutes is allowed 3,300 steps EVERY TIME. That is 220 steps
+  // a minute sustained for as long as it cares to keep talking — 316,800 in a day,
+  // bounded by nothing but MAX_DAILY_STEPS. And since the looser bound won, the
+  // day ceiling never got to say otherwise.
   //
-  // Taking the LOOSER of the two removes that asymmetry. A figure is accepted if
-  // EITHER story could explain it, which is the correct reading of two independent
-  // sufficient bounds: a value is only implausible when NEITHER holds. Both are
-  // still computed entirely from the server clock, the user's timezone and the
-  // stored total — nothing here trusts a number the client supplied about itself,
-  // so this cannot be steered by a lying device.
+  // A real account walked exactly through it. From 11:44 to 16:31 local, nineteen
+  // syncs 15 minutes apart, each carrying about 2,270 steps — a flat 149 to 153
+  // steps per minute for four and three quarter hours, 69% of the delta allowance
+  // and never once touching it. From 14:30 onward every single sync exceeded the
+  // day ceiling, and every single one was admitted because the delta ceiling was
+  // looser. The day closed at exactly 50,000.
   //
-  // What still binds: MAX_DAILY_STEPS above, the stuck-source rule above, and the
-  // day ceiling itself, which stays below the daily cap for the first 22 hours of
-  // every day and reaches it only when a whole day genuinely has elapsed.
-  const rateCeilings = [];
-
-  if (lastStepIncreaseAt) {
-    // ── Delta ceiling ───────────────────────────────────────────────────────
-    // The window is the time since steps were last ACCEPTED upward, not since the
-    // row was last written.
-    //
-    // It used to be `updatedAt`, which any write to the row bumps — including a
-    // hydration-only sync, which posts to this same endpoint with no steps at all.
-    // So a user could log a glass of water and, thirty seconds later, have a
-    // legitimate sync carrying three hours of real walking judged as an impossible
-    // burst against a thirty-second window. Measuring from the last accepted
-    // increase makes the window mean what the rule needs it to mean, and it removes
-    // the incentive to sync rapidly: syncing more often no longer resets the window
-    // unless steps were actually accepted, and if they were, the elapsed time is
-    // genuinely small so the allowance is genuinely small.
-    const windowMinutes = Math.max(
-      0,
-      (Date.now() - new Date(lastStepIncreaseAt).getTime()) / 60_000,
-    );
-
-    // Burst allowance for short windows, sustained rate for long ones — the same
-    // split the previous two rate checks intended.
-    const maxDelta =
-      windowMinutes < 60
-        ? Math.ceil(windowMinutes * MAX_STEPS_PER_MINUTE)
-        : Math.ceil((windowMinutes / 60) * MAX_STEPS_PER_HOUR);
-
-    rateCeilings.push({
-      limit: existingWalked + maxDelta,
-      reason:
-        `Rate too high: +${steps - existingWalked} steps in ` +
-        `${
-          windowMinutes < 60
-            ? `${Math.round(windowMinutes)} min`
-            : `${(windowMinutes / 60).toFixed(1)} hrs`
-        } ` +
-        `(max ${maxDelta})`,
-    });
-  }
-
+  // So the delta ceiling is gone rather than demoted. The two are not symmetric
+  // and never were:
+  //
+  //   * The day ceiling is a NECESSARY bound. No story about backlogs, watches or
+  //     sync cadence makes more steps fit into a day than the day has room for, so
+  //     nothing should be able to override it. It is a hard ceiling now.
+  //   * The delta ceiling was a SUFFICIENT refinement for one arrival shape, and
+  //     min-ing it back in is exactly the backlog bug described above. With the day
+  //     ceiling hard it also has almost nothing left to do: the only region where
+  //     it was tighter is the first minutes of a day, which FIRST_SYNC_BURST_
+  //     ALLOWANCE already covers deliberately.
+  //
+  // Dropping it fixes the 20:51 backlog case outright — 4,793 steps in the evening
+  // sits far below the day ceiling and is now accepted in one go — and closes the
+  // cadence exploit at every window size, which is what taking the looser bound
+  // could not do.
   if (steps > 0) {
-    // ── Day ceiling ─────────────────────────────────────────────────────────
-    // The reported total has to stand on its own plausibility for the time of
-    // day. Held to a sustained rate rather than the burst rate, with a floor so
-    // the first minutes of the day are not unusably tight.
-    //
     // The elapsed time is that of `syncDate`, not of today. This used to call
     // minutesSinceLocalMidnight() directly, which always answers for TODAY, while
     // the value being judged could belong to any of the last seven days: the
@@ -403,7 +637,11 @@ function validateSteps({
       FIRST_SYNC_BURST_ALLOWANCE +
         (MAX_DAILY_STEPS - FIRST_SYNC_BURST_ALLOWANCE) * dayFraction,
     );
-    rateCeilings.push({
+    // Floored at what is already stored. A ceiling that lands below the accepted
+    // total would push `steps` down, and Rule 3 would then raise it straight back
+    // — a flag on every sync for the rest of the day and no change to the figure.
+    // Ceilings stop growth; they do not claw back.
+    ceilings.push({
       limit: Math.max(existingWalked, maxForDay),
       reason:
         `Total too high for the day: ${steps} steps in ` +
@@ -413,10 +651,31 @@ function validateSteps({
     });
   }
 
-  // The looser of the two, and its reason, so what gets reported is the bound
-  // that actually held rather than the one that happened to be listed first.
-  if (rateCeilings.length) {
-    ceilings.push(rateCeilings.reduce((a, b) => (b.limit > a.limit ? b : a)));
+  // ── What this user walks ──────────────────────────────────────────────────
+  //
+  // The only bound here that is about the account rather than about the species.
+  // See the note at BASELINE_FLOOR for what it is for and why the population
+  // bounds could not do it.
+  //
+  // Deliberately does NOT grade itself, unlike the stuck-source rule. Forcing
+  // 'clamped' here looked right — a figure over this account's distribution is
+  // still physically possible, and a genuine ultramarathon must not reach the
+  // cheat path — but it also swallowed the cases that ARE cheating: once a user
+  // has a baseline, it is the lowest ceiling, so it would bind on a client
+  // posting 999,999 and grade that 'clamped' too.
+  //
+  // The default grading already draws exactly the right line. It asks whether the
+  // figure beats physicalDayBound — the daily cap, or 220 steps/min for the whole
+  // elapsed day — which the ultramarathon does not and the fabricated total does.
+  // So leave the grading alone and let it answer.
+  if (steps > 0 && Number.isFinite(Number(stepBaseline)) && Number(stepBaseline) > 0) {
+    const baseline = Math.round(Number(stepBaseline));
+    ceilings.push({
+      limit: Math.max(existingWalked, baseline),
+      reason:
+        `Above this account's usual range: ${steps} steps against a ceiling of ` +
+        `${baseline} from its own recent days`,
+    });
   }
 
   // ── How suspicious is this, really? ────────────────────────────────────────
@@ -516,7 +775,17 @@ function validateSteps({
 module.exports = {
   validateSteps,
   trackClientCadence,
+  computeStepBaseline,
   MAX_DAILY_STEPS,
   STUCK_DELTA_MIN_STEPS,
   STUCK_DELTA_REPEATS,
+  STUCK_RATE_TOLERANCE,
+  STUCK_RATE_SAMPLES,
+  STUCK_RATE_MIN_SPAN_MIN,
+  STUCK_RATE_MIN_WINDOW_MIN,
+  BASELINE_FLOOR,
+  BASELINE_MULTIPLIER,
+  MAX_BASELINE_CEILING,
+  BASELINE_MIN_DAYS,
+  BASELINE_WINDOW_DAYS,
 };
