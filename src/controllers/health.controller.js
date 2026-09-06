@@ -26,6 +26,31 @@ const {
 const { loadStepBaseline } = require('../utils/stepBaselineStore');
 const { resolveOriginTrust } = require('../utils/stepOriginTrust');
 const { loadOriginHistory } = require('../utils/stepOriginTrustStore');
+
+/**
+ * How many minutes of walking a live-sensor figure may cover.
+ *
+ * The larger of two windows, because either can be the real one:
+ *
+ *   * time since this account last posted a raw total, which is what the server
+ *     itself observed; and
+ *   * the client's own `offlineMinutes`, which is the only thing that knows the
+ *     foreground service was killed. Android keeps TYPE_STEP_COUNTER running in
+ *     hardware when the service dies, so the sync after an OEM kills it genuinely
+ *     covers the whole silent period — and the phones that kill background
+ *     services hardest are exactly the ones this must not clamp.
+ *
+ * Null when there is no previous total to measure from, which leaves the bound
+ * off entirely rather than guessing at a window.
+ */
+function sensorWindowMinutes(existing, stepSource) {
+  const last = existing?.lastIncomingAt ? new Date(existing.lastIncomingAt).getTime() : null;
+  const observed = last == null ? null : Math.max(0, (Date.now() - last) / 60_000);
+  const claimed = Number(stepSource?.offlineMinutes);
+  const offline = Number.isFinite(claimed) && claimed >= 0 ? claimed : null;
+  if (observed == null && offline == null) return null;
+  return Math.max(observed ?? 0, offline ?? 0);
+}
 const { getCachedAppConfig } = require('../utils/appConfigCache');
 const { checkTimezoneManipulation } = require('../utils/timezoneGuard');
 const { recordCheatFlag, isCoinBlocked } = require('../utils/cheatPenalty');
@@ -401,6 +426,9 @@ const syncHealthData = async (req, res, next) => {
       originTrust = resolveOriginTrust({
         reader: claimedReader,
         primaryOrigin: claimedOrigin,
+        // How much this sync is asking to move the day. Only consulted for a
+        // reader that named no source — see UNATTRIBUTED_MAX_DELTA.
+        delta: Math.round(Number(steps) || 0) - (existing?.steps || 0),
         history: originHistory || {},
       });
 
@@ -417,6 +445,14 @@ const syncHealthData = async (req, res, next) => {
       existingSteps: existing?.steps || 0,
       bonusSteps: existing?.bonusSteps || 0,
       stepBaseline,
+      // The hardware sensor listens live, so its figure is bounded by human
+      // cadence in a way a Health Connect backlog is not. The window has to cover
+      // any period the foreground service was killed — TYPE_STEP_COUNTER keeps
+      // running in hardware — so the client's own `offlineMinutes` widens it.
+      reader: stepsProvided
+        ? (typeof stepSource?.reader === 'string' ? stepSource.reader.trim() : null)
+        : null,
+      sensorWindowMinutes: sensorWindowMinutes(existing, stepSource),
       timezone,
       // The date this sync is writing to, which is not necessarily today — the
       // Android widget worker re-posts the last seven days every 15 minutes. The

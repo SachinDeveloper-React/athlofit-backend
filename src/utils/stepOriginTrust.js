@@ -92,6 +92,40 @@ const ORIGIN_CHURN_MAX = 3;
 /** Trailing days the origin history is read over. Matches the baseline window. */
 const ORIGIN_WINDOW_DAYS = 28;
 
+// ── Steps that arrive without saying where they came from ───────────────────
+//
+// The first version of this file trusted every reader that was not
+// `health_connect`, on the reasoning that only Health Connect has an origin to
+// be suspicious of. Two accounts showed that to be a hole, and it is worth being
+// precise about the shape of it, because the same data arrives under three
+// different labels:
+//
+//   * `health_connect` — the honest case, checked above.
+//   * `native_sensor` — but the foreground service folds a Health Connect total
+//     into its own count once a day (seedDayFromHealthConnect), so a figure that
+//     originated in Health Connect can arrive wearing the sensor's label. One
+//     account gained 8,328 steps in a 30-minute window this way, at 276 steps a
+//     minute, and the histogram gave it away: hours that had already passed
+//     before the service's first sync were populated, which a live sensor cannot
+//     do and only the Health Connect seed can.
+//   * `unknown` — the app's own sync posts this when its resolve has not run
+//     yet. Another account moved 1,725 → 15,931 in one such sync, with no origin
+//     list, no method and a histogram that summed to exactly the 1,725 the sensor
+//     had reported. The 14,206 was Health Connect's, and nothing said so.
+//
+// So the question is not "which reader" but "did anything account for these
+// steps". An unattributed sync is not itself suspicious — 28% of all ledger
+// entries carry no reader, because a cold open races the first resolve — but 80%
+// of those move the day by under 100 steps. That is noise, and marking those
+// days untrusted would stop honest accounts ever building a baseline.
+//
+// Measured against the real ledger, a 2,000-step threshold marks 5% of user-days
+// untrusted and catches every large unattributed jump in the data. It is a
+// deliberately cheap consequence: the day is kept out of future baseline windows
+// and nothing is clamped, so being wrong costs an account a slower baseline and
+// nothing else.
+const UNATTRIBUTED_MAX_DELTA = 2_000;
+
 /**
  * Decides whether this sync's attribution can be believed.
  *
@@ -101,6 +135,8 @@ const ORIGIN_WINDOW_DAYS = 28;
  * @param {object} params
  * @param {string|null} params.reader - 'health_connect' | 'native_sensor' | etc.
  * @param {string|null} params.primaryOrigin - Package the steps were attributed to.
+ * @param {number} [params.delta] - How much this sync moved the day's total. Only
+ *   consulted for readers that named no source; see UNATTRIBUTED_MAX_DELTA.
  * @param {object} params.history
  * @param {string[]|Set<string>} params.history.establishedOrigins - Origins already
  *   seen on enough prior days to count as this account's own.
@@ -108,7 +144,7 @@ const ORIGIN_WINDOW_DAYS = 28;
  *   origins the account has reported across the window.
  * @returns {{ trusted: boolean, reason: string|null }}
  */
-function resolveOriginTrust({ reader, primaryOrigin, history = {} }) {
+function resolveOriginTrust({ reader, primaryOrigin, delta = 0, history = {} }) {
   // A resolved SET rather than the raw day-count map. The counting is a per-day
   // fact, so it is done once and frozen on the day's row; passing the map here
   // would have meant recomputing it on every sync. See the note in the store.
@@ -118,20 +154,33 @@ function resolveOriginTrust({ reader, primaryOrigin, history = {} }) {
       : new Set(history.establishedOrigins || []);
   const distinctPrimaries = Number(history.distinctPrimaries) || 0;
 
-  // ── No origin claim to check ──────────────────────────────────────────────
+  // ── Readers that carry no origin claim ────────────────────────────────────
   //
   // The hardware step counter is a running total with no per-app breakdown, so
-  // `native_sensor` never carries an origin and there is nothing here to be
-  // suspicious of. The same goes for a build too old to send the block at all.
+  // `native_sensor` has no origin to give, and neither does a build too old to
+  // send the block. Trusting them is a deliberate choice: refusing would mean no
+  // sensor-only account — a phone without Health Connect, which is a large share
+  // of them — could ever build a baseline, so every one would sit on the floor
+  // permanently.
   //
-  // Trusted, and that is a deliberate choice rather than an oversight. Refusing
-  // to trust it would mean no sensor-only account — a phone without Health
-  // Connect, which is a large share of them — could ever build a baseline, so
-  // every one of them would sit on the floor permanently. That is a real cost
-  // paid by real users to close an evasion path that is already open: a client
-  // willing to lie about its reader is a patched client, and a patched client is
-  // outside what any rule reading this block can reach.
+  // But trusting them UNCONDITIONALLY was the hole. Steps that originated in
+  // Health Connect reach this function under both of these labels, and a sync
+  // that moves the day materially while accounting for nothing is the one case
+  // where the label cannot be taken at face value. See UNATTRIBUTED_MAX_DELTA.
+  //
+  // A client willing to lie about its reader is still outside what this can
+  // reach; that is what the baseline ceiling is for. What this closes is the
+  // honest client faithfully reporting a figure it cannot explain.
   if (reader !== 'health_connect') {
+    const moved = Math.max(0, Math.round(Number(delta) || 0));
+    if (moved > UNATTRIBUTED_MAX_DELTA) {
+      return {
+        trusted: false,
+        reason:
+          `+${moved} steps arrived from '${reader || 'an unnamed reader'}' with ` +
+          'nothing accounting for them (no origin, no record timestamps)',
+      };
+    }
     return { trusted: true, reason: null };
   }
 
@@ -175,4 +224,5 @@ module.exports = {
   ORIGIN_TRUST_MIN_DAYS,
   ORIGIN_CHURN_MAX,
   ORIGIN_WINDOW_DAYS,
+  UNATTRIBUTED_MAX_DELTA,
 };

@@ -1553,3 +1553,82 @@ describe('stuck source — a small sync cannot buy back the hold', () => {
     expect(last.cadenceStreak).toBe(0);
   });
 });
+
+describe('a live sensor cannot deliver a backlog', () => {
+  // The delta ceiling was removed from this file because it punished a legitimate
+  // Health Connect backlog. That reasoning does not extend to the hardware sensor:
+  // the service listens live, so its steps were walked inside the window it was
+  // listening for. The old rule applied one bound to both readers, so removing it
+  // removed it from both.
+
+  it('clamps the incident: +8,328 across a 30-minute window', () => {
+    // s.chetanshetty23, 2026-09-06, labelled native_sensor at 276 steps/min. It
+    // came from seedDayFromHealthConnect folding a Health Connect total into the
+    // service's own count.
+    const result = validateSteps({
+      ...base,
+      incomingSteps: 9_471,
+      existingSteps: 1_143,
+      reader: 'native_sensor',
+      sensorWindowMinutes: 30.15,
+    });
+
+    expect(result.clampedSteps).toBe(1_143 + Math.ceil(30.15 * 220));
+    expect(result.flagged).toBe(true);
+    expect(result.reason).toMatch(/Live sensor cannot have counted this/);
+  });
+
+  it('leaves a brisk real walk alone', () => {
+    // 15 minutes at 150 steps/min is an ordinary walking pace and well inside it.
+    const result = validateSteps({
+      ...base,
+      incomingSteps: 3_250,
+      existingSteps: 1_000,
+      reader: 'native_sensor',
+      sensorWindowMinutes: 15,
+    });
+    expect(result.clampedSteps).toBe(3_250);
+    expect(result.flagged).toBe(false);
+  });
+
+  it('does not bind a Health Connect backlog', () => {
+    // The case the delta ceiling was removed for. HC reports the day cumulatively,
+    // so a phone reading it in the evening carries hours of walking in one sync.
+    const result = validateSteps({
+      ...base,
+      incomingSteps: 12_000,
+      existingSteps: 7_207,
+      reader: 'health_connect',
+      sensorWindowMinutes: 5,
+    });
+    expect(result.clampedSteps).toBe(12_000);
+    expect(result.flagged).toBe(false);
+  });
+
+  it('covers a window the foreground service spent killed', () => {
+    // Android keeps TYPE_STEP_COUNTER running in hardware when an OEM kills the
+    // service, so the sync afterwards genuinely covers the whole silent period.
+    // The phones that kill background services hardest are exactly the ones this
+    // must not clamp, which is why the caller widens the window by offlineMinutes.
+    const result = validateSteps({
+      ...base,
+      incomingSteps: 9_471,
+      existingSteps: 1_143,
+      reader: 'native_sensor',
+      sensorWindowMinutes: 180,
+    });
+    expect(result.clampedSteps).toBe(9_471);
+    expect(result.flagged).toBe(false);
+  });
+
+  it('is inert for callers that pass no window', () => {
+    const result = validateSteps({
+      ...base,
+      incomingSteps: 9_471,
+      existingSteps: 1_143,
+      reader: 'native_sensor',
+      sensorWindowMinutes: null,
+    });
+    expect(result.clampedSteps).toBe(9_471);
+  });
+});

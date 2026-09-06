@@ -490,6 +490,10 @@ function trackClientCadence({
  * @param {object|null} [params.cadence] - Result of trackClientCadence() for this
  *   sync. When it reports `stuck`, the client's deltas have stopped varying with
  *   the time between syncs, so the total is held where it is.
+ * @param {string|null} [params.reader] - Which reader the client says produced this
+ *   figure. Only used to decide whether the live-sensor bound below applies.
+ * @param {number|null} [params.sensorWindowMinutes] - Minutes of walking this
+ *   figure may cover, for a reader that measures live. See the ceiling.
  * @param {number|null} [params.stepBaseline] - This user's own daily ceiling, from
  *   computeStepBaseline() over their trailing days. Omit and only the population
  *   bounds apply, which is the pre-baseline behaviour — so an older caller that
@@ -515,6 +519,8 @@ function validateSteps({
   allowCorrection = false,
   cadence = null,
   stepBaseline = null,
+  reader = null,
+  sensorWindowMinutes = null,
 }) {
   // If no steps provided or negative, return 0
   if (
@@ -569,6 +575,58 @@ function validateSteps({
       // The detector that fired says why, since the two see different faults and
       // an investigation branches on which one it was.
       reason: `Source not measuring: ${cadence.stuckReason || 'cadence stopped varying with elapsed time'}`,
+    });
+  }
+
+  // ── A live sensor cannot deliver a backlog ────────────────────────────────
+  //
+  // The delta ceiling was removed from this file because it punished a legitimate
+  // Health Connect backlog: HC reports the day cumulatively, so a phone that
+  // finally reads it in the evening carries hours of real walking in one sync, and
+  // rationing that at 220 steps a minute took 46 minutes to accept a figure it
+  // would have taken instantly from a device that had stayed quiet.
+  //
+  // That reasoning holds for Health Connect and does NOT hold for the hardware
+  // sensor. The foreground service listens live, so the steps it reports were
+  // walked inside the window it was listening for — there is no backlog for it to
+  // deliver. A figure from that reader is therefore bounded by human cadence in a
+  // way an HC figure is not, and the distinction is the one the old rule failed to
+  // draw: it applied the bound to both, so removing it removed it from both.
+  //
+  // What this catches: one account gained 8,328 steps across a 30-minute window,
+  // labelled `native_sensor`, at 276 steps a minute. A live sensor cannot produce
+  // that. It came from seedDayFromHealthConnect folding a Health Connect total
+  // into the service's own count once a day, which arrives wearing the sensor's
+  // label — see the note in stepOriginTrust.js.
+  //
+  // The window is the caller's, and must already account for the service having
+  // been killed: an OEM that stops the foreground service leaves TYPE_STEP_COUNTER
+  // running in hardware, so the next sync genuinely covers the whole silent
+  // period. Passing a window that ignores that would clamp honest users on exactly
+  // the phones that kill background services hardest.
+  //
+  // A client that would rather not be bounded can simply claim `health_connect`,
+  // so this is not a defence against a patched build. It is a defence against an
+  // honest client reporting a figure under a label that does not fit it.
+  // `null` is "the caller cannot say", NOT a zero-length window. Number(null) is
+  // 0 and passes every finite check, so without the explicit null test a caller
+  // that omitted the window would pin the total exactly where it stood — which is
+  // how a missing field turns into a silent, total freeze on a real user's day.
+  if (
+    reader === 'native_sensor' &&
+    sensorWindowMinutes !== null &&
+    sensorWindowMinutes !== undefined &&
+    Number.isFinite(Number(sensorWindowMinutes)) &&
+    Number(sensorWindowMinutes) >= 0
+  ) {
+    const window = Number(sensorWindowMinutes);
+    const maxDelta = Math.ceil(window * MAX_STEPS_PER_MINUTE);
+    ceilings.push({
+      limit: Math.max(existingWalked, existingWalked + maxDelta),
+      reason:
+        `Live sensor cannot have counted this: +${steps - existingWalked} steps ` +
+        `across ${Math.round(window)} min of listening ` +
+        `(max ${maxDelta} at ${MAX_STEPS_PER_MINUTE}/min)`,
     });
   }
 

@@ -275,3 +275,78 @@ describe('loadOriginHistory', () => {
     expect(history).toEqual({ establishedOrigins: [], distinctPrimaries: 0 });
   });
 });
+
+describe('resolveOriginTrust — steps that account for nothing', () => {
+  // Two real accounts reached the server with Health Connect data wearing a label
+  // that no origin rule inspects. The first version of this file trusted every
+  // reader that was not `health_connect`, which is the hole they came through.
+  const { UNATTRIBUTED_MAX_DELTA } = require('../utils/stepOriginTrust');
+
+  it('refuses a large jump from a reader that named no source', () => {
+    // bharat75321, 2026-09-06: the sensor had reported 1,725 all day and the
+    // hourly histogram summed to exactly that. Then one app sync moved the total
+    // to 15,931 with reader 'unknown', no method, no origins. The 14,206 was
+    // Health Connect's and nothing said so.
+    const result = resolveOriginTrust({
+      reader: 'unknown',
+      primaryOrigin: null,
+      delta: 14_206,
+      history: { establishedOrigins: [], distinctPrimaries: 0 },
+    });
+
+    expect(result.trusted).toBe(false);
+    expect(result.reason).toMatch(/nothing accounting for them/);
+  });
+
+  it('refuses a large jump wearing the sensor label', () => {
+    // s.chetanshetty23, 2026-09-06: +8,328 in a 30-minute window labelled
+    // native_sensor. seedDayFromHealthConnect had folded a Health Connect total
+    // into the service's own count.
+    const result = resolveOriginTrust({
+      reader: 'native_sensor',
+      primaryOrigin: null,
+      delta: 8_328,
+      history: { establishedOrigins: [], distinctPrimaries: 0 },
+    });
+    expect(result.trusted).toBe(false);
+  });
+
+  it('leaves the ordinary unattributed sync alone', () => {
+    // 28% of all ledger entries carry no reader, because a cold open races the
+    // first resolve. 80% of those move the day by under 100 steps. Marking those
+    // days untrusted would stop honest accounts ever building a baseline.
+    for (const delta of [0, 10, 64, 306, 843, 1_999]) {
+      const result = resolveOriginTrust({
+        reader: 'unknown',
+        primaryOrigin: null,
+        delta,
+        history: { establishedOrigins: [], distinctPrimaries: 0 },
+      });
+      expect(result.trusted).toBe(true);
+    }
+  });
+
+  it('still trusts a sensor-only phone doing ordinary days', () => {
+    // The whole reason non-HC readers are trusted at all: a phone without Health
+    // Connect must be able to build a baseline, or it sits on the floor forever.
+    const result = resolveOriginTrust({
+      reader: 'native_sensor',
+      primaryOrigin: null,
+      delta: UNATTRIBUTED_MAX_DELTA,
+      history: { establishedOrigins: [], distinctPrimaries: 0 },
+    });
+    expect(result.trusted).toBe(true);
+  });
+
+  it('judges a named Health Connect origin on its history, not on its size', () => {
+    // The delta rule is only for readers that named nobody. A reader that DID name
+    // its source is judged by the established/churn rules above, whatever the size.
+    const result = resolveOriginTrust({
+      reader: 'health_connect',
+      primaryOrigin: FIT,
+      delta: 14_206,
+      history: { establishedOrigins: [FIT], distinctPrimaries: 1 },
+    });
+    expect(result.trusted).toBe(true);
+  });
+});
