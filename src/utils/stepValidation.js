@@ -835,6 +835,7 @@ module.exports = {
   trackClientCadence,
   computeStepBaseline,
   MAX_DAILY_STEPS,
+  MAX_STEPS_PER_MINUTE,
   STUCK_DELTA_MIN_STEPS,
   STUCK_DELTA_REPEATS,
   STUCK_RATE_TOLERANCE,

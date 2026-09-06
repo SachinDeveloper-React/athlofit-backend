@@ -14,6 +14,7 @@ const {
   resolveClientDate,
   isValidISODate,
   toClientDate,
+  minutesElapsedOnDate,
 } = require('../utils/date');
 const { syncChallengeProgress } = require('./challenge.controller');
 const { sendPushToUser } = require('../utils/pushNotification');
@@ -28,9 +29,23 @@ const { resolveOriginTrust } = require('../utils/stepOriginTrust');
 const { loadOriginHistory } = require('../utils/stepOriginTrustStore');
 
 /**
- * How many minutes of walking a live-sensor figure may cover.
+ * How many minutes of walking a figure written to `syncDate` may cover.
  *
- * The larger of two windows, because either can be the real one:
+ * ── A past date gets its whole day ──────────────────────────────────────────
+ *
+ * This is the distinction the first version missed, and a backfill would have hit
+ * it immediately. "Time since we last heard a total" is the right window for a
+ * sync writing TODAY. It is the wrong window for one writing a PAST date: those
+ * steps were walked across that day, not since the last sync, so a device
+ * flushing a day it recorded while offline would have had a whole day's walking
+ * measured against a fifteen-minute gap and clamped for it.
+ *
+ * minutesElapsedOnDate already draws exactly this line — the full 1,440 for a
+ * past date, elapsed-so-far for today — so a past date simply takes it.
+ *
+ * ── For today, the larger of two windows ────────────────────────────────────
+ *
+ * Either can be the real one:
  *
  *   * time since this account last posted a raw total, which is what the server
  *     itself observed; and
@@ -40,16 +55,26 @@ const { loadOriginHistory } = require('../utils/stepOriginTrustStore');
  *     covers the whole silent period — and the phones that kill background
  *     services hardest are exactly the ones this must not clamp.
  *
- * Null when there is no previous total to measure from, which leaves the bound
+ * Bounded by the elapsed day either way: no window can be longer than the part of
+ * the day that has actually happened.
+ *
+ * Null when today has no previous total to measure from, which leaves the bound
  * off entirely rather than guessing at a window.
  */
-function sensorWindowMinutes(existing, stepSource) {
+function sensorWindowMinutes(existing, stepSource, syncDate, timezone) {
+  const elapsedOnDate = minutesElapsedOnDate(syncDate, timezone);
+
+  // A past date is judged by its own whole day. minutesElapsedOnDate returns the
+  // full 1,440 for one, so nothing further is needed.
+  const todayForClient = resolveClientDate(timezone);
+  if (syncDate && todayForClient && syncDate < todayForClient) return elapsedOnDate;
+
   const last = existing?.lastIncomingAt ? new Date(existing.lastIncomingAt).getTime() : null;
   const observed = last == null ? null : Math.max(0, (Date.now() - last) / 60_000);
   const claimed = Number(stepSource?.offlineMinutes);
   const offline = Number.isFinite(claimed) && claimed >= 0 ? claimed : null;
   if (observed == null && offline == null) return null;
-  return Math.max(observed ?? 0, offline ?? 0);
+  return Math.min(elapsedOnDate, Math.max(observed ?? 0, offline ?? 0));
 }
 const { getCachedAppConfig } = require('../utils/appConfigCache');
 const { checkTimezoneManipulation } = require('../utils/timezoneGuard');
@@ -426,9 +451,15 @@ const syncHealthData = async (req, res, next) => {
       originTrust = resolveOriginTrust({
         reader: claimedReader,
         primaryOrigin: claimedOrigin,
-        // How much this sync is asking to move the day. Only consulted for a
-        // reader that named no source — see UNATTRIBUTED_MAX_DELTA.
+        // How much this sync is asking to move the day, and how much time that
+        // could plausibly cover. Only consulted for a reader that named no
+        // source. The window is capped at the elapsed part of the date being
+        // written, so a past-date backfill gets its whole day and today's syncs
+        // get only what has actually happened.
         delta: Math.round(Number(steps) || 0) - (existing?.steps || 0),
+        windowMinutes:
+          sensorWindowMinutes(existing, stepSource, today, timezone) ??
+          minutesElapsedOnDate(today, timezone),
         history: originHistory || {},
       });
 
@@ -452,7 +483,7 @@ const syncHealthData = async (req, res, next) => {
       reader: stepsProvided
         ? (typeof stepSource?.reader === 'string' ? stepSource.reader.trim() : null)
         : null,
-      sensorWindowMinutes: sensorWindowMinutes(existing, stepSource),
+      sensorWindowMinutes: sensorWindowMinutes(existing, stepSource, today, timezone),
       timezone,
       // The date this sync is writing to, which is not necessarily today — the
       // Android widget worker re-posts the last seven days every 15 minutes. The

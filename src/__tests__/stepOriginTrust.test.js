@@ -280,7 +280,8 @@ describe('resolveOriginTrust — steps that account for nothing', () => {
   // Two real accounts reached the server with Health Connect data wearing a label
   // that no origin rule inspects. The first version of this file trusted every
   // reader that was not `health_connect`, which is the hole they came through.
-  const { UNATTRIBUTED_MAX_DELTA } = require('../utils/stepOriginTrust');
+  /** A window too short to hold the delta being tested. */
+  const TIGHT = 15;
 
   it('refuses a large jump from a reader that named no source', () => {
     // bharat75321, 2026-09-06: the sensor had reported 1,725 all day and the
@@ -291,6 +292,7 @@ describe('resolveOriginTrust — steps that account for nothing', () => {
       reader: 'unknown',
       primaryOrigin: null,
       delta: 14_206,
+      windowMinutes: 8.5,
       history: { establishedOrigins: [], distinctPrimaries: 0 },
     });
 
@@ -306,6 +308,7 @@ describe('resolveOriginTrust — steps that account for nothing', () => {
       reader: 'native_sensor',
       primaryOrigin: null,
       delta: 8_328,
+      windowMinutes: 30.15,
       history: { establishedOrigins: [], distinctPrimaries: 0 },
     });
     expect(result.trusted).toBe(false);
@@ -320,19 +323,48 @@ describe('resolveOriginTrust — steps that account for nothing', () => {
         reader: 'unknown',
         primaryOrigin: null,
         delta,
+        windowMinutes: TIGHT,
         history: { establishedOrigins: [], distinctPrimaries: 0 },
       });
       expect(result.trusted).toBe(true);
     }
   });
 
-  it('still trusts a sensor-only phone doing ordinary days', () => {
-    // The whole reason non-HC readers are trusted at all: a phone without Health
-    // Connect must be able to build a baseline, or it sits on the floor forever.
+  it('trusts a whole day flushed after the phone was offline', () => {
+    // The case a flat size threshold got wrong, and the reason the test is on
+    // TIME. Five days with no network, then one sync carrying a full day. There
+    // is nothing suspicious about it, and marking 14.8% of honest days untrusted
+    // is what the size test actually did.
     const result = resolveOriginTrust({
       reader: 'native_sensor',
       primaryOrigin: null,
-      delta: UNATTRIBUTED_MAX_DELTA,
+      delta: 9_500,
+      windowMinutes: 5 * 24 * 60,
+      history: { establishedOrigins: [], distinctPrimaries: 0 },
+    });
+    expect(result.trusted).toBe(true);
+  });
+
+  it('refuses the same figure when no time has passed', () => {
+    // +16,475 against `offlineMinutes: 15` is in the real ledger. A quarter of an
+    // hour cannot hold sixteen thousand steps, whoever reports it.
+    const result = resolveOriginTrust({
+      reader: 'native_sensor',
+      primaryOrigin: null,
+      delta: 16_475,
+      windowMinutes: TIGHT,
+      history: { establishedOrigins: [], distinctPrimaries: 0 },
+    });
+    expect(result.trusted).toBe(false);
+  });
+
+  it('does not let a missing window become a verdict on its own', () => {
+    // A caller that reports no window must not make every delta unexplainable.
+    const result = resolveOriginTrust({
+      reader: 'native_sensor',
+      primaryOrigin: null,
+      delta: 200,
+      windowMinutes: null,
       history: { establishedOrigins: [], distinctPrimaries: 0 },
     });
     expect(result.trusted).toBe(true);
@@ -345,6 +377,7 @@ describe('resolveOriginTrust — steps that account for nothing', () => {
       reader: 'health_connect',
       primaryOrigin: FIT,
       delta: 14_206,
+      windowMinutes: 1,
       history: { establishedOrigins: [FIT], distinctPrimaries: 1 },
     });
     expect(result.trusted).toBe(true);

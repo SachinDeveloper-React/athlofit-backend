@@ -1632,3 +1632,45 @@ describe('a live sensor cannot deliver a backlog', () => {
     expect(result.clampedSteps).toBe(9_471);
   });
 });
+
+describe('a day that has already ended is judged by its whole day', () => {
+  // The sensor backfill sends days a phone recorded while it could not reach the
+  // server, each under its own date. Those steps were walked ACROSS that day, not
+  // since the last sync — so measuring them against a fifteen-minute gap would
+  // clamp a whole day of real walking the moment it finally arrived.
+  const PAST = '2026-08-22'; // the day before the frozen clock
+
+  it('accepts a full day flushed from the backlog', () => {
+    const result = validateSteps({
+      ...base,
+      incomingSteps: 9_500,
+      existingSteps: 0,
+      syncDate: PAST,
+      reader: 'native_sensor',
+      // What minutesElapsedOnDate gives a past date: the whole 1,440.
+      sensorWindowMinutes: 1_440,
+      stepBaseline: 15_000,
+    });
+
+    expect(result.clampedSteps).toBe(9_500);
+    expect(result.flagged).toBe(false);
+  });
+
+  it('still bounds a past day by human cadence', () => {
+    // A whole day is 1,440 minutes, which is a real bound and not an absent one:
+    // 400,000 steps do not fit in it, and neither does anything past the account's
+    // own ceiling.
+    const result = validateSteps({
+      ...base,
+      incomingSteps: 400_000,
+      existingSteps: 0,
+      syncDate: PAST,
+      reader: 'native_sensor',
+      sensorWindowMinutes: 1_440,
+      stepBaseline: 15_000,
+    });
+
+    expect(result.clampedSteps).toBe(15_000);
+    expect(result.flagged).toBe(true);
+  });
+});

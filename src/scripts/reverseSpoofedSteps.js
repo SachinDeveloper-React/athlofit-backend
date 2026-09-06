@@ -57,6 +57,7 @@
 //     node src/scripts/reverseSpoofedSteps.js                      # report, all users
 //     node src/scripts/reverseSpoofedSteps.js --user <email|id>    # one account
 //     node src/scripts/reverseSpoofedSteps.js --apply              # write the changes
+//     node src/scripts/reverseSpoofedSteps.js --apply --cap-unverifiable
 //     node src/scripts/reverseSpoofedSteps.js --apply --zero-unverifiable
 //     node src/scripts/reverseSpoofedSteps.js --user <id> --force   # reviewed account
 //                                                                  # under the churn threshold
@@ -74,10 +75,16 @@ const Challenge = require('../models/Challenge.model');
 const { getCachedAppConfig } = require('../utils/appConfigCache');
 const { passiveCoinsForSteps } = require('../utils/passiveCoins');
 const { getEffectiveDailyCap } = require('../utils/dailyCoinCap');
+const { shiftDate } = require('../utils/stepBaselineStore');
 const {
   ORIGIN_TRUST_MIN_DAYS,
   ORIGIN_CHURN_MAX,
+  UNATTRIBUTED_MIN_WINDOW_MIN,
 } = require('../utils/stepOriginTrust');
+const {
+  computeStepBaseline,
+  MAX_STEPS_PER_MINUTE,
+} = require('../utils/stepValidation');
 const {
   DEFAULT_RATE_PER_100_STEPS,
   DEFAULT_DAILY_EARN_LIMIT,
@@ -96,13 +103,24 @@ const STEP_COIN_SOURCES = [
  * Share of an account's days an origin must appear on before its figure is
  * trusted as the honest one.
  *
- * A real pedometer or fitness app is present essentially every day; a rotating
- * identity is present for one or two. On the worst account this cleanly picks out
- * Google Fit (5 of 5 days) from eight injected origins (1-2 days each), and on
- * the account whose only other source appeared once it correctly finds nothing —
- * which is the honest answer, reported as UNVERIFIABLE rather than guessed at.
+ * A real pedometer or fitness app is present on most days; a rotating identity is
+ * present for one or two. "Most" is the whole idea, so a half is the honest
+ * threshold for it rather than a number picked to make a particular account come
+ * out a particular way.
+ *
+ * It was 0.6 while the tool only saw days with a named origin. Detecting the
+ * unattributed jumps as well grew the denominator — the same account went from 5
+ * days to 9 — and pushed the bar past the genuine source that had been found
+ * correctly before: Google Fit, present on 5 of the 9, stopped qualifying at 60%
+ * and every day fell back to UNVERIFIABLE.
+ *
+ * At a half it separates both accounts the way the evidence does. On the first,
+ * Google Fit (5 of 9) qualifies and the eight injected origins (1-2 days each) do
+ * not. On the second nothing qualifies — its most persistent origin appears on 3
+ * of 8 days and is itself one of the rotation — which is the honest answer, and
+ * those days go to the cap rather than to a guess.
  */
-const RESTORE_MIN_SHARE = 0.6;
+const RESTORE_MIN_SHARE = 0.5;
 
 const n = v => Number(v || 0).toLocaleString('en-US');
 const pad = (v, w) => String(v ?? '').padEnd(w).slice(0, w);
@@ -148,6 +166,72 @@ function weekBoundsFor(isoDate) {
 }
 
 // ─── Phase 1: which days came from a source with no history ─────────────────
+
+/**
+ * Ledger entries whose steps nothing accounts for.
+ *
+ * An entry qualifies when it named no origin AND moved the day by more than the
+ * time before it could hold. The window is the gap since the previous entry,
+ * widened by whatever the client reported as its offline stretch — the same two
+ * inputs the live rule uses, read here from what the ledger already recorded.
+ *
+ * ── The first entry of a day covers the whole day so far ──────────────────
+ *
+ * It has no previous entry to measure from, and falling back to the minimum
+ * window made every one of them unexplainable: honest first syncs of 675, 733
+ * and 1,019 steps were flagged against a one-minute window. A day's opening sync
+ * carries whatever was walked since local midnight, so that is the window it gets
+ * — which is also exactly what the live rule does, since a row with no previous
+ * total falls through to the elapsed-on-date cap.
+ */
+function unattributedEntries(entries, { date, timezone } = {}) {
+  const out = [];
+  let previousAt = dayStartMs(date, timezone);
+
+  for (const e of entries) {
+    const at = e?.at ? new Date(e.at).getTime() : null;
+    const gapMinutes =
+      previousAt != null && at != null ? Math.max(0, (at - previousAt) / 60_000) : null;
+    const offline = Number(e?.offlineMinutes);
+    const window = Math.max(
+      UNATTRIBUTED_MIN_WINDOW_MIN,
+      gapMinutes ?? 0,
+      Number.isFinite(offline) && offline > 0 ? offline : 0,
+    );
+
+    const delta = Number(e?.delta) || 0;
+    if (!e?.primaryOrigin && delta > Math.ceil(window * MAX_STEPS_PER_MINUTE)) {
+      out.push({ delta, reader: e.reader || 'unknown', windowMinutes: Math.round(window) });
+    }
+    if (at != null) previousAt = at;
+  }
+  return out;
+}
+
+/**
+ * Local midnight of `date`, in epoch ms, or null when it cannot be resolved.
+ *
+ * Only used as the starting mark for the day's first entry, so a timezone this
+ * cannot parse falls back to null and that entry is measured against the minimum
+ * window — the old behaviour, for the one entry it applies to.
+ */
+function dayStartMs(date, timezone) {
+  if (!date) return null;
+  try {
+    // Resolve the zone's offset at that date by comparing the same instant
+    // formatted in UTC and in the zone.
+    const noonUtc = new Date(`${date}T12:00:00.000Z`);
+    const asZone = new Date(
+      noonUtc.toLocaleString('en-US', { timeZone: timezone || 'UTC' }),
+    );
+    const asUtc = new Date(noonUtc.toLocaleString('en-US', { timeZone: 'UTC' }));
+    const offsetMs = asZone.getTime() - asUtc.getTime();
+    return new Date(`${date}T00:00:00.000Z`).getTime() - offsetMs;
+  } catch {
+    return null;
+  }
+}
+
 
 /**
  * Builds an account's origin history and decides which of its days are suspect.
@@ -253,7 +337,26 @@ function suspectDays(rows, analysis, { force = false } = {}) {
     const untrusted = [...primaries].filter(
       p => analysis.churning || (analysis.primaryDays[p] || 0) < ORIGIN_TRUST_MIN_DAYS,
     );
-    if (!untrusted.length) continue;
+
+    // ── Steps that named no source at all ─────────────────────────────────
+    //
+    // The first version keyed only on untrusted PRIMARY origins, and a day whose
+    // entries name nobody has none — so it was skipped outright. That is exactly
+    // the shape the laundering paths produce, and it hid the two worst recent
+    // days on these very accounts: 1,725 → 15,931 under `reader: unknown`, and
+    // 1,143 → 9,471 under the sensor's label after a Health Connect seed. Both
+    // days have `origins: []` and would have been invisible here.
+    //
+    // Judged on TIME, not size, exactly as the live rule is. A big delta is
+    // ordinary after a phone has been offline — flushing a whole day in one sync
+    // is what coming back online looks like — so the test is whether the elapsed
+    // window could hold it. A flat size threshold marked 14.8% of honest days.
+    const unattributed = unattributedEntries(row.entries || [], {
+      date: row.date,
+      timezone: row.timezone,
+    });
+
+    if (!untrusted.length && !unattributed.length) continue;
 
     // The largest figure from a source that has history with this account.
     //
@@ -273,11 +376,67 @@ function suspectDays(rows, analysis, { force = false } = {}) {
       date: row.date,
       recordedTotal: Number(row.totalSteps) || 0,
       untrusted,
+      unattributed,
       candidates,
       restoredSteps,
     });
   }
   return out.sort((a, b) => (a.date < b.date ? -1 : 1));
+}
+
+/**
+ * Fills in a figure for the days no source can account for.
+ *
+ * ── Why this is not zero ────────────────────────────────────────────────────
+ *
+ * A day with no persistent origin behind it is one we know is wrong and cannot
+ * measure. Three things can be done with it, and two of them are bad:
+ *
+ *   * Leave it. The fabricated figure stands in the data and in every leaderboard
+ *     and streak built on it.
+ *   * Zero it. We know the day is wrong; we do NOT know the user walked nothing.
+ *     Zero is an invented number, which is the same class of mistake as the
+ *     injection, only pointing the other way.
+ *   * Cap it at what the FIXED system would have allowed. This invents nothing —
+ *     it applies today's rule to a day that predates it — and every error it can
+ *     make is in the user's favour, because it only ever lowers a total to a
+ *     ceiling that a real user of that account could have reached.
+ *
+ * The ceiling is computeStepBaseline over the account's own trailing days, with
+ * every suspect day excluded: a poisoned history must not be allowed to widen the
+ * allowance being used to correct it. An account with too little clean history
+ * gets BASELINE_FLOOR, which is the same answer the live rule gives it.
+ *
+ * Only ever lowers. A day already under its ceiling keeps its figure and is
+ * merely marked untrusted.
+ */
+function capUnverifiable(days, rows) {
+  const suspect = new Set(days.map(d => d.date));
+  // Walked steps only, matching loadStepBaseline exactly. Bonus steps are credited
+  // by an admin or by the system and say nothing about what this account walks —
+  // letting them in would widen the ceiling as a side effect of a support gesture,
+  // and would make the tool disagree with the rule it is meant to apply.
+  const cleanByDate = new Map(
+    rows
+      .filter(r => !suspect.has(r.date))
+      .map(r => [
+        r.date,
+        Math.max(0, (Number(r.walkedSteps) || 0) - (Number(r.bonusSteps) || 0)),
+      ]),
+  );
+
+  for (const day of days) {
+    if (day.restoredSteps != null) continue;
+
+    const trailing = [...cleanByDate.entries()]
+      .filter(([date]) => date < day.date && date >= shiftDate(day.date, 28))
+      .map(([, steps]) => steps);
+
+    const ceiling = computeStepBaseline(trailing);
+    day.cappedAt = ceiling;
+    day.restoredSteps = Math.min(day.recordedTotal, ceiling);
+  }
+  return days;
 }
 
 // ─── Phase 2: what the corrections cost ─────────────────────────────────────
@@ -482,9 +641,20 @@ function printAccount(report) {
   );
   for (const d of days) {
     const restored = d.restoredSteps == null ? 'UNVERIFIABLE' : n(d.restoredSteps);
+    const why = [
+      d.untrusted.length ? `${d.untrusted.length} unestablished origin(s)` : null,
+      d.unattributed?.length
+        ? `${d.unattributed.length} unattributed jump(s): ` +
+          d.unattributed
+            .map(u => `+${n(u.delta)} as '${u.reader}' in ${u.windowMinutes}min`)
+            .join(', ')
+        : null,
+    ].filter(Boolean).join('; ');
     const src = d.candidates.length
       ? d.candidates.map(c => c.packageName).join(', ')
-      : `no source with history (untrusted: ${d.untrusted.length})`;
+      : d.cappedAt != null
+        ? `capped at ${n(d.cappedAt)} — ${why}`
+        : `no source with history — ${why}`;
     console.log(
       `    ${pad(d.date, 12)}${pad(n(d.recordedTotal), 11)}${pad(restored, 14)}${src}`,
     );
@@ -518,6 +688,9 @@ async function main() {
   const args = process.argv.slice(2);
   const apply = args.includes('--apply');
   const zeroUnverifiable = args.includes('--zero-unverifiable');
+  // Caps the days no source can account for at what the fixed system would have
+  // allowed, rather than zeroing them or leaving them. See capUnverifiable.
+  const capUnverifiableFlag = args.includes('--cap-unverifiable');
   // Bypasses the churn gate, and only ever for one explicitly named account. An
   // account can sit just under the threshold — one of the three had exactly three
   // distinct primaries — and reviewing it is a person's job. Automatic selection
@@ -566,7 +739,13 @@ async function main() {
     const cap = getEffectiveDailyCap(user, configCap, unverifiedCap);
 
     const rows = await StepProvenance.find({ user: userId })
-      .select('date totalSteps origins entries.primaryOrigin')
+      // `delta` and `reader` feed the unattributed-jump test; without them it can
+      // never fire and the laundering paths stay invisible.
+      .select(
+        'date timezone totalSteps walkedSteps bonusSteps origins ' +
+          'entries.primaryOrigin entries.delta ' +
+          'entries.reader entries.at entries.offlineMinutes',
+      )
       .lean();
     const analysis = analyseAccount(rows);
     const found = suspectDays(rows, analysis, { force: force && Boolean(userArg) });
@@ -592,6 +771,8 @@ async function main() {
         storedSteps: Number(a?.steps) || 0,
       };
     });
+
+    if (capUnverifiableFlag) capUnverifiable(days, rows);
 
     const actionable = days.filter(
       d => d.restoredSteps != null || zeroUnverifiable,
@@ -693,6 +874,8 @@ if (require.main === module) {
 module.exports = {
   analyseAccount,
   suspectDays,
+  capUnverifiable,
+  unattributedEntries,
   weeklyPeriodKeyFor,
   weekBoundsFor,
 };

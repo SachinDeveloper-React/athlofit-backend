@@ -115,16 +115,50 @@ const ORIGIN_WINDOW_DAYS = 28;
 //
 // So the question is not "which reader" but "did anything account for these
 // steps". An unattributed sync is not itself suspicious — 28% of all ledger
-// entries carry no reader, because a cold open races the first resolve — but 80%
-// of those move the day by under 100 steps. That is noise, and marking those
-// days untrusted would stop honest accounts ever building a baseline.
+// entries carry no reader, because a cold open races the first resolve.
 //
-// Measured against the real ledger, a 2,000-step threshold marks 5% of user-days
-// untrusted and catches every large unattributed jump in the data. It is a
-// deliberately cheap consequence: the day is kept out of future baseline windows
-// and nothing is clamped, so being wrong costs an account a slower baseline and
-// nothing else.
-const UNATTRIBUTED_MAX_DELTA = 2_000;
+// ── Size is the wrong test; TIME is the right one ───────────────────────────
+//
+// This began as a flat threshold: an unattributed sync over 2,000 steps was
+// untrusted. Measured against the honest accounts that turned out to mark 14.8%
+// of their days — because a large delta is completely ordinary after a phone has
+// been offline, and the ledger is full of them. A user with no data for five days
+// comes back and flushes a whole day in one sync, and there is nothing wrong with
+// that at all.
+//
+// What separates the two is not how big the delta is but whether the elapsed time
+// can hold it. The same physical argument the live-sensor ceiling uses:
+//
+//     delta <= windowMinutes * MAX_STEPS_PER_MINUTE
+//
+// A day flushed after five days offline has a window of five days and passes
+// easily. The entries that fail are the ones like +16,475 with `offlineMinutes:
+// 15` — a quarter of an hour that cannot hold sixteen thousand steps, which is
+// what the Health Connect seed folding into the sensor's count looks like.
+//
+// That change drops the false positives from 14.8% of honest days to a fraction
+// of it while still catching every laundered jump, and it removes an arbitrary
+// constant in favour of a bound the rest of the file already reasons with.
+//
+// The consequence stays deliberately cheap either way: the day is kept out of
+// future baseline windows and nothing is clamped, so being wrong costs an account
+// a slower baseline and nothing else.
+
+// Imported rather than repeated. Three rules now reason from this same physical
+// bound — the live-sensor ceiling, this one, and the reversal tool — and a copy
+// per file is how they end up silently disagreeing the first time one is tuned.
+// coinDefaults.js carries the same lesson from the last time it happened.
+const { MAX_STEPS_PER_MINUTE } = require('./stepValidation');
+
+/**
+ * Smallest window an unattributed delta is measured against.
+ *
+ * Without a floor, a caller that reports a zero or missing window would make
+ * every delta unexplainable. One minute is small enough to still catch the
+ * laundering — 220 steps — and large enough that a missing field is not itself
+ * a verdict.
+ */
+const UNATTRIBUTED_MIN_WINDOW_MIN = 1;
 
 /**
  * Decides whether this sync's attribution can be believed.
@@ -135,8 +169,11 @@ const UNATTRIBUTED_MAX_DELTA = 2_000;
  * @param {object} params
  * @param {string|null} params.reader - 'health_connect' | 'native_sensor' | etc.
  * @param {string|null} params.primaryOrigin - Package the steps were attributed to.
- * @param {number} [params.delta] - How much this sync moved the day's total. Only
- *   consulted for readers that named no source; see UNATTRIBUTED_MAX_DELTA.
+ * @param {number} [params.delta] - How much this sync moved the day's total.
+ * @param {number|null} [params.windowMinutes] - Minutes the delta could plausibly
+ *   cover: time since this account last reported, widened by however long the
+ *   client says it was offline, and capped at the elapsed part of the day being
+ *   written. Both are only consulted for readers that named no source.
  * @param {object} params.history
  * @param {string[]|Set<string>} params.history.establishedOrigins - Origins already
  *   seen on enough prior days to count as this account's own.
@@ -144,7 +181,13 @@ const UNATTRIBUTED_MAX_DELTA = 2_000;
  *   origins the account has reported across the window.
  * @returns {{ trusted: boolean, reason: string|null }}
  */
-function resolveOriginTrust({ reader, primaryOrigin, delta = 0, history = {} }) {
+function resolveOriginTrust({
+  reader,
+  primaryOrigin,
+  delta = 0,
+  windowMinutes = null,
+  history = {},
+}) {
   // A resolved SET rather than the raw day-count map. The counting is a per-day
   // fact, so it is done once and frozen on the day's row; passing the map here
   // would have meant recomputing it on every sync. See the note in the store.
@@ -166,19 +209,28 @@ function resolveOriginTrust({ reader, primaryOrigin, delta = 0, history = {} }) 
   // But trusting them UNCONDITIONALLY was the hole. Steps that originated in
   // Health Connect reach this function under both of these labels, and a sync
   // that moves the day materially while accounting for nothing is the one case
-  // where the label cannot be taken at face value. See UNATTRIBUTED_MAX_DELTA.
+  // where the label cannot be taken at face value. See the note on time above.
   //
   // A client willing to lie about its reader is still outside what this can
   // reach; that is what the baseline ceiling is for. What this closes is the
   // honest client faithfully reporting a figure it cannot explain.
   if (reader !== 'health_connect') {
     const moved = Math.max(0, Math.round(Number(delta) || 0));
-    if (moved > UNATTRIBUTED_MAX_DELTA) {
+    const window = Math.max(
+      UNATTRIBUTED_MIN_WINDOW_MIN,
+      Number.isFinite(Number(windowMinutes)) && Number(windowMinutes) > 0
+        ? Number(windowMinutes)
+        : 0,
+    );
+    const explainable = Math.ceil(window * MAX_STEPS_PER_MINUTE);
+
+    if (moved > explainable) {
       return {
         trusted: false,
         reason:
           `+${moved} steps arrived from '${reader || 'an unnamed reader'}' with ` +
-          'nothing accounting for them (no origin, no record timestamps)',
+          `nothing accounting for them — ${Math.round(window)} min of elapsed ` +
+          `time holds at most ${explainable}`,
       };
     }
     return { trusted: true, reason: null };
@@ -224,5 +276,5 @@ module.exports = {
   ORIGIN_TRUST_MIN_DAYS,
   ORIGIN_CHURN_MAX,
   ORIGIN_WINDOW_DAYS,
-  UNATTRIBUTED_MAX_DELTA,
+  UNATTRIBUTED_MIN_WINDOW_MIN,
 };
