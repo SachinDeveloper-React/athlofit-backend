@@ -381,13 +381,6 @@ const getCoinData = async (req, res, next) => {
     const totalPages = Math.ceil(total / limit) || 1;
 
     // ── Build claimable rewards ───────────────────────────────────────────────
-    // Step tracking paused for this account. Gated on the reward being a
-    // step-derived one, so hydration and other non-step claims keep working —
-    // the pause stops the step pipeline, not the rest of the app.
-    if (String(rewardId).startsWith('steps') && !isStepsTrackingEnabled(req.user)) {
-      return error(res, stepsTrackingStatus(req.user).reason, 403, STEPS_DISABLED_CODE);
-    }
-
     const todayActivity = await HealthActivity.findOne({ user: userId, date: today });
     const todaySteps = todayActivity?.steps ?? 0;
     const todayWater = todayActivity?.hydration ?? 0;
@@ -403,6 +396,12 @@ const getCoinData = async (req, res, next) => {
       isClaimed: gam.isBadgeUnlocked(def.key),
     }));
 
+    // Step tracking paused for this account. Reported per-item on the
+    // steps_daily entry rather than blocking the whole endpoint, so hydration
+    // and streak history/claimables — and the coin transaction history above —
+    // keep working. The pause stops the step pipeline, not the rest of the app.
+    const stepsStatus = stepsTrackingStatus(req.user);
+
     const claimable = [
       {
         id: 'steps_daily',
@@ -411,6 +410,8 @@ const getCoinData = async (req, res, next) => {
         reward: cfg.rewards.stepGoalCoins,
         currentValue: todaySteps,
         isClaimed: todaySteps >= dailyGoal && gam.stepGoalCoinDate === today,
+        blocked: !stepsStatus.enabled,
+        blockedReason: stepsStatus.enabled ? null : stepsStatus.reason,
       },
       {
         id: 'hydration_daily',
