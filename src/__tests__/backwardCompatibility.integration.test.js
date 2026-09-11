@@ -19,12 +19,16 @@ jest.mock('../models/HealthActivity.model');
 jest.mock('../utils/pushNotification', () => ({ sendPushToUser: jest.fn() }));
 jest.mock('../utils/createNotification', () => ({ createNotification: jest.fn() }));
 jest.mock('../utils/logCoinTransaction', () => ({ logCoinTransaction: jest.fn() }));
-jest.mock('../utils/date', () => ({ todayISO: jest.fn(() => '2025-01-15') }));
+jest.mock('../utils/date', () => ({
+  todayISO: jest.fn(() => '2025-01-15'),
+  resolveCoinDay: jest.fn(() => '2025-01-15'),
+}));
 
 const fc = require('fast-check');
 const { getAppConfig } = require('../controllers/config.controller');
 const { claimReward } = require('../controllers/gamification.controller');
 const AppConfig = require('../models/AppConfig.model');
+const Gamification = require('../models/Gamification.model');
 
 // --- Helpers ---
 
@@ -33,6 +37,51 @@ function mockRes() {
   res.status = jest.fn().mockReturnValue(res);
   res.json = jest.fn().mockReturnValue(res);
   return res;
+}
+
+function applyPush(doc, pushSpec) {
+  for (const [key, pushOp] of Object.entries(pushSpec)) {
+    const items = pushOp.$each ?? [pushOp];
+    doc[key] = [...(doc[key] || []), ...items];
+    if (pushOp.$slice) doc[key] = doc[key].slice(pushOp.$slice);
+  }
+}
+
+// Simulates MongoDB's $set/$inc/$push (including the `badgeList.$.field`
+// positional update claimReward's badge branch uses) against an in-memory
+// `gam` fixture, and wires it up as Gamification.findOne/findOneAndUpdate.
+// Needed now that claimReward credits coins atomically via findOneAndUpdate
+// instead of mutating `gam` in memory and calling `gam.save()`.
+function wireGam(gam) {
+  Gamification.findOne = jest.fn().mockResolvedValue(gam);
+  Gamification.findOneAndUpdate = jest.fn(async (filter, update) => {
+    if (filter.coinsEarnedToday !== undefined && filter.coinsEarnedToday !== (gam.coinsEarnedToday || 0)) {
+      return null;
+    }
+    if (filter.badgeList?.$elemMatch) {
+      const { key, coinsClaimed } = filter.badgeList.$elemMatch;
+      const idx = (gam.badgeList || []).findIndex(b => b.key === key);
+      if (idx === -1) return null;
+      if (coinsClaimed?.$ne === true && gam.badgeList[idx].coinsClaimed === true) return null;
+      if (update.$set) {
+        for (const [k, v] of Object.entries(update.$set)) {
+          if (k.startsWith('badgeList.$.')) {
+            gam.badgeList[idx][k.slice('badgeList.$.'.length)] = v;
+          } else {
+            gam[k] = v;
+          }
+        }
+      }
+    } else if (update.$set) {
+      Object.assign(gam, update.$set);
+    }
+    if (update.$inc) {
+      for (const [k, v] of Object.entries(update.$inc)) gam[k] = (gam[k] || 0) + v;
+    }
+    if (update.$push) applyPush(gam, update.$push);
+    return gam;
+  });
+  return gam;
 }
 
 function buildDefaultConfigDoc(coinConfigOverride) {
@@ -277,7 +326,7 @@ describe('Property 5: Existing Source Preservation — hydration, streak, and re
             };
 
             AppConfig.findOne = jest.fn().mockResolvedValue(cfgDoc);
-            Gamification.findOne = jest.fn().mockResolvedValue(mockGam);
+            wireGam(mockGam);
             Gamification.create = jest.fn().mockResolvedValue(mockGam);
             BadgeDefinition.find = jest.fn().mockReturnValue({ sort: jest.fn().mockResolvedValue([]) });
 
@@ -394,6 +443,7 @@ describe('Property 5: Existing Source Preservation — hydration, streak, and re
               lastCoinDate: null,
               lastWaterCoinDate: null,
               claimHistory: [],
+              badgeList: [{ key: badgeKey, unlocked: true, payoutEligible: true, coinsClaimed: false }],
               migrateOldBadges: jest.fn(),
               isBadgeUnlocked: jest.fn().mockReturnValue(false), // not yet claimed
               unlockBadge: jest.fn(),
@@ -404,7 +454,7 @@ describe('Property 5: Existing Source Preservation — hydration, streak, and re
             };
 
             AppConfig.findOne = jest.fn().mockResolvedValue(cfgDoc);
-            Gamification.findOne = jest.fn().mockResolvedValue(mockGam);
+            wireGam(mockGam);
             Gamification.create = jest.fn().mockResolvedValue(mockGam);
             BadgeDefinition.find = jest.fn().mockReturnValue({ sort: jest.fn().mockResolvedValue(badgeDefs) });
             HealthActivity.findOne = jest.fn().mockResolvedValue({ steps: 5000, hydration: 0 });
@@ -437,7 +487,9 @@ describe('Property 5: Existing Source Preservation — hydration, streak, and re
             // The badge is marked PAID (not merely unlocked) — the two are
             // separate states now, because awardBadges sets `unlocked` on its
             // own during health sync and claim eligibility must not key off it.
-            expect(mockGam.markBadgeClaimed).toHaveBeenCalledWith(badgeKey);
+            // Set atomically via findOneAndUpdate's positional operator rather
+            // than gam.markBadgeClaimed() + gam.save() — see claimReward.
+            expect(mockGam.badgeList[0].coinsClaimed).toBe(true);
           }
         ),
         { numRuns: 30 }

@@ -12,7 +12,7 @@ const { createNotification } = require('../utils/createNotification');
 const { logCoinTransaction } = require('../utils/logCoinTransaction');
 const { isCoinBlocked } = require('../utils/cheatPenalty');
 const { getCachedAppConfig } = require('../utils/appConfigCache');
-const { getEffectiveDailyCap, allowanceFor } = require('../utils/dailyCoinCap');
+const { getEffectiveDailyCap, awardCappedCoins } = require('../utils/dailyCoinCap');
 const { DEFAULT_MAX_DAILY_REWARDS } = require('../constants/coinDefaults');
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -347,11 +347,32 @@ const syncChallengeProgress = async (userId) => {
           cfg.coin?.maxDailyRewards ?? DEFAULT_MAX_DAILY_REWARDS,
           cfg.coin?.unverifiedDailyCap,
         );
-        const { payable: actualCoins, capped } = allowanceFor({
+
+        // Atomic and cap-safe. A plain `$inc` guarded only by `{ user: userId }`
+        // — what this replaced — computed `actualCoins` from a `coinsEarnedToday`
+        // read at the top of this function, then wrote unconditionally. Two
+        // concurrent syncs for the SAME user (a health sync racing a meal-log's
+        // challenge sync, say) could each read the same stale total, each decide
+        // they had room under the cap, and both succeed — stacking past it.
+        // awardCappedCoins pins the write to the exact `coinsEarnedToday` value
+        // it computed the allowance from, so a concurrent credit invalidates the
+        // write and it retries against a fresh read instead of stacking.
+        //
+        // BUG-023 still holds: credit the coins BEFORE marking the challenge, so
+        // a failure here leaves it unrewarded and retryable rather than marked
+        // paid with nothing credited.
+        const result = await awardCappedCoins(Gamification, {
+          userId,
           requested: owed,
-          coinsEarnedToday: gam.coinsEarnedToday || 0,
           cap,
+          historyEntry: {
+            rewardId: `challenge_${challenge._id}_${periodKey}`,
+            source: `Challenge: ${challenge.title}`,
+          },
         });
+        if (!result) continue;
+        const { actualCoins, capped } = result;
+        gam = result.gam; // keep the running allowance in step for later iterations
 
         // Paid in full only when the ceiling did not bite. A partially paid
         // challenge is deliberately left unlocked so a later sync in the same
@@ -360,44 +381,16 @@ const syncChallengeProgress = async (userId) => {
         const paidInFull =
           (existing?.rewardedAmount || 0) + actualCoins >= challenge.coinReward;
 
-        // Atomic, unlike the read-modify-write this replaced. Every other credit
-        // path in the codebase uses $inc; this one read `gam.coinsBalance` into
-        // memory, added to it and saved, so a concurrent claim landing in between
-        // was silently overwritten.
-        //
-        // BUG-023 still holds: credit the coins BEFORE marking the challenge, so
-        // a failure here leaves it unrewarded and retryable rather than marked
-        // paid with nothing credited.
-        if (actualCoins > 0) {
-          const credited = await Gamification.findOneAndUpdate(
-            { user: userId },
-            {
-              $inc: {
-                coinsBalance: actualCoins,
-                coinsEarnedToday: actualCoins,
-              },
-              $push: {
-                claimHistory: {
-                  $each: [{
-                    rewardId: `challenge_${challenge._id}_${periodKey}`,
-                    amount: actualCoins,
-                    source: `Challenge: ${challenge.title}`,
-                    createdAt: new Date(),
-                  }],
-                  $slice: -50,
-                },
-              },
-            },
-            { new: true },
-          );
-          if (!credited) continue;
-          gam = credited; // keep the running allowance in step for later iterations
-        } else if (capped) {
-          // Nothing left in today's allowance. Leave the challenge completed and
-          // unrewarded so it can still be paid if allowance frees up (a hydration
-          // reset reverses coins, for one), and so the ledger does not claim it
-          // was paid.
-          continue;
+        if (actualCoins === 0) {
+          if (capped) {
+            // Nothing left in today's allowance. Leave the challenge completed
+            // and unrewarded so it can still be paid if allowance frees up (a
+            // hydration reset reverses coins, for one), and so the ledger does
+            // not claim it was paid.
+            continue;
+          }
+          // owed was already 0 (fully paid by a previous partial sync) — fall
+          // through so paidInFull's UserChallenge update still runs.
         }
 
         const doc = await UserChallenge.findOneAndUpdate(

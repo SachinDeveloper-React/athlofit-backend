@@ -1,13 +1,13 @@
 // src/controllers/gamification.controller.js
 const Gamification = require('../models/Gamification.model');
-const { getEffectiveDailyCap } = require('../utils/dailyCoinCap');
+const { getEffectiveDailyCap, awardCappedCoins } = require('../utils/dailyCoinCap');
 const BadgeDefinition = require('../models/BadgeDefinition.model');
 const HealthActivity = require('../models/HealthActivity.model');
 const Order = require('../models/Order.model');
 const AppConfig = require('../models/AppConfig.model');
 const CoinTransaction = require('../models/CoinTransaction.model');
 const { success, error } = require('../utils/response');
-const { todayISO } = require('../utils/date');
+const { resolveCoinDay } = require('../utils/date');
 const { sendPushToUser } = require('../utils/pushNotification');
 const { createNotification } = require('../utils/createNotification');
 const { logCoinTransaction } = require('../utils/logCoinTransaction');
@@ -186,8 +186,9 @@ const earnCoins = async (req, res, next) => {
       return error(res, stepsTrackingStatus(req.user).reason, 403, STEPS_DISABLED_CODE);
     }
 
-    const today = todayISO();
     const [gam, cfg] = await Promise.all([ensureGamDoc(req.user._id), getLiveConfig()]);
+    // Same "today" claimReward/getCoinData/health-sync use — see resolveCoinDay.
+    const today = resolveCoinDay(gam);
 
     // Feature toggle
     const stepGoalEnabled = cfg.coin_config?.rewards?.daily_step_goal_reached?.enabled ?? true;
@@ -216,27 +217,19 @@ const earnCoins = async (req, res, next) => {
     const stepGoalCoins =
       cfg.coin_config?.rewards?.daily_step_goal_reached?.coin_value ?? cfg.rewards.stepGoalCoins ?? 50;
 
-    // Atomic award — only one caller can flip stepGoalCoinDate for today.
+    // Atomic AND cap-safe — see awardCappedCoins for why a stale-read `$inc`
+    // guarded only by stepGoalCoinDate isn't enough on its own.
     const MAX_DAILY_COINS = getEffectiveDailyCap(req.user, cfg.coin.maxDailyRewards, cfg.coin.unverifiedDailyCap);
-    const remainingAllowance = Math.max(0, MAX_DAILY_COINS - (gam.coinsEarnedToday || 0));
-    const actualCoins = Math.round(Math.min(stepGoalCoins, remainingAllowance));
+    const result = await awardCappedCoins(Gamification, {
+      userId: req.user._id,
+      requested: stepGoalCoins,
+      cap: MAX_DAILY_COINS,
+      matchExtra: { stepGoalCoinDate: { $ne: today } },
+      setExtra: { stepGoalCoinDate: today },
+      historyEntry: { rewardId: 'steps_daily_card', source: 'Daily Step Reward' },
+    });
 
-    const awarded = await Gamification.findOneAndUpdate(
-      { user: req.user._id, $or: [{ stepGoalCoinDate: { $ne: today } }, { stepGoalCoinDate: null }] },
-      {
-        $set: { stepGoalCoinDate: today },
-        $inc: { coinsBalance: actualCoins, coinsEarnedToday: actualCoins },
-        $push: {
-          claimHistory: {
-            $each: [{ rewardId: 'steps_daily_card', amount: actualCoins, source: 'Daily Step Reward', createdAt: new Date() }],
-            $slice: -50,
-          },
-        },
-      },
-      { new: true }
-    );
-
-    if (!awarded) {
+    if (!result) {
       // Lost the race — another request already rewarded the goal today.
       const fresh = await Gamification.findOne({ user: req.user._id });
       return success(res, 'Daily step goal already rewarded today', {
@@ -245,6 +238,9 @@ const earnCoins = async (req, res, next) => {
         alreadyClaimed: true,
       });
     }
+
+    const { actualCoins } = result;
+    const awarded = result.gam;
 
     if (actualCoins > 0) {
       logCoinTransaction({
@@ -300,8 +296,6 @@ const getLeaderboard = async (req, res, next) => {
 const getCoinData = async (req, res, next) => {
   try {
     const userId = req.user._id;
-    const today = todayISO();
-
     // ── Pagination params ─────────────────────────────────────────────────────
     const page  = Math.max(1, parseInt(req.query.page  ?? '1', 10));
     const limit = Math.min(50, parseInt(req.query.limit ?? '20', 10));
@@ -312,6 +306,9 @@ const getCoinData = async (req, res, next) => {
       loadBadgeDefs(),
       getLiveConfig(),
     ]);
+
+    // Same "today" claimReward/earnCoins/health-sync use — see resolveCoinDay.
+    const today = resolveCoinDay(gam);
 
     gam.migrateOldBadges();
 
@@ -461,7 +458,6 @@ const claimReward = async (req, res, next) => {
   try {
     const userId = req.user._id;
     const { rewardId } = req.body;
-    const today = todayISO();
 
     if (!rewardId) return error(res, 'rewardId is required', 400);
 
@@ -476,6 +472,9 @@ const claimReward = async (req, res, next) => {
       loadBadgeDefs(),
       getLiveConfig(),
     ]);
+
+    // Same "today" earnCoins/getCoinData/health-sync use — see resolveCoinDay.
+    const today = resolveCoinDay(gam);
 
     gam.migrateOldBadges();
 
@@ -505,14 +504,14 @@ const claimReward = async (req, res, next) => {
         // Share the SAME idempotency key as the health-sync auto award and
         // earnCoins so the daily step goal is rewarded at most once per day.
         isAlreadyClaimed: () => gam.stepGoalCoinDate === today,
-        onClaim: () => { gam.stepGoalCoinDate = today; },
+        idempotencyField: 'stepGoalCoinDate',
       },
       hydration_daily: {
         title: `Daily Water Goal (${cfg.rewards.hydrationGoalMl}ml)`,
         reward: cfg.rewards.hydrationGoalCoins,
         isMet: () => todayWater >= cfg.rewards.hydrationGoalMl,
         isAlreadyClaimed: () => gam.lastWaterCoinDate === today,
-        onClaim: () => { gam.lastWaterCoinDate = today; },
+        idempotencyField: 'lastWaterCoinDate',
       },
     };
 
@@ -532,7 +531,7 @@ const claimReward = async (req, res, next) => {
         // Checked as a separate predicate from isMet/isAlreadyClaimed so the
         // refusal message can say something true rather than "already claimed".
         isPayable: () => gam.isBadgePayoutEligible(def.key),
-        onClaim: () => { gam.markBadgeClaimed(def.key); },
+        badgeKey: def.key,
         // Milestone rewards bypass the daily cap — see the claim block below.
         bypassDailyCap: true,
       };
@@ -559,41 +558,58 @@ const claimReward = async (req, res, next) => {
     // it is not farmable and the cap does not apply to it.
     //
     // Applying it was actively destructive: rewards run to 10,000 coins against
-    // a 250 cap, and the badge was consumed by onClaim regardless — so a
-    // 250-day-streak user collected at most 250 coins and permanently lost the
-    // other 9,750. If the cap was already spent that day, they got zero.
+    // a 250 cap, and the badge was consumed regardless — so a 250-day-streak
+    // user collected at most 250 coins and permanently lost the other 9,750.
+    // If the cap was already spent that day, they got zero.
     //
     // Badge coins are also left OUT of coinsEarnedToday. Counting them would
     // blow the day's allowance and stop the user earning anything else, which
     // is the same bug pointing the other way.
+    //
+    // Both branches below write atomically instead of mutating `gam` in memory
+    // and calling `gam.save()`. A full-document save sends only the paths this
+    // request actually touched, but each is still whatever value was held in
+    // memory at save time — so a concurrent claim (a badge claim racing a
+    // step-goal claim, say) that credited coins in between this request's read
+    // and its save gets silently overwritten by this request's stale `$set`.
+    // `$inc`, scoped to exactly the field each branch owns, cannot do that.
     let actualCoins;
+    let updatedGam;
+
     if (rewardDef.bypassDailyCap) {
+      updatedGam = await Gamification.findOneAndUpdate(
+        {
+          user: userId,
+          badgeList: { $elemMatch: { key: rewardDef.badgeKey, coinsClaimed: { $ne: true } } },
+        },
+        {
+          $inc: { coinsBalance: Math.round(rewardDef.reward) },
+          $set: { 'badgeList.$.coinsClaimed': true, 'badgeList.$.coinsClaimedAt': new Date() },
+          $push: {
+            claimHistory: {
+              $each: [{ rewardId, amount: Math.round(rewardDef.reward), source: rewardDef.title, createdAt: new Date() }],
+              $slice: -50,
+            },
+          },
+        },
+        { new: true },
+      );
+      if (!updatedGam) return error(res, 'Reward already claimed', 400);
       actualCoins = Math.round(rewardDef.reward);
-      gam.coinsBalance = Math.round(gam.coinsBalance + actualCoins);
     } else {
       const MAX_DAILY_COINS = getEffectiveDailyCap(req.user, cfg.coin.maxDailyRewards, cfg.coin.unverifiedDailyCap);
-      const remainingAllowance = Math.max(0, MAX_DAILY_COINS - (gam.coinsEarnedToday || 0));
-      actualCoins = Math.round(Math.min(rewardDef.reward, remainingAllowance));
-      gam.coinsBalance = Math.round(gam.coinsBalance + actualCoins);
-      gam.coinsEarnedToday = Math.round((gam.coinsEarnedToday || 0) + actualCoins);
+      const result = await awardCappedCoins(Gamification, {
+        userId,
+        requested: rewardDef.reward,
+        cap: MAX_DAILY_COINS,
+        matchExtra: { [rewardDef.idempotencyField]: { $ne: today } },
+        setExtra: { [rewardDef.idempotencyField]: today },
+        historyEntry: { rewardId, source: rewardDef.title },
+      });
+      if (!result) return error(res, 'Reward already claimed', 400);
+      updatedGam = result.gam;
+      actualCoins = result.actualCoins;
     }
-
-    // Run badge-specific side effects
-    rewardDef.onClaim();
-
-    if (!gam.claimHistory) gam.claimHistory = [];
-    gam.claimHistory.push({
-      rewardId,
-      amount: actualCoins,
-      source: rewardDef.title || `Claimed ${rewardId}`,
-      createdAt: new Date(),
-    });
-
-    if (gam.claimHistory.length > 50) {
-      gam.claimHistory.shift();
-    }
-
-    await gam.save();
 
     // Log coin transaction for reward claim
     const sourceMap = {
@@ -605,7 +621,7 @@ const claimReward = async (req, res, next) => {
       userId,
       type: 'EARNED',
       amount: actualCoins,
-      balanceAfter: gam.coinsBalance,
+      balanceAfter: updatedGam.coinsBalance,
       source: txSource,
       description: rewardDef.title || `Claimed ${rewardId}`,
       metadata: {
@@ -639,7 +655,7 @@ const claimReward = async (req, res, next) => {
     });
 
     return success(res, `Claimed ${actualCoins} coins!`, {
-      newBalance: gam.coinsBalance,
+      newBalance: updatedGam.coinsBalance,
       rewardId,
     });
   } catch (err) {

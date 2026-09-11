@@ -337,4 +337,32 @@ const isoWeekKeyIST = () => {
   return `${dt.getUTCFullYear()}-W${String(weekNo).padStart(2, '0')}`;
 };
 
-module.exports = { todayISO, resolveClientDate, isValidISODate, toClientDate, minutesSinceLocalMidnight, minutesElapsedOnDate, isConsecutiveDay, buildDateRange, toDayLabel, toDateWithDayLabel, daysBetween, currentHourIST, isoWeekKeyIST };
+/**
+ * The single "coin day" a Gamification document's own endpoints should agree
+ * on — earnCoins, claimReward, getCoinData, and the health-sync coin award all
+ * gate the SAME idempotency fields (stepGoalCoinDate, lastWaterCoinDate,
+ * lastCoinDate) and the SAME coinsEarnedToday counter, so they must resolve
+ * "today" identically or one endpoint's stamp is invisible to another's check.
+ *
+ * health.controller.js already persists the user's last-seen client timezone
+ * onto the Gamification doc (`lastKnownTimezone`, via checkTimezoneManipulation)
+ * every time it computes a client-timezone-based day. Reusing that field here
+ * — rather than defaulting every non-sync endpoint to server IST — means a
+ * user outside IST sees the same day boundary everywhere, without requiring
+ * every coin endpoint to also accept a `timezone` body param.
+ *
+ * Mirrors the health-sync fallback: a user already flagged for timezone
+ * manipulation gets server IST regardless of `lastKnownTimezone`, so a flagged
+ * account cannot keep using a manipulated timezone to reopen the day here
+ * even though it's blocked on the sync path.
+ *
+ * @param {object} gam - Gamification document (or plain object) with
+ *   `lastKnownTimezone` / `timezoneFlagged`.
+ * @returns {string} "YYYY-MM-DD"
+ */
+const resolveCoinDay = (gam) => {
+  if (gam?.timezoneFlagged) return todayISO();
+  return resolveClientDate(gam?.lastKnownTimezone);
+};
+
+module.exports = { todayISO, resolveClientDate, resolveCoinDay, isValidISODate, toClientDate, minutesSinceLocalMidnight, minutesElapsedOnDate, isConsecutiveDay, buildDateRange, toDayLabel, toDateWithDayLabel, daysBetween, currentHourIST, isoWeekKeyIST };
