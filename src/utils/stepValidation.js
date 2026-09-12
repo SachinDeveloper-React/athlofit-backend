@@ -12,7 +12,8 @@
 //
 //   1. Absolute daily cap.
 //   2. Stuck-source rule: a device reporting a constant rather than a
-//      measurement is held where it is.
+//      measurement is held where it is. Judged per client stream, and a hold
+//      covers the whole day — see the note at HOLD_STALE_MIN.
 //   3. Day ceiling: the total against how much of its day has elapsed. A hard
 //      bound — no story about backlogs or sync cadence makes more steps fit into
 //      a day than the day has room for. There used to be a second, DELTA-based
@@ -184,6 +185,69 @@ const STUCK_RATE_MIN_SPAN_MIN = 90;
  */
 const STUCK_RATE_MIN_WINDOW_MIN = 2;
 
+// ── One phone, two streams ──────────────────────────────────────────────────
+//
+// Both detectors above follow "the client's" raw totals across syncs, and the
+// day's row kept exactly one such history. But one Android phone posts through
+// TWO paths on the same 15-minute cadence, a few minutes apart: the foreground
+// service with the live hardware count, and the widget worker with what Health
+// Connect has on disk — which trails the sensor by a minute or two, because the
+// platform pedometer writes its records in batches.
+//
+// Interleaved into one history, that reads as a device whose rate leaps every
+// sync. One account ran a flat 2,250 steps per 15 minutes for three hours —
+// nine identical deltas in a row on the service's own stream — and the merged
+// history saw 131 steps/min from worker to service and 195 from service to
+// worker, a 40% spread that reset the streak on every single sync. Neither
+// detector got past two samples. Tracked on the service's stream alone, the
+// same day is refused at the fifth sync.
+//
+// So the history is kept PER STREAM, keyed by the X-Client-Source header, and
+// each stream is judged on its own deltas — which restores exactly the picture
+// the detectors were designed around.
+//
+// That alone is not enough, because the two streams describe the SAME steps:
+// holding the service's figure while the worker's Health Connect copy of it
+// sails through would refuse nothing. A stuck stream therefore holds the whole
+// day, every stream, and only the stream that earned the hold can release it —
+// by producing a sample that varies. If the other stream could release it, the
+// interleaving would do so on the very next sync.
+//
+// ── What a release hands back ───────────────────────────────────────────────
+//
+// The first version released the hold and then accepted the client's raw total
+// in full, on the reasoning that a stuck sensor is a fault and the user did
+// nothing. For a fault that is right; for a figure that was never a measurement
+// it is not, and the two are indistinguishable from here. Replayed against that
+// same account, a hold from the fifth sync onward ended with the raw 26,187
+// arriving under a day ceiling of 26,839 the moment the pattern broke — every
+// step it had held, handed over in one sync. A hold that only postpones is not
+// a hold.
+//
+// So the steps a stream reported WHILE HELD are set aside for good. The day
+// carries a running `stuckForfeit`, every later raw figure — from any stream —
+// is read net of it, and counting resumes from the sample that broke the
+// pattern. What was accepted before the hold is untouched, and the releasing
+// delta itself is accepted: it is the first figure that varied, which is the
+// only evidence of measurement there is.
+//
+// A false positive now costs something, and it is worth being honest about the
+// shape of it: ninety minutes of treadmill at a cadence steady to within 5%,
+// and then whatever is walked before the cadence changes. Stepping off the
+// treadmill changes it. The forfeited figure is written on the day's row, so it
+// is visible and an admin can credit it back.
+//
+// ── A holder that goes quiet ────────────────────────────────────────────────
+//
+// If the holding stream stops posting — the OS kills the foreground service —
+// the hold would otherwise stand until midnight, refusing the worker's honest
+// figures with no one left to release it. After this long without a word from
+// the holder, any stream may release, forfeiting what the holder had reported
+// up to its last sync. An hour is four missed syncs at the service's cadence,
+// which is how long a genuinely killed service looks from the server.
+/** Minutes the holding stream must be silent before another stream may release the day. */
+const HOLD_STALE_MIN = 60;
+
 // ── What THIS user walks, as opposed to what a human can walk ───────────────
 //
 // Every rule above this point asks the same question: "could a person have
@@ -350,11 +414,55 @@ function trackClientCadence({
 
   const delta = incoming - Math.round(Number(lastIncomingSteps) || 0);
 
-  // ── A re-send, or a device that is behind ────────────────────────────────
-  // Nothing moved forward, so there is no evidence of any kind here and both
-  // streaks genuinely start over. This is also what makes multi-device accounts
-  // fail open: a second phone posting its own lower total lands here.
-  if (delta <= 0) {
+  /**
+   * Whether a hold the counters have already earned is still standing. Used by
+   * the two branches below that are not samples, so that they neither extend
+   * nor release what the real samples decided.
+   */
+  const spanSoFar =
+    cadenceStreakAt == null ? 0 : (now - ms(cadenceStreakAt)) / 60_000;
+  const heldStuck =
+    repeatedDeltaCount >= STUCK_DELTA_REPEATS ||
+    (cadenceStreak >= STUCK_RATE_SAMPLES && spanSoFar >= STUCK_RATE_MIN_SPAN_MIN);
+  const heldReason = heldStuck
+    ? 'cadence streak still standing; this sync was too small to be evidence either way'
+    : null;
+
+  // ── The same figure again ────────────────────────────────────────────────
+  //
+  // A re-send says nothing about cadence, and must not be allowed to say
+  // anything. It used to land in the "behind" branch below and clear both
+  // streaks, so a retried POST — the foreground service re-posts a payload
+  // whose response it never saw — released a hold outright, and the next three
+  // identical deltas were accepted while the streak rebuilt from nothing.
+  //
+  // Nor do the markers move. The next delta is still measured from when this
+  // figure FIRST arrived; measured from the re-send instead, the window shrinks
+  // to a few minutes, the rate leaps out of band, and the re-send has broken the
+  // streak by a different route.
+  if (delta === 0) {
+    return {
+      delta,
+      rate: null,
+      lastIncomingSteps: incoming,
+      lastIncomingAt: ms(lastIncomingAt) ?? now,
+      lastIncomingDelta,
+      repeatedDeltaCount,
+      cadenceStreak,
+      cadenceRateMin,
+      cadenceRateMax,
+      cadenceStreakAt: ms(cadenceStreakAt),
+      stuck: heldStuck,
+      stuckReason: heldReason,
+    };
+  }
+
+  // ── A device that is behind ──────────────────────────────────────────────
+  // The figure went DOWN, so whatever produced it is not the counter the last
+  // one came from, and both streaks genuinely start over. This is what makes
+  // multi-device accounts fail open: a second phone posting its own lower total
+  // on the same stream lands here.
+  if (delta < 0) {
     return { ...cleared, delta, rate: null, lastIncomingDelta: delta };
   }
 
@@ -374,11 +482,6 @@ function trackClientCadence({
   // So it is treated the way a too-short window is: not a sample. It neither
   // extends nor breaks anything, and only the markers move.
   if (delta < STUCK_DELTA_MIN_STEPS) {
-    const spanSoFar =
-      cadenceStreakAt == null ? 0 : (now - ms(cadenceStreakAt)) / 60_000;
-    const heldStuck =
-      repeatedDeltaCount >= STUCK_DELTA_REPEATS ||
-      (cadenceStreak >= STUCK_RATE_SAMPLES && spanSoFar >= STUCK_RATE_MIN_SPAN_MIN);
     return {
       delta,
       rate: null,
@@ -391,9 +494,7 @@ function trackClientCadence({
       cadenceRateMax,
       cadenceStreakAt: ms(cadenceStreakAt),
       stuck: heldStuck,
-      stuckReason: heldStuck
-        ? 'cadence streak still standing; this sync was too small to be evidence either way'
-        : null,
+      stuckReason: heldReason,
     };
   }
 
@@ -467,6 +568,141 @@ function trackClientCadence({
     stuck: deltaStuck || rateStuck,
     stuckReason,
   };
+}
+
+/**
+ * The stream a sync belongs to, for the per-stream cadence history.
+ *
+ * The X-Client-Source header names it — `native_service`, `worker`, `app` —
+ * and the value is used as a map key on the day's row, so it is confined to
+ * characters Mongo accepts in a path. Anything else, and a client that sent
+ * nothing, share one bucket rather than each getting a fresh, evidence-free
+ * history of their own.
+ */
+function cadenceSourceKey(clientSource) {
+  const key = typeof clientSource === 'string' ? clientSource.trim() : '';
+  return /^[A-Za-z0-9_-]{1,32}$/.test(key) ? key : 'other';
+}
+
+/**
+ * Combines one stream's cadence verdict with the day-wide hold.
+ *
+ * Pure, like trackClientCadence, and for the same reason: the caller persists
+ * `stuckSource`, `stuckSince` and `stuckForfeit` on the day's row and hands them
+ * back on the next sync, and the rule is testable without a database. See the
+ * note at HOLD_STALE_MIN for what it does and why.
+ *
+ * `streams` is every stream's persisted cadence state BEFORE this sync is
+ * applied — the holder's last raw figure is what a release forfeits, and the
+ * holder may be the stream syncing now.
+ *
+ * @param {object} params
+ * @param {string} params.source - cadenceSourceKey() of the stream syncing now.
+ * @param {object} params.cadence - trackClientCadence() result for that stream.
+ * @param {Object<string, {lastIncomingSteps?: number|null, lastIncomingAt?: number|Date|null}>} [params.streams]
+ * @param {string|null} [params.heldBy] - Stream currently holding the day, if any.
+ * @param {number|Date|null} [params.heldSince] - When that hold began.
+ * @param {number} [params.forfeit] - Raw steps already set aside on this day.
+ * @param {number} params.existingWalked - Stored walked total (bonus excluded).
+ * @param {number|Date} [params.at] - When this sync arrived. Defaults to now.
+ * @returns {{ stuck: boolean, stuckReason: string|null, released: boolean,
+ *   stuckSource: string|null, stuckSince: number|null, stuckForfeit: number }}
+ */
+function resolveDayHold({
+  source,
+  cadence,
+  streams = {},
+  heldBy = null,
+  heldSince = null,
+  forfeit = 0,
+  existingWalked,
+  at = Date.now(),
+}) {
+  const ms = v => (v == null ? null : new Date(v).getTime());
+  const now = ms(at) ?? Date.now();
+  const walked = Math.max(0, Math.round(Number(existingWalked) || 0));
+
+  let holder = heldBy || null;
+  let since = holder ? ms(heldSince) : null;
+  let setAside = Math.max(0, Math.round(Number(forfeit) || 0));
+  let released = false;
+
+  /**
+   * What a stream reported while the day was held: its last raw figure, net of
+   * what was already set aside, above the total the day was frozen at. Never
+   * negative — a holder that reported LESS than the stored total forfeits
+   * nothing, since nothing of its was refused.
+   */
+  const heldPortion = (stream) => {
+    const lastRaw = stream?.lastIncomingSteps;
+    if (lastRaw == null) return 0;
+    return Math.max(0, Math.round(Number(lastRaw) || 0) - setAside - walked);
+  };
+
+  const release = () => {
+    setAside += heldPortion(streams[holder]);
+    holder = null;
+    since = null;
+    released = true;
+  };
+
+  // ── A holder nobody has heard from ───────────────────────────────────────
+  // Another stream is syncing, and the holder has been silent long enough to be
+  // dead. Released BEFORE this stream's own verdict is applied, so a stream that
+  // is itself stuck takes the hold over cleanly rather than being refused under
+  // a stale one.
+  if (holder && holder !== source) {
+    const lastHeard = ms(streams[holder]?.lastIncomingAt) ?? since;
+    if (lastHeard != null && now - lastHeard >= HOLD_STALE_MIN * 60_000) {
+      release();
+    }
+  }
+
+  const state = () => ({
+    released,
+    stuckSource: holder,
+    stuckSince: since,
+    stuckForfeit: setAside,
+  });
+
+  // ── This stream's own verdict ────────────────────────────────────────────
+  if (cadence?.stuck) {
+    // An existing holder keeps the hold: its release condition is the one the
+    // forfeit was measured against. A second stuck stream simply re-holds on
+    // its own next sync once the first lets go.
+    if (!holder) {
+      holder = source;
+      since = now;
+    }
+    return { ...state(), stuck: true, stuckReason: cadence.stuckReason || null };
+  }
+
+  // ── The holder is measuring again ────────────────────────────────────────
+  // Only the stream that earned the hold can release it this way. What it
+  // reported while held is set aside; the sample that broke the pattern is the
+  // first measurement since, and goes through to the ceilings like any other.
+  if (holder === source) {
+    release();
+    return { ...state(), stuck: false, stuckReason: null };
+  }
+
+  // ── Held by another stream ───────────────────────────────────────────────
+  // This stream may be perfectly healthy on its own deltas. It is refused
+  // anyway, because it is reporting the same steps the holder is — see the
+  // note at HOLD_STALE_MIN.
+  if (holder) {
+    const minutesHeld = since == null ? null : Math.round((now - since) / 60_000);
+    return {
+      ...state(),
+      stuck: true,
+      stuckReason:
+        `day held by the ${holder} stream` +
+        (minutesHeld == null ? '' : ` for ${minutesHeld} min`) +
+        `; this ${source} figure describes the same steps`,
+    };
+  }
+
+  return { ...state(), stuck: false, stuckReason: null };
 }
 
 /**
@@ -833,6 +1069,8 @@ function validateSteps({
 module.exports = {
   validateSteps,
   trackClientCadence,
+  cadenceSourceKey,
+  resolveDayHold,
   computeStepBaseline,
   MAX_DAILY_STEPS,
   MAX_STEPS_PER_MINUTE,
@@ -842,6 +1080,7 @@ module.exports = {
   STUCK_RATE_SAMPLES,
   STUCK_RATE_MIN_SPAN_MIN,
   STUCK_RATE_MIN_WINDOW_MIN,
+  HOLD_STALE_MIN,
   BASELINE_FLOOR,
   BASELINE_MULTIPLIER,
   MAX_BASELINE_CEILING,

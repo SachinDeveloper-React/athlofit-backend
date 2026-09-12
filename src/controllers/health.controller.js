@@ -23,6 +23,8 @@ const { logCoinTransaction } = require('../utils/logCoinTransaction');
 const {
   validateSteps,
   trackClientCadence,
+  cadenceSourceKey,
+  resolveDayHold,
 } = require('../utils/stepValidation');
 const { loadStepBaseline } = require('../utils/stepBaselineStore');
 const { resolveOriginTrust } = require('../utils/stepOriginTrust');
@@ -75,6 +77,27 @@ function sensorWindowMinutes(existing, stepSource, syncDate, timezone) {
   const offline = Number.isFinite(claimed) && claimed >= 0 ? claimed : null;
   if (observed == null && offline == null) return null;
   return Math.min(elapsedOnDate, Math.max(observed ?? 0, offline ?? 0));
+}
+
+/**
+ * The day's per-stream cadence histories as a plain object, keyed by stream.
+ *
+ * `cadenceBySource` is a Mongoose Map of subdocuments on a hydrated row, so
+ * spreading an entry would copy the document's internals rather than its
+ * fields. Read through toObject() and tolerate a lean or absent map, so the
+ * pure cadence functions see the same shape from either.
+ */
+function readCadenceStreams(existing) {
+  const map = existing?.cadenceBySource;
+  if (!map) return {};
+  const entries =
+    typeof map.entries === 'function' ? [...map.entries()] : Object.entries(map);
+  return Object.fromEntries(
+    entries.map(([key, state]) => [
+      key,
+      typeof state?.toObject === 'function' ? state.toObject() : { ...(state || {}) },
+    ]),
+  );
 }
 const { getCachedAppConfig } = require('../utils/appConfigCache');
 const { checkTimezoneManipulation } = require('../utils/timezoneGuard');
@@ -365,31 +388,67 @@ const syncHealthData = async (req, res, next) => {
     // sync actually carries steps — a hydration-only post has no total to compare
     // and must not be allowed to reset a streak the next real sync depends on.
     //
-    // The result feeds validateSteps as a ceiling and is persisted below, so the
-    // next sync can measure against what the client itself last said rather than
-    // against a total this one may be about to freeze.
+    // Judged on THIS STREAM's own history. One phone syncs through two paths a
+    // few minutes apart — the foreground service with the live count, the widget
+    // worker with Health Connect's slightly stale copy of it — and one merged
+    // history read that interleaving as a rate that never held still, so a
+    // device posting nine identical deltas in a row was never caught. See the
+    // note at HOLD_STALE_MIN in stepValidation.js.
+    //
+    // The verdict is then combined with the day-wide hold: a stream that has
+    // stopped measuring holds every stream, because they all describe the same
+    // steps, and only that stream — or an hour of its silence — releases it.
+    // What it reported while held is set aside in `stuckForfeit`, and every raw
+    // figure from here on is read net of that.
+    //
+    // Both results are persisted below, so the next sync can measure against
+    // what the client itself last said rather than against a total this one may
+    // be about to freeze.
+    const rawSteps = stepsProvided ? Math.round(Number(steps) || 0) : null;
+    const cadenceSource = stepsProvided
+      ? cadenceSourceKey(req.deviceCtx?.lastSource)
+      : null;
+    const cadenceStreams = stepsProvided ? readCadenceStreams(existing) : {};
     const cadence = stepsProvided
       ? trackClientCadence({
-          incomingSteps: steps,
-          lastIncomingSteps: existing?.lastIncomingSteps ?? null,
-          lastIncomingDelta: existing?.lastIncomingDelta || 0,
-          repeatedDeltaCount: existing?.repeatedDeltaCount || 0,
-          // The second detector needs a clock. Everything below follows the RAW
-          // client figures across syncs, exactly as lastIncomingSteps does.
-          lastIncomingAt: existing?.lastIncomingAt ?? null,
-          cadenceStreak: existing?.cadenceStreak || 0,
-          cadenceRateMin: existing?.cadenceRateMin ?? null,
-          cadenceRateMax: existing?.cadenceRateMax ?? null,
-          cadenceStreakAt: existing?.cadenceStreakAt ?? null,
+          incomingSteps: rawSteps,
+          ...(cadenceStreams[cadenceSource] || {}),
+        })
+      : null;
+    const hold = stepsProvided
+      ? resolveDayHold({
+          source: cadenceSource,
+          cadence,
+          streams: cadenceStreams,
+          heldBy: existing?.stuckSource ?? null,
+          heldSince: existing?.stuckSince ?? null,
+          forfeit: existing?.stuckForfeit || 0,
+          existingWalked: Math.max(
+            0,
+            (existing?.steps || 0) - (existing?.bonusSteps || 0),
+          ),
         })
       : null;
 
-    if (cadence?.stuck) {
+    if (hold?.stuck) {
       console.warn(
-        `[HealthSync] Stuck step source for user ${req.user._id} on ${today}: ` +
-          `${cadence.stuckReason} — holding stored total, no coins awarded`,
+        `[HealthSync] Stuck step source for user ${req.user._id} on ${today} ` +
+          `(${cadenceSource}): ${hold.stuckReason} — holding stored total, no coins awarded`,
+      );
+    } else if (hold?.released) {
+      console.warn(
+        `[HealthSync] Stuck-source hold released for user ${req.user._id} on ${today} ` +
+          `by ${cadenceSource} — ${hold.stuckForfeit} raw steps set aside for the day`,
       );
     }
+
+    // What this sync is asking for, once the steps that arrived under a hold are
+    // set aside. Everything that judges the figure — validation, origin trust —
+    // sees this; the sync log and the cadence trackers keep seeing the raw one,
+    // because the pattern has to stay visible to be released.
+    const effectiveSteps = stepsProvided
+      ? Math.max(0, rawSteps - (hold?.stuckForfeit || 0))
+      : steps;
 
     // ── This account's own ceiling ───────────────────────────────────────────
     //
@@ -456,7 +515,7 @@ const syncHealthData = async (req, res, next) => {
         // source. The window is capped at the elapsed part of the date being
         // written, so a past-date backfill gets its whole day and today's syncs
         // get only what has actually happened.
-        delta: Math.round(Number(steps) || 0) - (existing?.steps || 0),
+        delta: effectiveSteps - (existing?.steps || 0),
         windowMinutes:
           sensorWindowMinutes(existing, stepSource, today, timezone) ??
           minutesElapsedOnDate(today, timezone),
@@ -472,7 +531,7 @@ const syncHealthData = async (req, res, next) => {
     }
 
     const stepValidation = validateSteps({
-      incomingSteps: steps,
+      incomingSteps: effectiveSteps,
       existingSteps: existing?.steps || 0,
       bonusSteps: existing?.bonusSteps || 0,
       stepBaseline,
@@ -492,7 +551,11 @@ const syncHealthData = async (req, res, next) => {
       syncDate: today,
       dailyGoal,
       allowCorrection: stepsCorrection === true,
-      cadence,
+      // The day-wide verdict, not this stream's own: a healthy stream is still
+      // held while another stream's stuck verdict stands.
+      cadence: hold
+        ? { ...cadence, stuck: hold.stuck, stuckReason: hold.stuckReason }
+        : null,
     });
 
     // Use the clamped (safe) step value instead of raw client input
@@ -588,13 +651,19 @@ const syncHealthData = async (req, res, next) => {
     recordSyncLog(req, {
       date: today,
       stepsProvided,
-      incomingSteps: Math.round(Number(steps) || 0),
+      incomingSteps: rawSteps ?? 0,
       existingSteps: previousWalked,
       clampedSteps: validatedSteps,
       storedSteps: totalSteps,
       flagged: stepValidation.flagged,
       severity: stepValidation.severity,
-      reason: stepValidation.reason,
+      // A forfeit makes the raw and clamped figures differ with no ceiling
+      // having bound, which would otherwise be a 'clamped' row with no reason.
+      reason:
+        stepValidation.reason ??
+        (hold?.stuckForfeit
+          ? `${hold.stuckForfeit} raw steps set aside under a stuck-source hold earlier today`
+          : null),
       corrected: stepValidation.corrected,
       timezone,
       source: provenance,
@@ -680,19 +749,33 @@ const syncHealthData = async (req, res, next) => {
       // rule needs to keep seeing the raw figures to know when the device starts
       // measuring again, and skipping the write on a refused sync would freeze the
       // streak at the value that triggered it and never release.
+      //
+      // The stream's own history goes under its key; the top-level pair records
+      // the last raw figure from anyone, for sensorWindowMinutes.
       ...(cadence
         ? {
-            lastIncomingSteps: cadence.lastIncomingSteps,
-            lastIncomingDelta: cadence.lastIncomingDelta,
-            repeatedDeltaCount: cadence.repeatedDeltaCount,
-            lastIncomingAt: new Date(cadence.lastIncomingAt),
-            cadenceStreak: cadence.cadenceStreak,
-            cadenceRateMin: cadence.cadenceRateMin,
-            cadenceRateMax: cadence.cadenceRateMax,
-            cadenceStreakAt:
-              cadence.cadenceStreakAt == null
-                ? null
-                : new Date(cadence.cadenceStreakAt),
+            lastIncomingSteps: rawSteps,
+            lastIncomingAt: new Date(),
+            [`cadenceBySource.${cadenceSource}`]: {
+              lastIncomingSteps: cadence.lastIncomingSteps,
+              lastIncomingAt:
+                cadence.lastIncomingAt == null
+                  ? null
+                  : new Date(cadence.lastIncomingAt),
+              lastIncomingDelta: cadence.lastIncomingDelta,
+              repeatedDeltaCount: cadence.repeatedDeltaCount,
+              cadenceStreak: cadence.cadenceStreak,
+              cadenceRateMin: cadence.cadenceRateMin,
+              cadenceRateMax: cadence.cadenceRateMax,
+              cadenceStreakAt:
+                cadence.cadenceStreakAt == null
+                  ? null
+                  : new Date(cadence.cadenceStreakAt),
+            },
+            stuckSource: hold.stuckSource,
+            stuckSince:
+              hold.stuckSince == null ? null : new Date(hold.stuckSince),
+            stuckForfeit: hold.stuckForfeit,
           }
         : {}),
       // Which build wrote this row. Only stamped when the caller actually

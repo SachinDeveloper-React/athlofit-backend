@@ -1674,3 +1674,468 @@ describe('a day that has already ended is judged by its whole day', () => {
     expect(result.flagged).toBe(true);
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// One phone, two streams — per-stream cadence and the day-wide hold.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const {
+  trackClientCadence: track,
+  cadenceSourceKey,
+  resolveDayHold,
+  HOLD_STALE_MIN,
+  STUCK_DELTA_REPEATS: DELTA_REPEATS,
+} = require('../utils/stepValidation');
+
+/** The fields the controller persists from a tracker result. */
+const persisted = (r) => ({
+  lastIncomingSteps: r.lastIncomingSteps,
+  lastIncomingAt: r.lastIncomingAt,
+  lastIncomingDelta: r.lastIncomingDelta,
+  repeatedDeltaCount: r.repeatedDeltaCount,
+  cadenceStreak: r.cadenceStreak,
+  cadenceRateMin: r.cadenceRateMin,
+  cadenceRateMax: r.cadenceRateMax,
+  cadenceStreakAt: r.cadenceStreakAt,
+});
+
+describe('stuck source — one phone on two streams', () => {
+  // A real day, from the provenance ledger: the foreground service and the
+  // widget worker both posting every fifteen minutes, a few minutes apart. The
+  // service's own deltas were 2,250 nine times running — 150 steps/min flat for
+  // three hours — while the worker carried Health Connect's copy, a minute or
+  // two behind. [ISO time, raw client total, X-Client-Source]
+  const SEP12 = [
+    ['2026-09-12T01:47:17Z', 10, 'native_service'],
+    ['2026-09-12T02:02:10Z', 47, 'app'],
+    ['2026-09-12T02:17:29Z', 85, 'native_service'],
+    ['2026-09-12T02:32:31Z', 109, 'native_service'],
+    ['2026-09-12T02:51:35Z', 119, 'native_service'],
+    ['2026-09-12T03:02:12Z', 891, 'worker'],
+    ['2026-09-12T03:06:39Z', 1_547, 'native_service'],
+    ['2026-09-12T03:20:07Z', 3_419, 'worker'],
+    ['2026-09-12T03:21:41Z', 3_807, 'native_service'],
+    ['2026-09-12T03:32:29Z', 5_219, 'worker'],
+    ['2026-09-12T03:36:42Z', 6_057, 'native_service'],
+    ['2026-09-12T03:47:25Z', 7_469, 'worker'],
+    ['2026-09-12T03:51:44Z', 8_307, 'native_service'],
+    ['2026-09-12T04:02:28Z', 9_709, 'worker'],
+    ['2026-09-12T04:06:46Z', 10_557, 'native_service'],
+    ['2026-09-12T04:20:06Z', 12_409, 'worker'],
+    ['2026-09-12T04:21:47Z', 12_807, 'native_service'],
+    ['2026-09-12T04:32:27Z', 14_209, 'worker'],
+    ['2026-09-12T04:36:50Z', 15_057, 'native_service'],
+    ['2026-09-12T04:50:06Z', 16_899, 'worker'],
+    ['2026-09-12T04:51:51Z', 17_307, 'native_service'],
+    ['2026-09-12T05:02:16Z', 18_699, 'worker'],
+    ['2026-09-12T05:06:54Z', 19_557, 'native_service'],
+    ['2026-09-12T05:20:07Z', 21_389, 'worker'],
+    ['2026-09-12T05:21:57Z', 21_807, 'native_service'],
+    ['2026-09-12T05:32:30Z', 23_179, 'worker'],
+    ['2026-09-12T05:37:00Z', 24_057, 'native_service'],
+    ['2026-09-12T05:47:27Z', 25_429, 'worker'],
+    ['2026-09-12T05:52:07Z', 26_187, 'native_service'],
+    ['2026-09-12T06:02:17Z', 26_221, 'worker'],
+    ['2026-09-12T06:07:10Z', 26_306, 'native_service'],
+    ['2026-09-12T06:22:12Z', 26_367, 'native_service'],
+  ];
+
+  /**
+   * Runs a day's syncs through the controller's wiring — per-stream tracker,
+   * day hold, forfeit, validateSteps — carrying exactly the state the row would.
+   * `perStream: false` keys every sync to one history, which is the old wiring.
+   */
+  const runDay = (syncs, { perStream = true } = {}) => {
+    let stored = 0;
+    let streams = {};
+    let held = { by: null, since: null, forfeit: 0 };
+    const out = [];
+    try {
+      for (const [iso, raw, source] of syncs) {
+        const at = new Date(iso);
+        jest.setSystemTime(at);
+        const key = perStream ? source : 'merged';
+        const cadence = track({ incomingSteps: raw, at, ...(streams[key] || {}) });
+        const hold = resolveDayHold({
+          source: key,
+          cadence,
+          streams,
+          heldBy: held.by,
+          heldSince: held.since,
+          forfeit: held.forfeit,
+          existingWalked: stored,
+          at,
+        });
+        const r = validateSteps({
+          ...base,
+          incomingSteps: Math.max(0, raw - hold.stuckForfeit),
+          existingSteps: stored,
+          syncDate: '2026-09-12',
+          cadence: { ...cadence, stuck: hold.stuck, stuckReason: hold.stuckReason },
+        });
+        if (r.clampedSteps > stored) stored = r.clampedSteps;
+        streams = { ...streams, [key]: persisted(cadence) };
+        held = { by: hold.stuckSource, since: hold.stuckSince, forfeit: hold.stuckForfeit };
+        out.push({
+          at: iso, source, raw, stored,
+          stuck: hold.stuck, released: hold.released, forfeit: hold.stuckForfeit,
+          severity: r.severity,
+        });
+      }
+    } finally {
+      jest.setSystemTime(FROZEN_NOW);
+    }
+    return out;
+  };
+
+  it('one merged history never catches it — the wiring this replaces', () => {
+    // Worker-to-service windows run ~195 steps/min and service-to-worker ~131,
+    // because Health Connect trails the live sensor. A 40% spread resets the
+    // rate streak on every sync, and the exact-delta streak never sees two of
+    // the service's 2,250s in a row. The whole day is accepted.
+    const day = runDay(SEP12, { perStream: false });
+    expect(day.some((s) => s.stuck)).toBe(false);
+    expect(day.at(-1).stored).toBe(26_367);
+  });
+
+  it('per stream, the service is refused at its fifth identical delta', () => {
+    const day = runDay(SEP12);
+    const first = day.find((s) => s.stuck);
+    expect(first).toMatchObject({
+      at: '2026-09-12T04:21:47Z',
+      source: 'native_service',
+      raw: 12_807,
+      severity: 'stuck_source',
+    });
+    // The stored total is where the day stood when the hold began — the
+    // worker's figure from a minute earlier.
+    expect(first.stored).toBe(12_409);
+  });
+
+  it('holds the worker too, even though its own deltas look healthy', () => {
+    // The worker is a second copy of the same steps. Its own history — jittered
+    // by Health Connect's batching — was not yet stuck when the service tripped,
+    // and if it could go through, the hold would have refused nothing.
+    const day = runDay(SEP12);
+    const heldWorker = day.filter((s) => s.source === 'worker' && s.stuck);
+    expect(heldWorker.length).toBeGreaterThan(0);
+    expect(heldWorker.every((s) => s.stored === 12_409)).toBe(true);
+    expect(heldWorker.every((s) => s.severity === 'stuck_source')).toBe(true);
+  });
+
+  it('releases only when the service varies, and keeps what it reported meanwhile', () => {
+    const day = runDay(SEP12);
+    const release = day.find((s) => s.released);
+    // The first delta that was not 2,250: 24,057 → 26,187.
+    expect(release).toMatchObject({ at: '2026-09-12T05:52:07Z', source: 'native_service' });
+    // Everything the service reported while held — from the 12,409 the day was
+    // frozen at up to its last held figure of 24,057 — is set aside.
+    expect(release.forfeit).toBe(24_057 - 12_409);
+    // The releasing delta itself is accepted: it is the first measurement.
+    expect(release.stored).toBe(12_409 + (26_187 - 24_057));
+  });
+
+  it('reads every later figure net of the forfeit, from either stream', () => {
+    const day = runDay(SEP12);
+    const after = day.filter((s) => s.at > '2026-09-12T05:52:07Z');
+    expect(after.every((s) => !s.stuck)).toBe(true);
+    expect(after.map((s) => s.stored)).toEqual([
+      26_221 - 11_648, // worker
+      26_306 - 11_648, // service
+      26_367 - 11_648, // service
+    ]);
+    // Unguarded, the day closed at 26,367.
+    expect(day.at(-1).stored).toBe(14_719);
+  });
+
+  it('leaves a real walker on two streams alone', () => {
+    // Genuine walking, seen by both paths: deltas that vary the way a person
+    // does — stops, lights, a sprint for a bus — and Health Connect a minute
+    // behind the sensor. Neither stream's own history ever holds still.
+    const T0 = new Date('2026-09-12T03:00:00Z').getTime();
+    const gains = [900, 1_400, 300, 1_700, 650, 1_100, 2_000, 400, 1_250, 800, 1_500, 200, 1_800, 950];
+    let live = 0;
+    const syncs = [];
+    gains.forEach((g, i) => {
+      live += g;
+      // The worker reads a figure ~80 steps stale, four minutes before the
+      // service posts.
+      syncs.push([new Date(T0 + (i * 15 + 11) * 60_000).toISOString(), Math.max(0, live - 80), 'worker']);
+      syncs.push([new Date(T0 + (i * 15 + 15) * 60_000).toISOString(), live, 'native_service']);
+    });
+    const day = runDay(syncs);
+    expect(day.some((s) => s.stuck)).toBe(false);
+    expect(day.at(-1).stored).toBe(live);
+  });
+});
+
+describe('resolveDayHold', () => {
+  const T0 = new Date('2026-09-12T04:21:47Z').getTime();
+  const min = (n) => n * 60_000;
+  const holderStream = {
+    native_service: { lastIncomingSteps: 15_057, lastIncomingAt: T0 },
+  };
+
+  it('a stuck stream takes the hold, and keeps it while it stays stuck', () => {
+    const first = resolveDayHold({
+      source: 'native_service',
+      cadence: { stuck: true, stuckReason: '+2250 steps reported 4 times in a row' },
+      streams: {},
+      existingWalked: 12_409,
+      at: T0,
+    });
+    expect(first).toMatchObject({
+      stuck: true,
+      stuckSource: 'native_service',
+      stuckSince: T0,
+      stuckForfeit: 0,
+      released: false,
+    });
+    expect(first.stuckReason).toMatch(/4 times in a row/);
+
+    const again = resolveDayHold({
+      source: 'native_service',
+      cadence: { stuck: true, stuckReason: '+2250 steps reported 5 times in a row' },
+      streams: holderStream,
+      heldBy: 'native_service',
+      heldSince: T0,
+      existingWalked: 12_409,
+      at: T0 + min(15),
+    });
+    expect(again.stuck).toBe(true);
+    expect(again.stuckSince).toBe(T0); // the original start, not this sync
+  });
+
+  it('refuses another stream while the hold stands, and does not let it release', () => {
+    const r = resolveDayHold({
+      source: 'worker',
+      cadence: { stuck: false, stuckReason: null },
+      streams: holderStream,
+      heldBy: 'native_service',
+      heldSince: T0,
+      existingWalked: 12_409,
+      at: T0 + min(11),
+    });
+    expect(r.stuck).toBe(true);
+    expect(r.stuckReason).toMatch(/held by the native_service stream for 11 min/);
+    expect(r.stuckReason).toMatch(/this worker figure/);
+    expect(r.stuckSource).toBe('native_service');
+    expect(r.released).toBe(false);
+    expect(r.stuckForfeit).toBe(0);
+  });
+
+  it('a second stream that trips does not take the hold over', () => {
+    // The first holder's release condition is the one the forfeit is measured
+    // against. The second simply re-holds on its own next sync once the first
+    // lets go.
+    const r = resolveDayHold({
+      source: 'worker',
+      cadence: { stuck: true, stuckReason: '145.8–153.1 steps/min held across 7 syncs' },
+      streams: holderStream,
+      heldBy: 'native_service',
+      heldSince: T0,
+      existingWalked: 12_409,
+      at: T0 + min(58),
+    });
+    expect(r.stuck).toBe(true);
+    expect(r.stuckReason).toMatch(/145\.8–153\.1/);
+    expect(r.stuckSource).toBe('native_service');
+  });
+
+  it('the holder releases by varying, forfeiting what it reported while held', () => {
+    const r = resolveDayHold({
+      source: 'native_service',
+      cadence: { stuck: false, stuckReason: null },
+      streams: { native_service: { lastIncomingSteps: 24_057, lastIncomingAt: T0 + min(75) } },
+      heldBy: 'native_service',
+      heldSince: T0,
+      existingWalked: 12_409,
+      at: T0 + min(90),
+    });
+    expect(r).toMatchObject({
+      stuck: false,
+      stuckReason: null,
+      released: true,
+      stuckSource: null,
+      stuckSince: null,
+      stuckForfeit: 24_057 - 12_409,
+    });
+  });
+
+  it('accumulates the forfeit across a second hold on the same day', () => {
+    // The first hold set 11,648 aside. A second hold later in the day is
+    // measured on figures that are already net of that, so the holder's last
+    // raw figure is read the same way — or the first forfeit would be counted
+    // twice.
+    const r = resolveDayHold({
+      source: 'native_service',
+      cadence: { stuck: false, stuckReason: null },
+      streams: { native_service: { lastIncomingSteps: 30_000, lastIncomingAt: T0 } },
+      heldBy: 'native_service',
+      heldSince: T0,
+      forfeit: 11_648,
+      existingWalked: 15_000,
+      at: T0 + min(15),
+    });
+    // 30,000 raw is 18,352 net; the day stood at 15,000; 3,352 more is set aside.
+    expect(r.stuckForfeit).toBe(11_648 + 3_352);
+  });
+
+  it('never forfeits a negative amount', () => {
+    // A holder whose last figure was below the stored total had nothing refused.
+    const r = resolveDayHold({
+      source: 'native_service',
+      cadence: { stuck: false, stuckReason: null },
+      streams: { native_service: { lastIncomingSteps: 12_000, lastIncomingAt: T0 } },
+      heldBy: 'native_service',
+      heldSince: T0,
+      existingWalked: 12_409,
+      at: T0 + min(15),
+    });
+    expect(r.released).toBe(true);
+    expect(r.stuckForfeit).toBe(0);
+  });
+
+  it('lets another stream release a holder that has gone silent', () => {
+    // The OS killed the foreground service mid-hold. Without this the worker's
+    // honest figures would be refused until midnight with no one to release.
+    const stillHeld = resolveDayHold({
+      source: 'worker',
+      cadence: { stuck: false, stuckReason: null },
+      streams: holderStream,
+      heldBy: 'native_service',
+      heldSince: T0,
+      existingWalked: 12_409,
+      at: T0 + min(HOLD_STALE_MIN - 1),
+    });
+    expect(stillHeld.stuck).toBe(true);
+    expect(stillHeld.released).toBe(false);
+
+    const released = resolveDayHold({
+      source: 'worker',
+      cadence: { stuck: false, stuckReason: null },
+      streams: holderStream,
+      heldBy: 'native_service',
+      heldSince: T0,
+      existingWalked: 12_409,
+      at: T0 + min(HOLD_STALE_MIN),
+    });
+    expect(released).toMatchObject({
+      stuck: false,
+      released: true,
+      stuckSource: null,
+      stuckForfeit: 15_057 - 12_409, // what the dead holder had reported
+    });
+  });
+
+  it('a stuck stream arriving at a stale hold takes it over cleanly', () => {
+    const r = resolveDayHold({
+      source: 'worker',
+      cadence: { stuck: true, stuckReason: 'rate held across 7 syncs' },
+      streams: holderStream,
+      heldBy: 'native_service',
+      heldSince: T0,
+      existingWalked: 12_409,
+      at: T0 + min(HOLD_STALE_MIN + 5),
+    });
+    expect(r.stuck).toBe(true);
+    expect(r.released).toBe(true); // the old hold went
+    expect(r.stuckSource).toBe('worker');
+    expect(r.stuckSince).toBe(T0 + min(HOLD_STALE_MIN + 5));
+    expect(r.stuckForfeit).toBe(15_057 - 12_409);
+  });
+
+  it('is nothing when no stream is stuck and none holds', () => {
+    const r = resolveDayHold({
+      source: 'app',
+      cadence: { stuck: false, stuckReason: null },
+      streams: {},
+      existingWalked: 5_000,
+      at: T0,
+    });
+    expect(r).toEqual({
+      stuck: false,
+      stuckReason: null,
+      released: false,
+      stuckSource: null,
+      stuckSince: null,
+      stuckForfeit: 0,
+    });
+  });
+});
+
+describe('cadenceSourceKey', () => {
+  it('keeps the header values the clients send', () => {
+    expect(cadenceSourceKey('native_service')).toBe('native_service');
+    expect(cadenceSourceKey('worker')).toBe('worker');
+    expect(cadenceSourceKey(' app ')).toBe('app');
+  });
+
+  it('folds anything unusable into one shared bucket', () => {
+    // A map key on the row, so nothing Mongo rejects in a path — and no fresh,
+    // evidence-free history for every novel string a client might send.
+    expect(cadenceSourceKey(null)).toBe('other');
+    expect(cadenceSourceKey('')).toBe('other');
+    expect(cadenceSourceKey('a.b')).toBe('other');
+    expect(cadenceSourceKey('$set')).toBe('other');
+    expect(cadenceSourceKey('x'.repeat(33))).toBe('other');
+  });
+});
+
+describe('stuck source — a re-send is not a sample', () => {
+  const T0 = new Date('2026-09-12T04:21:47Z').getTime();
+  const min = (n) => n * 60_000;
+
+  /** A stream held by the exact-delta detector, as persisted. */
+  const held = {
+    lastIncomingSteps: 12_807,
+    lastIncomingAt: T0,
+    lastIncomingDelta: 2_250,
+    repeatedDeltaCount: DELTA_REPEATS,
+    cadenceStreak: 5,
+    cadenceRateMin: 149.4,
+    cadenceRateMax: 149.8,
+    cadenceStreakAt: T0 - min(75),
+  };
+
+  it('does not release a hold', () => {
+    // A retried POST — the service re-posts a payload whose response it never
+    // saw. This used to land in the "behind" branch and clear both streaks.
+    const r = track({ incomingSteps: 12_807, at: T0 + min(5), ...held });
+    expect(r.delta).toBe(0);
+    expect(r.stuck).toBe(true);
+    expect(r.repeatedDeltaCount).toBe(DELTA_REPEATS);
+    expect(r.cadenceStreak).toBe(5);
+  });
+
+  it('does not move the markers, so the next window is measured from the first arrival', () => {
+    const resent = track({ incomingSteps: 12_807, at: T0 + min(5), ...held });
+    expect(resent.lastIncomingAt).toBe(T0);
+
+    // Fifteen minutes after the ORIGINAL figure, the next 2,250 arrives. Measured
+    // from the re-send it would be a 10-minute window at 225/min — out of band,
+    // and the re-send would have broken the streak by another route.
+    const next = track({ incomingSteps: 15_057, at: T0 + min(15), ...persisted(resent) });
+    expect(next.rate).toBeCloseTo(150, 0);
+    expect(next.stuck).toBe(true);
+    expect(next.repeatedDeltaCount).toBe(DELTA_REPEATS + 1);
+  });
+
+  it('still says nothing when there was no hold to keep', () => {
+    const r = track({
+      incomingSteps: 5_000,
+      at: T0 + min(5),
+      lastIncomingSteps: 5_000,
+      lastIncomingAt: T0,
+      lastIncomingDelta: 900,
+      repeatedDeltaCount: 0,
+      cadenceStreak: 2,
+      cadenceRateMin: 58,
+      cadenceRateMax: 61,
+      cadenceStreakAt: T0 - min(30),
+    });
+    expect(r.stuck).toBe(false);
+    expect(r.cadenceStreak).toBe(2);
+    expect(r.lastIncomingAt).toBe(T0);
+  });
+});

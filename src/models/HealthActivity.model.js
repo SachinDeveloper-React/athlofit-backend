@@ -1,6 +1,44 @@
 // src/models/HealthActivity.model.js
 const mongoose = require('mongoose');
 
+// ── One client stream's cadence history ──────────────────────────────────────
+//
+// The state trackClientCadence (stepValidation.js) carries between syncs, for
+// recognising a source that has stopped measuring. Kept per STREAM — one entry
+// per X-Client-Source value under `cadenceBySource` below — because a single
+// Android phone posts through two of them a few minutes apart, and one merged
+// history read their interleaving as a rate that never stopped changing. See
+// the note at HOLD_STALE_MIN in stepValidation.js.
+//
+// These follow the RAW client total rather than the stored one. That
+// distinction is the whole point: once the stuck-source rule binds, the stored
+// total stops moving, so a delta measured against it would start growing and
+// the constant-delta pattern would vanish on the next sync — releasing the
+// guard it had just triggered. Measured against what the client itself last
+// said, the pattern stays visible for as long as the device keeps producing it.
+//
+// null (not 0) for lastIncomingSteps means "no previous raw total recorded",
+// which is a different state from a client that genuinely reported 0: the first
+// sync of a day has nothing to measure against, and must not be read as a
+// zero-step baseline.
+//
+// `lastIncomingAt` is what makes a rate computable at all — without a clock
+// there is no divisor. Min and max rather than a reference rate, so the band is
+// a spread over the streak and does not depend on which sample started it.
+const cadenceStateSchema = new mongoose.Schema(
+  {
+    lastIncomingSteps: { type: Number, default: null },
+    lastIncomingAt: { type: Date, default: null },
+    lastIncomingDelta: { type: Number, default: 0 },
+    repeatedDeltaCount: { type: Number, default: 0 },
+    cadenceStreak: { type: Number, default: 0 },
+    cadenceRateMin: { type: Number, default: null },
+    cadenceRateMax: { type: Number, default: null },
+    cadenceStreakAt: { type: Date, default: null },
+  },
+  { _id: false },
+);
+
 // Stores daily aggregated health snapshots sent from the mobile app
 const healthActivitySchema = new mongoose.Schema(
   {
@@ -118,43 +156,41 @@ const healthActivitySchema = new mongoose.Schema(
     // by syncing more often.
     lastStepIncreaseAt: { type: Date, default: null },
 
-    // ── Cadence tracking, for recognising a source that has stopped measuring ─
+    // ── The last raw figure from ANY stream ─────────────────────────────────
     //
-    // These follow the RAW client total rather than the stored one. That
-    // distinction is the whole point: once the stuck-source rule binds, the
-    // stored total stops moving, so a delta measured against it would start
-    // growing and the constant-delta pattern would vanish on the next sync —
-    // releasing the guard it had just triggered. Measured against what the
-    // client itself last said, the pattern stays visible for as long as the
-    // device keeps producing it. See trackClientCadence in stepValidation.js.
+    // Not cadence state any more — that lives per stream in `cadenceBySource`.
+    // These two are kept at the top level because sensorWindowMinutes in the
+    // health controller measures a live-sensor figure against the time since the
+    // client, whichever path it used, last said anything at all.
     //
-    // null (not 0) means "no previous raw total recorded", which is a different
-    // state from a client that genuinely reported 0: the first sync of a day and
-    // a row written by a build too old to record one both have nothing to
-    // measure against, and must not be read as a zero-step baseline.
+    // Rows written before the per-stream split also carry the old streak fields
+    // here (lastIncomingDelta, repeatedDeltaCount, cadenceStreak, ...). They are
+    // no longer read or written; a day that straddled the deploy simply starts
+    // its per-stream histories from that sync.
     lastIncomingSteps: { type: Number, default: null },
-    lastIncomingDelta: { type: Number, default: 0 },
-    repeatedDeltaCount: { type: Number, default: 0 },
-
-    // ── Rate-invariance streak ──────────────────────────────────────────────
-    //
-    // The second stuck-source detector. Testing deltas for exact equality turned
-    // out to be a threshold an attacker steps over by adding ±1.5% of noise, so
-    // the general form of the same question — has steps/min stopped varying? —
-    // is tracked alongside it. See STUCK_RATE_TOLERANCE in stepValidation.js.
-    //
-    // `lastIncomingAt` is what makes a rate computable at all: the raw totals
-    // were already followed across syncs, but nothing recorded WHEN, so there
-    // was no divisor. It follows lastIncomingSteps exactly — the raw client
-    // figure, not the stored one — for the same reason that field does.
-    //
-    // Min and max rather than a reference rate, so the band is a spread over the
-    // streak and does not depend on which sample happened to start it.
     lastIncomingAt: { type: Date, default: null },
-    cadenceStreak: { type: Number, default: 0 },
-    cadenceRateMin: { type: Number, default: null },
-    cadenceRateMax: { type: Number, default: null },
-    cadenceStreakAt: { type: Date, default: null },
+
+    // ── Cadence tracking, per client stream ─────────────────────────────────
+    //
+    // Keyed by cadenceSourceKey() of the X-Client-Source header — the Android
+    // foreground service, the widget worker and the app each get their own
+    // history, so the two paths one phone syncs through cannot erase each
+    // other's evidence by interleaving. See cadenceStateSchema above.
+    cadenceBySource: { type: Map, of: cadenceStateSchema, default: undefined },
+
+    // ── The day-wide hold ───────────────────────────────────────────────────
+    //
+    // Which stream's stuck verdict is currently holding the day, since when,
+    // and how many raw client steps have been set aside on this day because
+    // they arrived while it was held. Every later raw figure — from any stream
+    // — is read net of `stuckForfeit`, so the steps a stuck stream reported are
+    // never counted even after it starts measuring again. Written on the row
+    // rather than kept implicit so an admin can see what was refused and
+    // credit it back if the hold was wrong. See resolveDayHold in
+    // stepValidation.js.
+    stuckSource: { type: String, default: null },
+    stuckSince: { type: Date, default: null },
+    stuckForfeit: { type: Number, default: 0 },
 
     // Whether the one-off retroactive step-goal bonus has been paid for this
     // date. Separate from the watermark because the goal bonus is a flat amount
