@@ -20,6 +20,7 @@ const HealthActivity = require('../models/HealthActivity.model');
 // Mock todayISO to control the "today" value in tests
 jest.mock('../utils/date', () => ({
   todayISO: jest.fn(() => '2025-01-15'),
+  resolveCoinDay: jest.fn(() => '2025-01-15'),
 }));
 
 // --- Helpers ---
@@ -59,6 +60,37 @@ function buildGamDoc(overrides = {}) {
   };
 }
 
+// Simulates MongoDB's $set/$inc/$push against the in-memory `gam` fixture, and
+// wires it up as both Gamification.findOne and Gamification.findOneAndUpdate —
+// mirroring what awardCappedCoins actually calls now that claimReward writes
+// atomically instead of mutating `gam` in memory and calling `gam.save()`.
+// The CAS filter (`coinsEarnedToday: <value just read>`) is honoured so a test
+// that wants to exercise a lost race can still do so by mutating `gam` between
+// the read and the write.
+function mockGam(gam) {
+  Gamification.findOne = jest.fn().mockResolvedValue(gam);
+  Gamification.findOneAndUpdate = jest.fn(async (filter, update) => {
+    if (filter.coinsEarnedToday !== undefined && filter.coinsEarnedToday !== (gam.coinsEarnedToday || 0)) {
+      return null;
+    }
+    if (update.$set) Object.assign(gam, update.$set);
+    if (update.$inc) {
+      for (const [key, delta] of Object.entries(update.$inc)) {
+        gam[key] = (gam[key] || 0) + delta;
+      }
+    }
+    if (update.$push) {
+      for (const [key, pushOp] of Object.entries(update.$push)) {
+        const items = pushOp.$each ?? [pushOp];
+        gam[key] = [...(gam[key] || []), ...items];
+        if (pushOp.$slice) gam[key] = gam[key].slice(pushOp.$slice);
+      }
+    }
+    return gam;
+  });
+  return gam;
+}
+
 function buildConfig(coinConfigOverrides = {}) {
   const defaultCoinConfig = {
     steps: { rate_per_100_steps: 0.00095 },
@@ -96,7 +128,7 @@ describe('claimReward - steps_daily', () => {
       AppConfig.findOne = jest.fn().mockResolvedValue(cfg);
 
       const gam = buildGamDoc({ coinsBalance: 100, coinsEarnedToday: 50 });
-      Gamification.findOne = jest.fn().mockResolvedValue(gam);
+      mockGam(gam);
 
       // User has met step goal (12000 steps >= 10000 goal)
       HealthActivity.findOne = jest.fn().mockResolvedValue({ steps: 12000, hydration: 0 });
@@ -118,7 +150,9 @@ describe('claimReward - steps_daily', () => {
       expect(gam.coinsBalance).toBe(175);
       expect(gam.coinsEarnedToday).toBe(125);
       expect(gam.stepGoalCoinDate).toBe('2025-01-15');
-      expect(gam.save).toHaveBeenCalled();
+      // Credited atomically via Gamification.findOneAndUpdate ($inc), not a
+      // full-document gam.save() — see the comment in claimReward.
+      expect(Gamification.findOneAndUpdate).toHaveBeenCalled();
     });
 
     it('falls back to cfg.rewards.stepGoalCoins when coin_config is missing', async () => {
@@ -129,7 +163,7 @@ describe('claimReward - steps_daily', () => {
       AppConfig.findOne = jest.fn().mockResolvedValue(cfg);
 
       const gam = buildGamDoc();
-      Gamification.findOne = jest.fn().mockResolvedValue(gam);
+      mockGam(gam);
 
       HealthActivity.findOne = jest.fn().mockResolvedValue({ steps: 15000, hydration: 0 });
 
@@ -159,7 +193,7 @@ describe('claimReward - steps_daily', () => {
       AppConfig.findOne = jest.fn().mockResolvedValue(cfg);
 
       const gam = buildGamDoc();
-      Gamification.findOne = jest.fn().mockResolvedValue(gam);
+      mockGam(gam);
 
       HealthActivity.findOne = jest.fn().mockResolvedValue({ steps: 15000, hydration: 0 });
 
@@ -189,7 +223,7 @@ describe('claimReward - steps_daily', () => {
 
       // User already claimed today (stepGoalCoinDate === today)
       const gam = buildGamDoc({ stepGoalCoinDate: '2025-01-15', coinsEarnedToday: 50 });
-      Gamification.findOne = jest.fn().mockResolvedValue(gam);
+      mockGam(gam);
 
       HealthActivity.findOne = jest.fn().mockResolvedValue({ steps: 12000, hydration: 0 });
 
@@ -215,7 +249,7 @@ describe('claimReward - steps_daily', () => {
 
       // Previous claim was yesterday
       const gam = buildGamDoc({ stepGoalCoinDate: '2025-01-14', coinsEarnedToday: 0 });
-      Gamification.findOne = jest.fn().mockResolvedValue(gam);
+      mockGam(gam);
 
       HealthActivity.findOne = jest.fn().mockResolvedValue({ steps: 10500, hydration: 0 });
 
@@ -246,7 +280,7 @@ describe('claimReward - steps_daily', () => {
 
       // User has already earned 200 coins today; remaining = 250 - 200 = 50
       const gam = buildGamDoc({ coinsBalance: 500, coinsEarnedToday: 200 });
-      Gamification.findOne = jest.fn().mockResolvedValue(gam);
+      mockGam(gam);
 
       HealthActivity.findOne = jest.fn().mockResolvedValue({ steps: 10000, hydration: 0 });
 
@@ -278,7 +312,7 @@ describe('claimReward - steps_daily', () => {
 
       // User has already maxed out daily rewards
       const gam = buildGamDoc({ coinsBalance: 500, coinsEarnedToday: 250 });
-      Gamification.findOne = jest.fn().mockResolvedValue(gam);
+      mockGam(gam);
 
       HealthActivity.findOne = jest.fn().mockResolvedValue({ steps: 12000, hydration: 0 });
 
@@ -309,7 +343,7 @@ describe('claimReward - steps_daily', () => {
 
       // User has only earned 100 today; remaining = 150
       const gam = buildGamDoc({ coinsBalance: 300, coinsEarnedToday: 100 });
-      Gamification.findOne = jest.fn().mockResolvedValue(gam);
+      mockGam(gam);
 
       HealthActivity.findOne = jest.fn().mockResolvedValue({ steps: 11000, hydration: 0 });
 
