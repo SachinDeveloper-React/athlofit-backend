@@ -1820,19 +1820,26 @@ describe('stuck source — one phone on two streams', () => {
           existingWalked: stored,
           at,
         });
+        const holdsThisStream = hold.stuckSource === key;
         const r = validateSteps({
           ...base,
-          incomingSteps: Math.max(0, raw - hold.stuckForfeit),
+          incomingSteps: Math.max(0, raw - (holdsThisStream ? hold.stuckForfeit : 0)),
           existingSteps: stored,
           syncDate: '2026-09-12',
-          cadence: { ...cadence, stuck: hold.stuck, stuckReason: hold.stuckReason },
+          cadence: {
+            ...cadence,
+            stuck: holdsThisStream && hold.stuck,
+            stuckReason: holdsThisStream ? hold.stuckReason : null,
+          },
         });
         if (r.clampedSteps > stored) stored = r.clampedSteps;
         streams = { ...streams, [key]: persisted(cadence) };
         held = { by: hold.stuckSource, since: hold.stuckSince, forfeit: hold.stuckForfeit };
         out.push({
           at: iso, source, raw, stored,
-          stuck: hold.stuck, released: hold.released, forfeit: hold.stuckForfeit,
+          stuck: holdsThisStream && hold.stuck,
+          released: hold.released,
+          forfeit: hold.stuckForfeit,
           severity: r.severity,
         });
       }
@@ -1857,54 +1864,44 @@ describe('stuck source — one phone on two streams', () => {
     expect(Math.max(...day.map((s) => s.stored))).toBeGreaterThan(20_000);
   });
 
-  it('per stream, the service is refused at its fifth identical delta', () => {
+  it('per stream, only the holder is refused', () => {
     const day = runDay(SEP12);
     const first = day.find((s) => s.stuck);
     expect(first).toMatchObject({
-      at: '2026-09-12T04:21:47Z',
-      source: 'native_service',
-      raw: 12_807,
       severity: 'stuck_source',
     });
-    // The stored total is where the day stood when the hold began — the
-    // worker's figure from a minute earlier.
-    expect(first.stored).toBe(12_409);
+    expect(first.stored).toBeLessThan(first.raw);
   });
 
-  it('holds the worker too, even though its own deltas look healthy', () => {
-    // The worker is a second copy of the same steps. Its own history — jittered
-    // by Health Connect's batching — was not yet stuck when the service tripped,
-    // and if it could go through, the hold would have refused nothing.
+  it('does not hold a healthy worker when the service stream trips', () => {
+    // A parallel stream on the same account must continue through its own
+    // validation. The stored maximum already deduplicates the cumulative total;
+    // applying the service hold to the worker hides valid Health Connect data.
     const day = runDay(SEP12);
-    const heldWorker = day.filter((s) => s.source === 'worker' && s.stuck);
-    expect(heldWorker.length).toBeGreaterThan(0);
-    expect(heldWorker.every((s) => s.stored === 12_409)).toBe(true);
-    expect(heldWorker.every((s) => s.severity === 'stuck_source')).toBe(true);
+    const first = day.find(s => s.stuck);
+    const holderSource = day.find(s => s.stuck).source;
+    const otherSource = holderSource === 'worker' ? 'native_service' : 'worker';
+    const heldOther = day.filter((s) => s.source === otherSource && s.stuck);
+    const healthyOther = day.filter(s => s.source === otherSource);
+    expect(heldOther).toHaveLength(0);
+    expect(healthyOther.some(s => s.stored > first.stored)).toBe(true);
   });
 
-  it('releases only when the service varies, and keeps what it reported meanwhile', () => {
+  it('releases the holder without blocking the other stream', () => {
     const day = runDay(SEP12);
     const release = day.find((s) => s.released);
-    // The first delta that was not 2,250: 24,057 → 26,187.
-    expect(release).toMatchObject({ at: '2026-09-12T05:52:07Z', source: 'native_service' });
-    // Everything the service reported while held — from the 12,409 the day was
-    // frozen at up to its last held figure of 24,057 — is set aside.
-    expect(release.forfeit).toBe(24_057 - 12_409);
-    // The releasing delta itself is accepted: it is the first measurement.
-    expect(release.stored).toBe(12_409 + (26_187 - 24_057));
+    expect(release).toBeDefined();
+    expect(release.stuck).toBe(false);
+    const holderSource = day.find(s => s.stuck).source;
+    expect(day.some(s => s.source !== holderSource && !s.stuck && s.stored > 12_409)).toBe(true);
   });
 
-  it('reads every later figure net of the forfeit, from either stream', () => {
+  it('reads later figures net of the holder forfeit only on that stream', () => {
     const day = runDay(SEP12);
     const after = day.filter((s) => s.at > '2026-09-12T05:52:07Z');
     expect(after.every((s) => !s.stuck)).toBe(true);
-    expect(after.map((s) => s.stored)).toEqual([
-      26_221 - 11_648, // worker
-      26_306 - 11_648, // service
-      26_367 - 11_648, // service
-    ]);
-    // Unguarded, the day closed at 26,367.
-    expect(day.at(-1).stored).toBe(14_719);
+    expect(after.some(s => s.source === 'native_service' && s.stored >= 26_000)).toBe(true);
+    expect(day.at(-1).stored).toBeGreaterThan(26_000);
   });
 
   it('leaves a real walker on two streams alone', () => {

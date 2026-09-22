@@ -454,8 +454,9 @@ const syncHealthData = async (req, res, next) => {
     // set aside. Everything that judges the figure — validation, origin trust —
     // sees this; the sync log and the cadence trackers keep seeing the raw one,
     // because the pattern has to stay visible to be released.
+    const holdsThisStream = hold?.stuckSource === cadenceSource;
     const effectiveSteps = stepsProvided
-      ? Math.max(0, rawSteps - (hold?.stuckForfeit || 0))
+      ? Math.max(0, rawSteps - (holdsThisStream ? hold.stuckForfeit : 0))
       : steps;
 
     // ── Is this counter also feeding another account? ────────────────────────
@@ -607,10 +608,17 @@ const syncHealthData = async (req, res, next) => {
       syncDate: today,
       dailyGoal,
       allowCorrection: stepsCorrection === true,
-      // The day-wide verdict, not this stream's own: a healthy stream is still
-      // held while another stream's stuck verdict stands.
+      // A stuck verdict belongs to the stream that earned it. Other streams on
+      // the same account must continue through their own validation; their
+      // cumulative totals are merged by the stored maximum, and blocking them
+      // here can hide a valid Health Connect/native reading behind a stale
+      // worker cadence.
       cadence: hold
-        ? { ...cadence, stuck: hold.stuck, stuckReason: hold.stuckReason }
+        ? {
+            ...cadence,
+            stuck: holdsThisStream && hold.stuck,
+            stuckReason: holdsThisStream ? hold.stuckReason : null,
+          }
         : null,
       // The cross-account verdict. Held on the newer of two accounts sharing a
       // counter; the older is paid for the steps.
