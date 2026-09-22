@@ -477,6 +477,10 @@ const syncHealthData = async (req, res, next) => {
     // the raw one because the answer is needed before validation, and it only
     // looks at two fields it re-checks itself.
     let originTrust = null;
+    // Hoisted out of the `stepsProvided` block below so the diagnostic near
+    // `stepsIncreased` (further down) can reference the origin this sync
+    // claimed, if any.
+    let claimedOrigin = null;
     let originHistory =
       existing?.establishedOrigins == null
         ? null
@@ -487,7 +491,7 @@ const syncHealthData = async (req, res, next) => {
     if (stepsProvided) {
       const claimedReader =
         typeof stepSource?.reader === 'string' ? stepSource.reader.trim() : null;
-      const claimedOrigin =
+      claimedOrigin =
         typeof stepSource?.primaryOrigin === 'string'
           ? stepSource.primaryOrigin.trim().slice(0, 120)
           : null;
@@ -627,6 +631,30 @@ const syncHealthData = async (req, res, next) => {
     // leave it alone, so they cannot shrink the window a later real sync is
     // measured against.
     const stepsIncreased = deviceSteps > previousWalked;
+
+    // ── DIAGNOSTIC: is the stuck-source hold silently stalling origin trust? ──
+    //
+    // recordStepProvenance (below) only runs `if (stepsIncreased)`, and that is
+    // also the ONLY way a day counts toward the 3-of-28 origin-trust threshold
+    // in stepOriginTrust.js. Those two rules were written independently, for
+    // unrelated reasons, but they share this one gate — so a day the
+    // stuck-source cadence hold clamps back to `previousWalked` (see `hold`
+    // above) contributes NOTHING toward establishing a new, perfectly
+    // legitimate source, even though the device did report it.
+    //
+    // Logged only for a source not yet established, so this stays silent once
+    // trust is settled — this is here to confirm or rule out that coupling as
+    // the cause of longer-than-3-day "untrusted" streaks seen in production,
+    // before changing the gating behaviour. Remove once confirmed either way.
+    if (stepsProvided && claimedOrigin && !stepsIncreased && originTrust && !originTrust.trusted) {
+      console.warn(
+        `[HealthSync] Origin-trust day NOT recorded for user ${req.user._id} on ${today}: ` +
+          `claimed origin ${claimedOrigin} reported but stepsIncreased=false ` +
+          `(rawSteps=${rawSteps} deviceSteps=${deviceSteps} previousWalked=${previousWalked} ` +
+          `stuckForfeit=${hold?.stuckForfeit || 0} heldByStuckSource=${!!hold?.stuck}) — ` +
+          `this day will not count toward the 3-of-28 origin-trust threshold`,
+      );
+    }
 
     // ── Step provenance ──────────────────────────────────────────────────────
     //
@@ -1224,19 +1252,42 @@ const syncHealthData = async (req, res, next) => {
         // each clamped to dailyEarnLimit. Using coinsEarnedToday here was a bug:
         // it includes goal (+50) and hydration coins, so hitting the step goal
         // instantly exceeded the small passive cap and blocked all step coins.
-        const { coins: actualAdded } = computePassiveCoinDelta({
+        const { coins: passiveEligible } = computePassiveCoinDelta({
           currentSteps,
           watermark: effectiveWatermark,
           rate,
           dailyEarnLimit,
         });
 
+        // The line above stops goal/hydration coins from eating the passive
+        // allowance — but nothing here stopped the opposite: passive coins
+        // never checked the account's OVERALL daily ceiling at all, so as long
+        // as dailyEarnLimit itself hadn't been reached, a live sync kept paying
+        // out past whatever total maxDailyRewards configures — the one number
+        // "the daily cap" is supposed to mean end-to-end. The cron that pays
+        // the same passive coins (distributePassiveCoins) already clamps to
+        // this; this live-sync path, hit on every app sync, never did.
+        const overallCap = getEffectiveDailyCap(
+          req.user,
+          cfg.coin.maxDailyRewards ?? DEFAULT_MAX_DAILY_REWARDS,
+          cfg.coin.unverifiedDailyCap,
+        );
+        const overallRemaining = Math.max(0, overallCap - (gam.coinsEarnedToday || 0));
+        const actualAdded = parseFloat(
+          Math.min(passiveEligible, overallRemaining).toFixed(4),
+        );
+
         if (actualAdded > 0) {
           {
-            // FIX #1 (passive coins): Atomic update to prevent race condition
+            // FIX #1 (passive coins): Atomic update to prevent race condition.
+            // CAS on BOTH the step watermark (so this exact delta can't be paid
+            // twice) AND coinsEarnedToday (so a concurrent award from any other
+            // source — goal, hydration, a challenge — can't have its credit
+            // silently exceeded by this one stacking on top of a stale read).
             const passiveResult = await Gamification.findOneAndUpdate(
               {
                 user: req.user._id,
+                coinsEarnedToday: gam.coinsEarnedToday || 0,
                 // Atomic guard: only update if the watermark hasn't moved past us
                 $or: [
                   { lastPassiveCoinSteps: { $lte: effectiveWatermark } },
