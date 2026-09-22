@@ -9,6 +9,7 @@ const { success, error } = require("../utils/response");
 const { resolveUpdateRequirement, compareVersions } = require("../utils/versionGate");
 const { describePassiveCoinCap } = require("../utils/passiveCoins");
 const { describeDailyRewardCap } = require("../utils/dailyCoinCap");
+const { configuredStepGoalBonus } = require('../utils/stepGoalAward');
 const Challenge = require("../models/Challenge.model");
 const {
   DEFAULT_RATE_PER_100_STEPS,
@@ -50,10 +51,7 @@ async function summariseDailyRewardCap(cfg) {
   return describeDailyRewardCap({
     maxDailyRewards: cfg.coin?.maxDailyRewards ?? DEFAULT_MAX_DAILY_REWARDS,
     dailyEarnLimit: cfg.coin?.dailyEarnLimit ?? DEFAULT_DAILY_EARN_LIMIT,
-    stepGoalCoins:
-      cfg.coin_config?.rewards?.daily_step_goal_reached?.coin_value ??
-      cfg.rewards?.stepGoalCoins ??
-      0,
+    stepGoalCoins: configuredStepGoalBonus(cfg).coins,
     hydrationGoalCoins: cfg.rewards?.hydrationGoalCoins ?? 0,
     dailyChallengeCoins: sumOf("daily"),
     weeklyChallengeCoins: sumOf("weekly"),
@@ -254,9 +252,8 @@ const getAppConfig = async (req, res, next) => {
             enabled:
               cfg.coin_config?.rewards?.daily_step_goal_reached?.enabled ??
               true,
-            coin_value:
-              cfg.coin_config?.rewards?.daily_step_goal_reached?.coin_value ??
-              50,
+            // Mirrors rewards.stepGoalCoins — see configuredStepGoalBonus.
+            coin_value: configuredStepGoalBonus(cfg).coins,
           },
         },
       },
@@ -332,15 +329,34 @@ const updateAppConfig = async (req, res, next) => {
       }
       setMap[key] = value;
     }
-    if (
-      setMap["coin_config.rewards.daily_step_goal_reached.coin_value"] !==
-      undefined
-    ) {
-      const val = Number(setMap["coin_config.rewards.daily_step_goal_reached.coin_value"]);
-      if (isNaN(val) || val < 0) {
-        return error(res, "coin_value must be a non-negative number", 400);
+    // ─── The daily step-goal bonus: one value, two fields ─────────────────────
+    //
+    // `rewards.stepGoalCoins` and `coin_config.rewards.daily_step_goal_reached.
+    // coin_value` describe the same bonus and used to be read in different
+    // orders by different payout paths, so they drifted — 0 in one, 13.25 in
+    // the other, and a bonus the admin had switched off was still claimable.
+    // Every reader now goes through configuredStepGoalBonus, which takes
+    // `rewards.stepGoalCoins`; whichever of the two an admin edits, both are
+    // written, so the document never again says two things about one bonus.
+    // When a request carries both and they differ, `rewards.stepGoalCoins`
+    // wins, since it is the field the bonus is actually paid from.
+    {
+      const primaryKey = "rewards.stepGoalCoins";
+      const mirrorKey = "coin_config.rewards.daily_step_goal_reached.coin_value";
+      const provided =
+        setMap[primaryKey] !== undefined ? setMap[primaryKey] : setMap[mirrorKey];
+      if (provided !== undefined) {
+        const val = Number(provided);
+        if (isNaN(val) || val < 0) {
+          return error(
+            res,
+            "rewards.stepGoalCoins / coin_value must be a non-negative number",
+            400,
+          );
+        }
+        setMap[primaryKey] = val;
+        setMap[mirrorKey] = val;
       }
-      setMap["coin_config.rewards.daily_step_goal_reached.coin_value"] = val;
     }
 
     // ─── Validate the update gate before persisting ─────────────────────────

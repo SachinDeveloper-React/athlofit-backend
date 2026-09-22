@@ -101,7 +101,8 @@ function buildConfig(coinConfigOverrides = {}) {
 
   return {
     coin: { maxDailyRewards: 250 },
-    rewards: { stepGoalCoins: 30, hydrationGoalCoins: 20, hydrationGoalMl: 2000 },
+    // One bonus, two fields, kept equal — see configuredStepGoalBonus.
+    rewards: { stepGoalCoins: 50, hydrationGoalCoins: 20, hydrationGoalMl: 2000 },
     coin_config: { ...defaultCoinConfig, ...coinConfigOverrides },
   };
 }
@@ -120,9 +121,13 @@ beforeEach(() => {
 // --- Tests ---
 
 describe('claimReward - steps_daily', () => {
-  describe('successful claim reads coin_value from coin_config', () => {
-    it('awards coin_value from coin_config when user meets step goal', async () => {
+  // The bonus is read from rewards.stepGoalCoins — the field the admin panel
+  // edits — through configuredStepGoalBonus; coin_value is a mirror the config
+  // update path keeps equal. See the note in utils/stepGoalAward.js.
+  describe('successful claim reads the bonus from rewards.stepGoalCoins', () => {
+    it('awards rewards.stepGoalCoins when user meets step goal', async () => {
       const cfg = buildConfig();
+      cfg.rewards.stepGoalCoins = 75;
       cfg.coin_config.rewards.daily_step_goal_reached.coin_value = 75;
 
       AppConfig.findOne = jest.fn().mockResolvedValue(cfg);
@@ -155,10 +160,37 @@ describe('claimReward - steps_daily', () => {
       expect(Gamification.findOneAndUpdate).toHaveBeenCalled();
     });
 
-    it('falls back to cfg.rewards.stepGoalCoins when coin_config is missing', async () => {
+    it('does not pay a coin_value the admin field no longer says (the 13-coin bug)', async () => {
+      // The live document on 21 Sep: rewards.stepGoalCoins set to 0 by the
+      // admin, coin_value still holding 13.25. The claim paid 13 every evening.
       const cfg = buildConfig();
-      // Remove coin_config entirely to test fallback
+      cfg.rewards.stepGoalCoins = 0;
+      cfg.coin_config.rewards.daily_step_goal_reached.coin_value = 13.25;
+
+      AppConfig.findOne = jest.fn().mockResolvedValue(cfg);
+
+      const gam = buildGamDoc();
+      mockGam(gam);
+
+      HealthActivity.findOne = jest.fn().mockResolvedValue({ steps: 30000, hydration: 0 });
+
+      const req = buildReq();
+      const res = mockRes();
+      const next = jest.fn();
+
+      await claimReward(req, res, next);
+
+      expect(res.status).toHaveBeenCalledWith(400);
+      expect(res.json.mock.calls[0][0].message).toMatch(/disabled/i);
+      expect(gam.coinsBalance).toBe(0);
+      expect(Gamification.findOneAndUpdate).not.toHaveBeenCalled();
+    });
+
+    it('still pays when coin_config is missing entirely', async () => {
+      const cfg = buildConfig();
+      // Remove coin_config entirely: only the admin field is left.
       cfg.coin_config = undefined;
+      cfg.rewards.stepGoalCoins = 30;
 
       AppConfig.findOne = jest.fn().mockResolvedValue(cfg);
 
@@ -173,7 +205,7 @@ describe('claimReward - steps_daily', () => {
 
       await claimReward(req, res, next);
 
-      // Falls back to cfg.rewards.stepGoalCoins = 30
+      // cfg.rewards.stepGoalCoins = 30 is the bonus.
       expect(res.status).toHaveBeenCalledWith(200);
       expect(res.json).toHaveBeenCalledWith(
         expect.objectContaining({
@@ -271,8 +303,9 @@ describe('claimReward - steps_daily', () => {
   });
 
   describe('daily cap enforcement on step goal reward', () => {
-    it('caps reward when remaining allowance is less than coin_value', async () => {
+    it('caps reward when remaining allowance is less than the bonus', async () => {
       const cfg = buildConfig();
+      cfg.rewards.stepGoalCoins = 100;
       cfg.coin_config.rewards.daily_step_goal_reached.coin_value = 100;
       cfg.coin.maxDailyRewards = 250;
 
@@ -305,6 +338,7 @@ describe('claimReward - steps_daily', () => {
 
     it('awards 0 coins when daily cap is already reached', async () => {
       const cfg = buildConfig();
+      cfg.rewards.stepGoalCoins = 50;
       cfg.coin_config.rewards.daily_step_goal_reached.coin_value = 50;
       cfg.coin.maxDailyRewards = 250;
 
@@ -334,8 +368,9 @@ describe('claimReward - steps_daily', () => {
       expect(gam.coinsEarnedToday).toBe(250); // unchanged
     });
 
-    it('awards full coin_value when under the daily cap', async () => {
+    it('awards the full bonus when under the daily cap', async () => {
       const cfg = buildConfig();
+      cfg.rewards.stepGoalCoins = 50;
       cfg.coin_config.rewards.daily_step_goal_reached.coin_value = 50;
       cfg.coin.maxDailyRewards = 250;
 

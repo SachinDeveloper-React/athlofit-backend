@@ -32,6 +32,7 @@ const {
   describePassiveCoinCap,
 } = require('../utils/passiveCoins');
 const { getEffectiveDailyCap, awardCappedCoins } = require('../utils/dailyCoinCap');
+const { configuredStepGoalBonus } = require('../utils/stepGoalAward');
 const {
   DEFAULT_RATE_PER_100_STEPS,
   DEFAULT_DAILY_EARN_LIMIT,
@@ -282,11 +283,12 @@ async function eodAutoClaimStepGoal() {
   let cfg = await AppConfig.findOne({ key: 'global' });
   if (!cfg) cfg = await AppConfig.create({ key: 'global' });
 
-  const stepGoalCoins = cfg.coin_config?.rewards?.daily_step_goal_reached?.coin_value
-    ?? cfg.rewards?.stepGoalCoins ?? 50;
-  const stepGoalEnabled = cfg.coin_config?.rewards?.daily_step_goal_reached?.enabled ?? true;
+  // The one reading of the bonus — see configuredStepGoalBonus. This read
+  // coin_value ahead of rewards.stepGoalCoins, so a bonus set to 0 by the
+  // admin would still have been swept out to every goal-meeting user here.
+  const { enabled: stepGoalEnabled, coins: stepGoalCoins } = configuredStepGoalBonus(cfg);
 
-  if (!stepGoalEnabled) {
+  if (!stepGoalEnabled || stepGoalCoins <= 0) {
     console.log('[CRON:EOD-GoalClaim] Step goal reward is disabled. Skipping.');
     return { claimed: 0, skipped: 0 };
   }

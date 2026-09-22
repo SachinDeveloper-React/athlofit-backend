@@ -1,5 +1,6 @@
 // src/controllers/gamification.controller.js
 const Gamification = require('../models/Gamification.model');
+const { configuredStepGoalBonus } = require('../utils/stepGoalAward');
 const { getEffectiveDailyCap, awardCappedCoins } = require('../utils/dailyCoinCap');
 const BadgeDefinition = require('../models/BadgeDefinition.model');
 const HealthActivity = require('../models/HealthActivity.model');
@@ -190,9 +191,9 @@ const earnCoins = async (req, res, next) => {
     // Same "today" claimReward/getCoinData/health-sync use — see resolveCoinDay.
     const today = resolveCoinDay(gam);
 
-    // Feature toggle
-    const stepGoalEnabled = cfg.coin_config?.rewards?.daily_step_goal_reached?.enabled ?? true;
-    if (!stepGoalEnabled) {
+    // Feature toggle — the one reading of the bonus, see configuredStepGoalBonus.
+    const stepGoalBonus = configuredStepGoalBonus(cfg);
+    if (!stepGoalBonus.enabled || stepGoalBonus.coins <= 0) {
       return error(res, 'Daily step goal reward is currently disabled', 400);
     }
 
@@ -214,8 +215,7 @@ const earnCoins = async (req, res, next) => {
     }
 
     // Reward amount is SERVER-defined, not client-supplied.
-    const stepGoalCoins =
-      cfg.coin_config?.rewards?.daily_step_goal_reached?.coin_value ?? cfg.rewards.stepGoalCoins ?? 50;
+    const stepGoalCoins = stepGoalBonus.coins;
 
     // Atomic AND cap-safe — see awardCappedCoins for why a stale-read `$inc`
     // guarded only by stepGoalCoinDate isn't enough on its own.
@@ -407,7 +407,7 @@ const getCoinData = async (req, res, next) => {
         id: 'steps_daily',
         title: `Walk ${dailyGoal.toLocaleString()} Steps`,
         threshold: dailyGoal,
-        reward: cfg.rewards.stepGoalCoins,
+        reward: configuredStepGoalBonus(cfg).coins,
         currentValue: todaySteps,
         isClaimed: todaySteps >= dailyGoal && gam.stepGoalCoinDate === today,
         blocked: !stepsStatus.enabled,
@@ -484,10 +484,13 @@ const claimReward = async (req, res, next) => {
     const todayWater = todayActivity?.hydration ?? 0;
     const dailyGoal = req.user.dailyStepGoal || 10000;
 
-    // Early return if steps_daily reward is disabled via coin_config
+    // Early return if the steps_daily bonus is off — disabled, or set to 0.
+    // The one reading of the bonus, see configuredStepGoalBonus: this used to
+    // read coin_value ahead of rewards.stepGoalCoins, so a bonus the admin had
+    // set to 0 was still paid here at whatever coin_value last held.
+    const stepGoalBonus = configuredStepGoalBonus(cfg);
     if (rewardId === 'steps_daily') {
-      const stepGoalEnabled = cfg.coin_config?.rewards?.daily_step_goal_reached?.enabled ?? true;
-      if (!stepGoalEnabled) {
+      if (!stepGoalBonus.enabled || stepGoalBonus.coins <= 0) {
         return error(res, 'Daily step goal reward is currently disabled', 400);
       }
     }
@@ -496,10 +499,9 @@ const claimReward = async (req, res, next) => {
     const REWARDS = {
       steps_daily: {
         title: `Walk ${dailyGoal.toLocaleString()} Steps`,
-        reward: cfg.coin_config?.rewards?.daily_step_goal_reached?.coin_value ?? cfg.rewards.stepGoalCoins,
+        reward: stepGoalBonus.coins,
         isMet: () => {
-          const enabled = cfg.coin_config?.rewards?.daily_step_goal_reached?.enabled ?? true;
-          if (!enabled) return false;
+          if (!stepGoalBonus.enabled || stepGoalBonus.coins <= 0) return false;
           return todaySteps >= dailyGoal;
         },
         // Share the SAME idempotency key as the health-sync auto award and

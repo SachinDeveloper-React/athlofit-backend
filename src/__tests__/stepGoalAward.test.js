@@ -173,3 +173,47 @@ describe('resolveStepGoalAward', () => {
     }
   });
 });
+
+// ─────────────────────────────────────────────────────────────────────────────
+// One bonus, two settings — configuredStepGoalBonus is the only reading.
+// ─────────────────────────────────────────────────────────────────────────────
+
+const { configuredStepGoalBonus, DEFAULT_STEP_GOAL_COINS } = require('../utils/stepGoalAward');
+
+describe('configuredStepGoalBonus', () => {
+  it('pays what rewards.stepGoalCoins says, not what coin_value last held', () => {
+    // The live document on 21 Sep: the admin's field at 0, the mirror still at
+    // 13.25. Every path must read 0 — the manual claim was paying 13.
+    const cfg = {
+      rewards: { stepGoalCoins: 0 },
+      coin_config: { rewards: { daily_step_goal_reached: { enabled: true, coin_value: 13.25 } } },
+    };
+    expect(configuredStepGoalBonus(cfg)).toEqual({ enabled: true, coins: 0 });
+  });
+
+  it('is switched off by the enabled flag whatever the amount', () => {
+    const cfg = {
+      rewards: { stepGoalCoins: 25 },
+      coin_config: { rewards: { daily_step_goal_reached: { enabled: false, coin_value: 25 } } },
+    };
+    expect(configuredStepGoalBonus(cfg)).toEqual({ enabled: false, coins: 0 });
+  });
+
+  it('pays the configured amount when both agree and it is on', () => {
+    const cfg = {
+      rewards: { stepGoalCoins: 25 },
+      coin_config: { rewards: { daily_step_goal_reached: { enabled: true, coin_value: 25 } } },
+    };
+    expect(configuredStepGoalBonus(cfg)).toEqual({ enabled: true, coins: 25 });
+  });
+
+  it('falls back to the schema default only when the field is absent', () => {
+    expect(configuredStepGoalBonus({}).coins).toBe(DEFAULT_STEP_GOAL_COINS);
+    expect(configuredStepGoalBonus(null).coins).toBe(DEFAULT_STEP_GOAL_COINS);
+    expect(configuredStepGoalBonus({ rewards: { stepGoalCoins: 'x' } }).coins).toBe(DEFAULT_STEP_GOAL_COINS);
+  });
+
+  it('never returns a negative bonus', () => {
+    expect(configuredStepGoalBonus({ rewards: { stepGoalCoins: -5 } }).coins).toBe(0);
+  });
+});

@@ -221,7 +221,7 @@ async function main() {
 
   for (const day of days) {
     const activity = await HealthActivity.findOne({ user: user._id, date: day.date })
-      .select('steps bonusSteps')
+      .select('steps bonusSteps sharedWith sharedMatches sharedHeld sharedSince stuckSource stuckForfeit')
       .lean();
 
     console.log('  ' + '─'.repeat(76));
@@ -234,6 +234,24 @@ async function main() {
     }
     console.log(`  Readers ${(day.readers || []).join(', ') || 'none'}   Timezone ${day.timezone || 'unknown'}`);
     console.log(`  Synced  ${day.firstSyncAt ? new Date(day.firstSyncAt).toISOString() : '?'} → ${day.lastSyncAt ? new Date(day.lastSyncAt).toISOString() : '?'}`);
+    // The two holds the day can be under. Both are findings about the account
+    // rather than about any one increase, so they belong up here with the
+    // verdict, not in the ledger.
+    if (activity?.sharedWith) {
+      console.log(
+        `  ⚠ SHARED COUNTER with account ${activity.sharedWith} — the same totals arrived ` +
+          `from both at the same moments ${n(activity.sharedMatches || 0)} times` +
+          (activity.sharedHeld
+            ? ' — THIS account is the newer one and was held for the day'
+            : ' — this is the older account and was paid'),
+      );
+    }
+    if (activity?.stuckForfeit) {
+      console.log(
+        `  ⚠ STUCK SOURCE — ${n(activity.stuckForfeit)} raw steps set aside under a hold` +
+          (activity.stuckSource ? ` (held by the ${activity.stuckSource} stream)` : ''),
+      );
+    }
     console.log('');
     console.log(`  VERDICT  ${verdictFor(day)}`);
     console.log('');

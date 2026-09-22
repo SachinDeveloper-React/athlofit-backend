@@ -14,6 +14,10 @@
 //   2. Stuck-source rule: a device reporting a constant rather than a
 //      measurement is held where it is. Judged per client stream, and a hold
 //      covers the whole day — see the note at HOLD_STALE_MIN.
+//      Shared-source rule: a counter that is also feeding an older account is
+//      held where it is, for the day. Decided outside this file, in
+//      utils/sharedStepSource.js, because it needs other accounts' rows; this
+//      file only applies the verdict.
 //   3. Day ceiling: the total against how much of its day has elapsed. A hard
 //      bound — no story about backlogs or sync cadence makes more steps fit into
 //      a day than the day has room for. There used to be a second, DELTA-based
@@ -185,6 +189,58 @@ const STUCK_RATE_MIN_SPAN_MIN = 90;
  */
 const STUCK_RATE_MIN_WINDOW_MIN = 2;
 
+// ── Evidence that survives an interruption ──────────────────────────────────
+//
+// Both detectors above gather their evidence as a STREAK: consecutive samples,
+// reset to nothing by the first one that varies. That made the threshold a
+// number the device only had to stay under. One account (21 Sep, a Xiaomi
+// 23049PCD8I on the service stream) ran 2,240 / 2,250 / 2,260 / 2,260 / 2,260
+// — five samples inside a 1.2% band — then posted 1,018, then ran 2,260 again,
+// then broke again, and so on across the day. Five is one short of
+// STUCK_RATE_SAMPLES, three identical deltas is one short of the fourth that
+// STUCK_DELTA_REPEATS refuses, and every break put both counters back to zero.
+// The exact delta 2,260 appeared six times that day and the ~150 steps/min rate
+// eight times; not one sync was refused, and the day closed at the baseline
+// roof of 30,000.
+//
+// The reasoning behind the thresholds was never about consecutiveness — it was
+// that a counter measuring elapsed time does not return to the same rate, to
+// the step, again and again. A device that does so with a pause in between has
+// still done so. So the evidence is now kept for the whole day rather than for
+// the current run: each stream carries the samples it has produced today
+// (delta, rate, window), and every new sample is judged against ALL of them.
+//
+//   * The same exact delta, STUCK_DELTA_REPEATS times earlier today, anywhere
+//     in the day — not only immediately before — provided those occurrences
+//     span STUCK_RATE_MIN_SPAN_MIN, so that a burst of rapid syncs cannot
+//     count as a day's worth of returns.
+//   * A rate band: the largest set of today's samples, including this one,
+//     whose rates sit inside STUCK_RATE_TOLERANCE of each other, holding
+//     STUCK_RATE_SAMPLES and spanning STUCK_RATE_MIN_SPAN_MIN from its first
+//     window to now. The band is found by sorting the rates and sliding a
+//     window of the tolerance's width, so it is order-independent and does not
+//     depend on which sample happened to arrive first or last.
+//
+// The consecutive detectors are kept as they were; the day-wide ones only ever
+// add refusals. Nothing about the thresholds changes — a real walker's
+// 15-minute windows spread far wider than 5% across a day, so the only thing
+// this costs an honest user is the same treadmill case the streak rule
+// already accepts, now also when the session is split in two.
+//
+// A refusal under this rule releases as before: the next sample that does not
+// belong to the band goes through, and the steps reported while held are set
+// aside. What is different is what happens after that release — the band is
+// still there, so the next sample that returns to it is refused straight away
+// rather than being allowed to rebuild a streak from nothing. The pattern is
+// visible for as long as the device keeps producing it, which is the whole
+// point.
+/**
+ * Samples kept per stream per day. A 15-minute cadence produces 96 a day; the
+ * app's foreground sync adds few, since a sample needs STUCK_DELTA_MIN_STEPS
+ * and a STUCK_RATE_MIN_WINDOW_MIN window. Oldest are dropped past this.
+ */
+const MAX_CADENCE_SAMPLES = 192;
+
 // ── One phone, two streams ──────────────────────────────────────────────────
 //
 // Both detectors above follow "the client's" raw totals across syncs, and the
@@ -351,6 +407,11 @@ function computeStepBaseline(recentDailyWalked) {
  * delta that repeats exactly across windows of DIFFERENT lengths has a constant
  * delta and a varying rate, so the rate test would miss it.
  *
+ * Each is applied twice: to the current run of consecutive samples, as
+ * originally written, and to every sample the stream has produced today. The
+ * second is what stops a device from staying one sample under the threshold
+ * and breaking the run on purpose — see the note at MAX_CADENCE_SAMPLES.
+ *
  * Pure, and separate from validateSteps, because it is bookkeeping the caller has
  * to persist between requests rather than a judgement about this one. The caller
  * stores everything returned except `delta`, `rate`, `stuck` and `stuckReason` on
@@ -372,10 +433,17 @@ function computeStepBaseline(recentDailyWalked) {
  * @param {number|null} [params.cadenceRateMin] - Lowest rate in the current streak.
  * @param {number|null} [params.cadenceRateMax] - Highest rate in the current streak.
  * @param {number|Date|null} [params.cadenceStreakAt] - When the current streak began.
+ * @param {Array<{delta: number, rate: number|null, from: number|Date|null,
+ *   at: number|Date, stuck: boolean}>} [params.samples] - Every sample this
+ *   stream produced today, oldest first, as returned by the previous call.
  * @returns {{ delta: number, rate: number|null, stuck: boolean, stuckReason: string|null,
  *   lastIncomingSteps: number, lastIncomingAt: number, lastIncomingDelta: number,
  *   repeatedDeltaCount: number, cadenceStreak: number, cadenceRateMin: number|null,
- *   cadenceRateMax: number|null, cadenceStreakAt: number|null }}
+ *   cadenceRateMax: number|null, cadenceStreakAt: number|null,
+ *   samples: Array<{delta: number, rate: number|null, from: number|null, at: number, stuck: boolean, total: number}>,
+ *   sample: {delta: number, rate: number|null, from: number|null, at: number, stuck: boolean, total: number}|null }}
+ *   `sample` is the one this call recorded, or null when the sync was not one
+ *   (a re-send, a drop, a gain too small to say anything).
  */
 function trackClientCadence({
   incomingSteps,
@@ -388,10 +456,24 @@ function trackClientCadence({
   cadenceRateMin = null,
   cadenceRateMax = null,
   cadenceStreakAt = null,
+  samples = [],
 }) {
   const ms = v => (v == null ? null : new Date(v).getTime());
   const incoming = Math.round(Number(incomingSteps) || 0);
   const now = ms(at) ?? Date.now();
+
+  // Today's samples as plain numbers, whatever shape the caller stored them in.
+  // Anything unreadable is dropped rather than allowed to poison a comparison.
+  const history = (Array.isArray(samples) ? samples : [])
+    .map(s => ({
+      delta: Math.round(Number(s?.delta)),
+      rate: s?.rate == null ? null : Number(s.rate),
+      from: ms(s?.from),
+      at: ms(s?.at),
+      stuck: Boolean(s?.stuck),
+      total: s?.total == null ? null : Math.round(Number(s.total)),
+    }))
+    .filter(s => Number.isFinite(s.delta) && s.at != null);
 
   /** No streak of either kind. Used wherever the evidence has to start over. */
   const cleared = {
@@ -402,6 +484,8 @@ function trackClientCadence({
     cadenceRateMin: null,
     cadenceRateMax: null,
     cadenceStreakAt: null,
+    samples: [],
+    sample: null,
     stuck: false,
     stuckReason: null,
   };
@@ -418,12 +502,18 @@ function trackClientCadence({
    * Whether a hold the counters have already earned is still standing. Used by
    * the two branches below that are not samples, so that they neither extend
    * nor release what the real samples decided.
+   *
+   * The last sample's own verdict is the answer, once there is one: the
+   * day-wide evidence never resets, so it cannot be re-derived from the streak
+   * counters the way it used to be. Rows written before samples were kept fall
+   * back to the streak counters.
    */
   const spanSoFar =
     cadenceStreakAt == null ? 0 : (now - ms(cadenceStreakAt)) / 60_000;
-  const heldStuck =
-    repeatedDeltaCount >= STUCK_DELTA_REPEATS ||
-    (cadenceStreak >= STUCK_RATE_SAMPLES && spanSoFar >= STUCK_RATE_MIN_SPAN_MIN);
+  const heldStuck = history.length
+    ? history[history.length - 1].stuck
+    : repeatedDeltaCount >= STUCK_DELTA_REPEATS ||
+      (cadenceStreak >= STUCK_RATE_SAMPLES && spanSoFar >= STUCK_RATE_MIN_SPAN_MIN);
   const heldReason = heldStuck
     ? 'cadence streak still standing; this sync was too small to be evidence either way'
     : null;
@@ -452,6 +542,8 @@ function trackClientCadence({
       cadenceRateMin,
       cadenceRateMax,
       cadenceStreakAt: ms(cadenceStreakAt),
+      samples: history,
+      sample: null,
       stuck: heldStuck,
       stuckReason: heldReason,
     };
@@ -493,6 +585,8 @@ function trackClientCadence({
       cadenceRateMin,
       cadenceRateMax,
       cadenceStreakAt: ms(cadenceStreakAt),
+      samples: history,
+      sample: null,
       stuck: heldStuck,
       stuckReason: heldReason,
     };
@@ -541,6 +635,42 @@ function trackClientCadence({
     streak >= STUCK_RATE_SAMPLES && spanMinutes >= STUCK_RATE_MIN_SPAN_MIN;
   const deltaStuck = repeated >= STUCK_DELTA_REPEATS;
 
+  // ── The same two detectors, over the whole day ───────────────────────────
+  //
+  // Consecutiveness was never the evidence; recurrence was. A delta that has
+  // already appeared STUCK_DELTA_REPEATS times today, or a rate this stream has
+  // returned to STUCK_RATE_SAMPLES times across STUCK_RATE_MIN_SPAN_MIN, is the
+  // same fault whether or not something else arrived in between. See the note
+  // at MAX_CADENCE_SAMPLES.
+  //
+  // Unlike its consecutive form, the day-wide delta rule needs the span as
+  // well. Four identical deltas in a row is evidence at any cadence — the
+  // windows differ and the figure did not. Four scattered across a day are
+  // evidence only if the day had time to produce four measurements between
+  // them; from a client syncing every three minutes they are twelve minutes of
+  // a steady stretch, which is the "sample count is not a unit" problem the
+  // rate rule already answered with a span. Samples with no clock never
+  // contribute here, so a caller that supplies none keeps the old behaviour.
+  const sameDeltaBefore = history.filter(s => s.delta === delta);
+  const sameDeltaToday = sameDeltaBefore.length;
+  const sameDeltaStarts = sameDeltaBefore.map(s => s.from).filter(v => v != null);
+  const sameDeltaSpanMinutes = sameDeltaStarts.length
+    ? (now - Math.min(...sameDeltaStarts)) / 60_000
+    : 0;
+  const dayDeltaStuck =
+    sameDeltaToday >= STUCK_DELTA_REPEATS &&
+    sameDeltaSpanMinutes >= STUCK_RATE_MIN_SPAN_MIN;
+
+  const band = rate == null ? null : recurringRateBand(history, rate, prevAt);
+  const bandSpanMinutes =
+    band == null || band.since == null ? 0 : (now - band.since) / 60_000;
+  const bandStuck =
+    band != null &&
+    band.count >= STUCK_RATE_SAMPLES &&
+    bandSpanMinutes >= STUCK_RATE_MIN_SPAN_MIN;
+
+  const stuck = deltaStuck || rateStuck || dayDeltaStuck || bandStuck;
+
   let stuckReason = null;
   if (deltaStuck) {
     stuckReason =
@@ -552,7 +682,25 @@ function trackClientCadence({
       `${streak} syncs over ${Math.round(spanMinutes)} minutes — a spread of ` +
       `${((rateMax - rateMin) / ((rateMin + rateMax) / 2) * 100).toFixed(1)}%, ` +
       'which a counter measuring elapsed time does not produce';
+  } else if (dayDeltaStuck) {
+    stuckReason =
+      `+${delta} steps reported ${sameDeltaToday + 1} times today, identical to ` +
+      'the step across differently-sized sync windows';
+  } else if (bandStuck) {
+    stuckReason =
+      `${band.min.toFixed(1)}–${band.max.toFixed(1)} steps/min returned to across ` +
+      `${band.count} syncs over ${Math.round(bandSpanMinutes)} minutes — a spread of ` +
+      `${((band.max - band.min) / ((band.min + band.max) / 2) * 100).toFixed(1)}%, ` +
+      'which a counter measuring elapsed time does not produce';
   }
+
+  // This sample joins the day's history whether or not it was refused: the
+  // pattern has to stay visible to keep being refused, and to be released.
+  //
+  // `total` is the raw figure itself, kept so the day's samples can be compared
+  // with another account's — see utils/sharedStepSource.js.
+  const sample = { delta, rate, from: prevAt, at: now, stuck, total: incoming };
+  const nextSamples = [...history, sample].slice(-MAX_CADENCE_SAMPLES);
 
   return {
     delta,
@@ -565,8 +713,64 @@ function trackClientCadence({
     cadenceRateMin: rateMin,
     cadenceRateMax: rateMax,
     cadenceStreakAt: streakAt,
-    stuck: deltaStuck || rateStuck,
+    samples: nextSamples,
+    sample,
+    stuck,
     stuckReason,
+  };
+}
+
+/**
+ * The largest set of today's samples, together with the one arriving now,
+ * whose rates all sit inside STUCK_RATE_TOLERANCE of each other.
+ *
+ * "Inside the tolerance" is the same test the consecutive streak uses —
+ * (max - min) / midpoint — so the two rules agree on what a band is. Found by
+ * sorting the candidate rates and sliding a window across them, which makes
+ * the answer independent of the order the samples arrived in; anchoring the
+ * band on the newest sample instead would let a slow drift stay inside it, and
+ * anchoring on the oldest would make the verdict depend on which sample began
+ * the day.
+ *
+ * @param {Array<{rate: number|null, from: number|null}>} history - Today's earlier samples.
+ * @param {number} rate - This sample's steps/min.
+ * @param {number|null} from - When this sample's window opened.
+ * @returns {{ count: number, min: number, max: number, since: number|null }}
+ *   `count` includes this sample; `since` is the earliest window start in the band.
+ */
+function recurringRateBand(history, rate, from) {
+  const spread = (lo, hi) => (lo + hi > 0 ? (hi - lo) / ((lo + hi) / 2) : 0);
+
+  // Only a sample within the tolerance of this one can share a band with it,
+  // so everything else is discarded before sorting.
+  const points = history
+    .filter(s => s.rate != null && Number.isFinite(s.rate) && s.rate > 0)
+    .filter(s => spread(Math.min(s.rate, rate), Math.max(s.rate, rate)) <= STUCK_RATE_TOLERANCE)
+    .map(s => ({ rate: s.rate, from: s.from, self: false }));
+  points.push({ rate, from, self: true });
+  points.sort((a, b) => a.rate - b.rate);
+
+  let best = null;
+  let hi = 0;
+  for (let lo = 0; lo < points.length; lo++) {
+    if (hi < lo) hi = lo;
+    while (
+      hi + 1 < points.length &&
+      spread(points[lo].rate, points[hi + 1].rate) <= STUCK_RATE_TOLERANCE
+    ) {
+      hi += 1;
+    }
+    const window = points.slice(lo, hi + 1);
+    if (!window.some(p => p.self)) continue;
+    if (best == null || window.length > best.length) best = window;
+  }
+
+  const starts = best.map(p => p.from).filter(v => v != null);
+  return {
+    count: best.length,
+    min: best[0].rate,
+    max: best[best.length - 1].rate,
+    since: starts.length ? Math.min(...starts) : null,
   };
 }
 
@@ -734,16 +938,22 @@ function resolveDayHold({
  *   computeStepBaseline() over their trailing days. Omit and only the population
  *   bounds apply, which is the pre-baseline behaviour — so an older caller that
  *   does not supply it is weakened, not broken.
+ * @param {object|null} [params.sharedSource] - Result of resolveSharedSource()
+ *   (utils/sharedStepSource.js). When it reports `held`, this account's counter
+ *   is also feeding an older account, which is the one being paid for it, so
+ *   the total is held where it is.
  *
  * @returns {{ clampedSteps: number, flagged: boolean,
- *   severity: 'none'|'clamped'|'implausible'|'stuck_source', reason: string|null,
+ *   severity: 'none'|'clamped'|'implausible'|'stuck_source'|'shared_source', reason: string|null,
  *   corrected: boolean, correctedFrom: number|null }}
  *   `severity` grades WHY it was clamped: 'clamped' is routine (over a window
  *   ceiling but physically possible), 'implausible' is beyond human capacity for
  *   the elapsed day, 'stuck_source' is a device reporting a constant rather than a
- *   measurement. Only 'implausible' is evidence of cheating — see the note in the
- *   body before punishing on it. 'stuck_source' in particular must never be
- *   punished: it is a broken sensor, and the user did nothing.
+ *   measurement, 'shared_source' is a counter that is also feeding another,
+ *   older account. Only 'implausible' and 'shared_source' are evidence of
+ *   cheating — see the note in the body before punishing on it. 'stuck_source'
+ *   in particular must never be punished: it is a broken sensor, and the user
+ *   did nothing.
  */
 function validateSteps({
   incomingSteps,
@@ -757,6 +967,7 @@ function validateSteps({
   stepBaseline = null,
   reader = null,
   sensorWindowMinutes = null,
+  sharedSource = null,
 }) {
   // If no steps provided or negative, return 0
   if (
@@ -792,6 +1003,25 @@ function validateSteps({
       reason: `Exceeded daily cap (${steps} > ${MAX_DAILY_STEPS})`,
     },
   ];
+
+  // ── The counter is paying another account ─────────────────────────────────
+  //
+  // Held exactly where it is, like a stuck source, and for a similar reason:
+  // there is no rate to allow, because the figure is not this account's to
+  // claim. Pushed first among the holds so that on a tie its reason is the one
+  // reported — it names the other account, which is what an investigation
+  // needs, where the stuck-source reason describes only the shape of the data.
+  //
+  // Graded 'shared_source' rather than 'stuck_source' because the two must not
+  // be confused downstream: a stuck source is a fault and is never punished; a
+  // shared one is a second account on one phone. See sharedStepSource.js.
+  if (sharedSource?.held) {
+    ceilings.push({
+      limit: existingWalked,
+      severity: 'shared_source',
+      reason: sharedSource.reason || 'Step counter shared with another account',
+    });
+  }
 
   // ── The source has stopped measuring ──────────────────────────────────────
   // Hold the total exactly where it is. Not a rate — there is no rate to allow,
@@ -1001,6 +1231,10 @@ function validateSteps({
   //                   that it can never reach the cheat path: a stuck counter
   //                   eventually drifts past the daily cap, and grading it by
   //                   magnitude alone would flag the user for their phone's bug.
+  //   'shared_source' — the same counter is feeding another, older account,
+  //                   which is the one being paid for it. A second account on
+  //                   one phone, so it DOES reach the cheat path — and it must
+  //                   not be mistaken for 'stuck_source', which never does.
   //
   // The day bound uses minutesElapsedOnDate, so a past-date sync is judged against
   // its whole day rather than against however little of today has elapsed — the
@@ -1080,6 +1314,7 @@ module.exports = {
   STUCK_RATE_SAMPLES,
   STUCK_RATE_MIN_SPAN_MIN,
   STUCK_RATE_MIN_WINDOW_MIN,
+  MAX_CADENCE_SAMPLES,
   HOLD_STALE_MIN,
   BASELINE_FLOOR,
   BASELINE_MULTIPLIER,

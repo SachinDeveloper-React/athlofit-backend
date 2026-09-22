@@ -29,6 +29,9 @@ const adminActionLogSchema = new mongoose.Schema(
         // was the one with no audit trail. See the drift test that now guards
         // this list.
         'BONUS_STEPS',
+        // A step reversal script removed earned entries — see
+        // reverseSpoofedSteps.applyPlan (void mode).
+        'STEPS_REVERSAL',
       ],
     },
     // Free-text reason / description for the action

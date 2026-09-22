@@ -44,7 +44,7 @@ const syncLogSchema = new mongoose.Schema(
 
     // ── Validator verdict ───────────────────────────────────────────────────
     flagged: { type: Boolean, default: false },
-    // 'none' | 'clamped' | 'implausible' | 'stuck_source'
+    // 'none' | 'clamped' | 'implausible' | 'stuck_source' | 'shared_source'
     severity: { type: String, default: 'none' },
     reason: { type: String, default: null },
     corrected: { type: Boolean, default: false },
@@ -73,7 +73,8 @@ const syncLogSchema = new mongoose.Schema(
     stepMethod: { type: String, default: null },  // single-origin | coverage-dedup | sensor | ...
     stepPrimaryOrigin: { type: String, default: null }, // package that contributed most
 
-    // Why this particular sync was worth recording — 'flagged', 'clamped',
+    // Why this particular sync was worth recording — 'stuck_source',
+    // 'shared_source', 'implausible', 'flagged', 'clamped',
     // 'corrected', 'rejected', 'large_jump', 'trace' (verbose mode on), or
     // 'trace_no_steps' (verbose mode, and the payload carried no steps at all —
     // a hydration or vitals post). Lets a reader tell a deliberately-sampled row

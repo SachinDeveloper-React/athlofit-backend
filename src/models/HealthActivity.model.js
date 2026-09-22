@@ -25,6 +25,29 @@ const mongoose = require('mongoose');
 // `lastIncomingAt` is what makes a rate computable at all — without a clock
 // there is no divisor. Min and max rather than a reference rate, so the band is
 // a spread over the streak and does not depend on which sample started it.
+//
+// `samples` is every sample the stream has produced today — a gain of at least
+// STUCK_DELTA_MIN_STEPS, with the rate it implied and the window it covered.
+// The streak fields above describe only the current RUN of samples and are
+// reset by the first one that varies; a device that broke its run on purpose
+// every fifth sync was never caught by them. The day-wide detectors read this
+// list instead, so a rate the stream keeps returning to is refused however
+// many breaks sit between the returns. See the note at MAX_CADENCE_SAMPLES in
+// stepValidation.js. `stuck` on each sample is the stream's own verdict at the
+// time, which is what a later sync too small to be a sample inherits.
+const cadenceSampleSchema = new mongoose.Schema(
+  {
+    delta: { type: Number, required: true },
+    rate: { type: Number, default: null },
+    from: { type: Date, default: null },
+    at: { type: Date, required: true },
+    stuck: { type: Boolean, default: false },
+    // The raw total itself. What `sampleTotals` below is built from.
+    total: { type: Number, default: null },
+  },
+  { _id: false },
+);
+
 const cadenceStateSchema = new mongoose.Schema(
   {
     lastIncomingSteps: { type: Number, default: null },
@@ -35,6 +58,7 @@ const cadenceStateSchema = new mongoose.Schema(
     cadenceRateMin: { type: Number, default: null },
     cadenceRateMax: { type: Number, default: null },
     cadenceStreakAt: { type: Date, default: null },
+    samples: { type: [cadenceSampleSchema], default: undefined },
   },
   { _id: false },
 );
@@ -192,6 +216,43 @@ const healthActivitySchema = new mongoose.Schema(
     stuckSince: { type: Date, default: null },
     stuckForfeit: { type: Number, default: 0 },
 
+    // ── The day's sample totals, for matching against other accounts ────────
+    //
+    // Every sample any stream produced today — the raw total and when it
+    // arrived — pushed on each sync that was one, oldest dropped past
+    // MAX_SAMPLE_TOTALS. The same figures already sit inside `cadenceBySource`,
+    // but under a per-stream key that cannot be indexed generically; this flat
+    // copy exists so {date, sampleTotals.at, sampleTotals.total} can be. It is
+    // what lets one sync ask "who else posted near this total at this moment
+    // today?" with an index hit rather than a scan of every row for the date.
+    // See utils/sharedStepSource.js.
+    sampleTotals: {
+      type: [
+        new mongoose.Schema(
+          {
+            total: { type: Number, required: true },
+            at: { type: Date, required: true },
+            source: { type: String, default: null },
+          },
+          { _id: false },
+        ),
+      ],
+      default: undefined,
+    },
+
+    // ── One counter, several accounts ───────────────────────────────────────
+    //
+    // Set when this day's totals matched another account's at the same
+    // moments — see sharedStepSource.js for what counts as a match. Written on
+    // BOTH rows, so either account's day says who the other was. `sharedHeld`
+    // is true on the newer account only: that is the one whose steps are
+    // refused, and once true it stays true for the day, so the hold does not
+    // depend on the older account continuing to post.
+    sharedWith: { type: mongoose.Schema.Types.ObjectId, ref: 'User', default: null },
+    sharedMatches: { type: Number, default: 0 },
+    sharedSince: { type: Date, default: null },
+    sharedHeld: { type: Boolean, default: false },
+
     // Whether the one-off retroactive step-goal bonus has been paid for this
     // date. Separate from the watermark because the goal bonus is a flat amount
     // awarded once, not a function of the step count.
@@ -232,5 +293,12 @@ const healthActivitySchema = new mongoose.Schema(
 
 // One record per user per day
 healthActivitySchema.index({ user: 1, date: 1 }, { unique: true });
+
+// "Which other rows on this date have a sample at this moment, near this
+// total?" — the shared-counter read in sharedStepSource.js, once per sample.
+// Multikey over the array, both fields of the same element so an $elemMatch
+// can bound both; the date prefix keeps it to one day's rows. (An earlier
+// build indexed {date, sampleTotals.total} alone; that index can be dropped.)
+healthActivitySchema.index({ date: 1, 'sampleTotals.at': 1, 'sampleTotals.total': 1 });
 
 module.exports = mongoose.model('HealthActivity', healthActivitySchema);

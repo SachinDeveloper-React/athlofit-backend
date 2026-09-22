@@ -61,4 +61,50 @@ function resolveStepGoalAward({
   return { coins, shouldClaim: coins > 0 };
 }
 
-module.exports = { resolveStepGoalAward };
+// ─── One bonus, two settings ────────────────────────────────────────────────
+//
+// The daily step-goal bonus was configurable in two places that nothing kept
+// in step:
+//
+//   rewards.stepGoalCoins                                 — the original field
+//   coin_config.rewards.daily_step_goal_reached.coin_value — added later, with
+//                                                            an `enabled` switch
+//
+// and the four paths that pay it read them in different orders. The same-day
+// award on sync and the retroactive award read `rewards.stepGoalCoins`; the
+// manual claim, the "steps_daily_card" claim and the end-of-day cron read
+// `coin_value` first. So with the admin's field set to 0 and the other still
+// at 13.25, a sync paid nothing, the Earn Coins card SHOWED 0 — it reads the
+// admin's field too — and tapping Claim paid 13. One account did exactly that
+// every evening for a week.
+//
+// This is the one place the bonus is read from now. `rewards.stepGoalCoins`
+// is the amount — it is the field the admin panel edits and the one every
+// document already has — and `daily_step_goal_reached.enabled` remains a
+// switch on top of it. `coin_value` is kept as a mirror for the config API
+// and the app; the config update path writes both fields whenever either is
+// edited, so they cannot drift again.
+
+/** Bonus for a missing field, matching the AppConfig schema default. */
+const DEFAULT_STEP_GOAL_COINS = 50;
+
+/**
+ * The daily step-goal bonus as configured.
+ *
+ * @param {object|null} cfg The AppConfig document (or its lean copy).
+ * @returns {{ enabled: boolean, coins: number }} `coins` is 0 whenever the
+ *   bonus is disabled, so callers can pay `coins` without a second check.
+ */
+function configuredStepGoalBonus(cfg) {
+  const enabled =
+    cfg?.coin_config?.rewards?.daily_step_goal_reached?.enabled ?? true;
+  const raw = Number(cfg?.rewards?.stepGoalCoins);
+  const amount = Number.isFinite(raw) ? Math.max(0, raw) : DEFAULT_STEP_GOAL_COINS;
+  return { enabled: Boolean(enabled), coins: enabled ? amount : 0 };
+}
+
+module.exports = {
+  resolveStepGoalAward,
+  configuredStepGoalBonus,
+  DEFAULT_STEP_GOAL_COINS,
+};

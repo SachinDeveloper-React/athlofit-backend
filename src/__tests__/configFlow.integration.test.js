@@ -323,7 +323,10 @@ describe('Config Flow Integration: GET → PATCH → GET', () => {
       expect(initialConfig.coin_config.rewards.daily_step_goal_reached.coin_value).toBe(50);
 
       // Step 2: PATCH with new values
+      // What the document holds after the PATCH: the update path writes the
+      // bonus to BOTH fields, whichever one the request carried.
       const updatedDoc = buildDefaultConfigDoc({
+        rewards: { stepGoalCoins: 200, hydrationGoalCoins: 20, hydrationGoalMl: 2000 },
         coin_config: {
           steps: { rate_per_100_steps: 0.01 },
           rewards: { daily_step_goal_reached: { enabled: true, coin_value: 200 } },
@@ -343,6 +346,10 @@ describe('Config Flow Integration: GET → PATCH → GET', () => {
       await updateAppConfig(patchReq, res2, jest.fn());
 
       expect(res2.status).toHaveBeenCalledWith(200);
+      // The one bonus was written to both of its fields.
+      const setMap = AppConfig.findOneAndUpdate.mock.calls[0][1].$set;
+      expect(setMap['coin_config.rewards.daily_step_goal_reached.coin_value']).toBe(200);
+      expect(setMap['rewards.stepGoalCoins']).toBe(200);
 
       // Step 3: Subsequent GET returns updated values
       AppConfig.findOne = jest.fn().mockResolvedValue(updatedDoc);

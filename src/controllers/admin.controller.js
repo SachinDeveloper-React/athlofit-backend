@@ -9,6 +9,7 @@ const HealthActivity = require('../models/HealthActivity.model');
 const Achievement = require('../models/Achievement.model');
 const AppConfig = require('../models/AppConfig.model');
 const CoinTransaction = require('../models/CoinTransaction.model');
+const CoinTransactionArchive = require('../models/CoinTransactionArchive.model');
 const RefreshToken = require('../models/RefreshToken.model');
 const AdminActionLog = require('../models/AdminActionLog.model');
 const { success, error } = require('../utils/response');
@@ -775,6 +776,63 @@ const getUserCoinLedger = async (req, res, next) => {
   }
 };
 
+// ─── GET /admin/users/:id/coins/archived ──────────────────────────────────────
+//
+// The ledger rows a step reversal removed from this account — the entries that
+// were paid for steps the live rules would have refused. They are gone from the
+// ledger above so that nothing anywhere still counts them; this is where an
+// admin answers "why did the balance drop" or decides a reversal was wrong.
+// See CoinTransactionArchive.model.js.
+const getUserArchivedCoins = async (req, res, next) => {
+  try {
+    const mongoose = require('mongoose');
+    const userOid = new mongoose.Types.ObjectId(req.params.id);
+
+    const page  = Math.max(1, parseInt(req.query.page ?? '1', 10));
+    const limit = Math.min(200, Math.max(1, parseInt(req.query.limit ?? '50', 10)));
+    const skip  = (page - 1) * limit;
+
+    const [rows, total, sumAgg] = await Promise.all([
+      CoinTransactionArchive.find({ user: userOid })
+        .sort({ archivedAt: -1, originalCreatedAt: -1 })
+        .skip(skip)
+        .limit(limit)
+        .lean(),
+      CoinTransactionArchive.countDocuments({ user: userOid }),
+      CoinTransactionArchive.aggregate([
+        { $match: { user: userOid, type: 'EARNED' } },
+        { $group: { _id: null, total: { $sum: '$amount' } } },
+      ]),
+    ]);
+
+    const totalPages = Math.ceil(total / limit) || 1;
+
+    return success(res, 'Archived coin entries fetched', {
+      transactions: rows.map((t) => ({
+        id: t._id.toString(),
+        originalId: t.originalId?.toString(),
+        type: t.type,
+        amount: t.amount,
+        source: t.source,
+        description: t.description,
+        balanceAfter: t.balanceAfter,
+        metadata: t.metadata || {},
+        createdAt: t.originalCreatedAt,
+        archivedAt: t.archivedAt,
+        archivedBy: t.archivedBy,
+        archiveReason: t.archiveReason,
+        archiveDate: t.archiveDate,
+      })),
+      summary: {
+        totalRemoved: parseFloat((sumAgg[0]?.total || 0).toFixed(2)),
+      },
+      pagination: { page, limit, total, totalPages, hasMore: page < totalPages },
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
 // ─── POST /admin/users/:id/steps-tracking ─────────────────────────────────────
 // Body: { enabled: boolean, reason?: string }
 //
@@ -1280,6 +1338,7 @@ module.exports = {
   getUserAchievements,
   getUserOrders,
   getUserCoinLedger,
+  getUserArchivedCoins,
   getDashboardStats,
   setStepsTracking,
   getAppVersionStats,

@@ -61,6 +61,25 @@
 //     node src/scripts/reverseSpoofedSteps.js --apply --zero-unverifiable
 //     node src/scripts/reverseSpoofedSteps.js --user <id> --force   # reviewed account
 //                                                                  # under the churn threshold
+//     node src/scripts/reverseSpoofedSteps.js --user <id> --zero-days --from 2026-08-28 --to 2026-09-21 --apply
+//                                                                  # reviewed account: every day
+//                                                                  # in the range to zero
+//     node src/scripts/reverseSpoofedSteps.js ... --void-ledger    # remove the paid entries
+//                                                                  # (archived) instead of
+//                                                                  # writing one DEDUCTED row
+//
+// ── --zero-days ─────────────────────────────────────────────────────────────
+//
+// The selection rule above is deliberately narrow: it acts on days it can
+// prove, and skips days it cannot. An account that has been REVIEWED can be
+// past that. One account posted 19 distinct Health Connect origins in two
+// weeks, the whole of each day injected at midnight, its device sending
+// 30–41,000 a day against a 15,000 clamp — and its first two days, 44,000
+// and 43,000, predate the provenance ledger entirely, so no rule can see
+// them. --zero-days takes every day of ONE named account in a date range to
+// zero, through the same applyPlan as everything else: steps, watermark,
+// goal, originTrusted, the paid entries (void mode), the notifications, the
+// challenges. It requires --user, --from and --to, so it cannot be run wide.
 
 require('dotenv').config();
 const mongoose = require('mongoose');
@@ -70,12 +89,16 @@ const HealthActivity = require('../models/HealthActivity.model');
 const StepProvenance = require('../models/StepProvenance.model');
 const Gamification = require('../models/Gamification.model');
 const CoinTransaction = require('../models/CoinTransaction.model');
+const CoinTransactionArchive = require('../models/CoinTransactionArchive.model');
+const Notification = require('../models/Notification.model');
+const AdminActionLog = require('../models/AdminActionLog.model');
 const UserChallenge = require('../models/UserChallenge.model');
 const Challenge = require('../models/Challenge.model');
 const { getCachedAppConfig } = require('../utils/appConfigCache');
 const { passiveCoinsForSteps } = require('../utils/passiveCoins');
 const { getEffectiveDailyCap } = require('../utils/dailyCoinCap');
 const { shiftDate } = require('../utils/stepBaselineStore');
+const { rechainBalances } = require('../utils/coinLedger');
 const {
   ORIGIN_TRUST_MIN_DAYS,
   ORIGIN_CHURN_MAX,
@@ -521,6 +544,7 @@ async function planChallengeReversal({ userId, dates, correctedByDate }) {
         now: corrected,
         target: challenge.targetValue,
         clawback: row.isRewarded ? Number(row.rewardedAmount) || 0 : 0,
+        rewardedAt: row.rewardedAt || null,
       });
     }
   }
@@ -529,7 +553,169 @@ async function planChallengeReversal({ userId, dates, correctedByDate }) {
 
 // ─── Phase 3: apply ─────────────────────────────────────────────────────────
 
-async function applyPlan({ userId, days, untrustedOnly, coinDeduct, challengePlans }) {
+// ─── Removing the entries themselves ────────────────────────────────────────
+//
+// A reversal has two possible shapes, and they answer different questions.
+//
+// The first keeps every EARNED row and adds one DEDUCTED row for the total.
+// That is a faithful ledger — the money came in, the money went out — and it
+// is what reverseSpoofedSteps writes by default.
+//
+// The second removes the entries that were never earned: the "+2.09 Auto Step
+// Coins" rows for a window the phone was shaken through, the goal bonus for a
+// goal that was not met, the challenge reward for a challenge that was not
+// completed, and the notifications that announced them. After it, the
+// account's history reads as if those syncs had been refused at the time,
+// which is exactly the state the live rules now produce. Every reader stops
+// showing the entries at once — the user's history, the admin ledger and its
+// earned/spent totals, the per-day earnings, the analytics — because the rows
+// are no longer there to show, rather than because each query remembered to
+// filter them.
+//
+// Removed rows are copied to CoinTransactionArchive first, verbatim, with the
+// reason and the tool. Nothing is forgotten; it is filed. And the balance is
+// lowered by exactly the sum of what was removed, so the ledger that remains
+// still adds up to the balance the way it did before.
+//
+// Which rows a day loses:
+//   * a day restored to zero — every step-coin row for that date;
+//   * a day restored to a lower figure — the passive rows paid for the syncs
+//     the replay refused (matched on the total the row was paid up to, or the
+//     minute it was written), plus the goal bonus if the goal is no longer met.
+//     A day with no list of refused syncs cannot be matched this way and keeps
+//     the DEDUCTED-row shape instead.
+
+/**
+ * Local midnight of `date` in `timezone` and the midnight after it, as epoch
+ * ms — the window a day's notifications were written in.
+ */
+function dayWindowMs(date, timezone) {
+  const start = dayStartMs(date, timezone);
+  if (start == null) return null;
+  return { start, end: start + 24 * 60 * 60_000 };
+}
+
+/**
+ * Which of a day's paid step-coin rows a correction removes. See the note
+ * above. Pure: `paid` is the day's EARNED step-coin rows, already loaded.
+ *
+ * @returns {Array<object>|null} the rows to remove, or null when the day
+ *   cannot be matched (a partial day with no list of refused syncs).
+ */
+function rowsToVoidFor(day, paid) {
+  if (!paid.length) return [];
+  if (day.restoredSteps === 0) return paid;
+  if (!Array.isArray(day.refusedSyncs)) return null;
+
+  const window = 2 * 60_000;
+  const refused = day.refusedSyncs.map(r => ({
+    raw: Math.round(Number(r.raw)),
+    at: r.at == null ? null : new Date(r.at).getTime(),
+  }));
+  const goalGone =
+    day.goalSnapshot > 0 && day.restoredSteps + (day.bonusSteps || 0) < day.goalSnapshot;
+
+  const goalRows = paid.filter(t => String(t.source).startsWith('DAILY_STEP_GOAL'));
+  const passiveRows = paid.filter(t => !String(t.source).startsWith('DAILY_STEP_GOAL'));
+
+  // One passive row per refused sync, and no more. A row is the one paid for
+  // a sync when it was paid up to exactly that sync's total; only when no row
+  // says so is the nearest row written within two minutes taken instead. It
+  // used to be "either", and that removed rows the replay had ACCEPTED: the
+  // two streams on one phone post a minute or two apart, so the worker's row
+  // sat inside the window of the service's refused sync and went with it —
+  // two to three coins a day more than the corrected figure warranted.
+  const taken = new Set();
+  const chosen = [];
+  for (const r of refused) {
+    let match = passiveRows.find(
+      t => !taken.has(String(t._id)) && Math.round(Number(t.metadata?.steps)) === r.raw,
+    );
+    if (!match && r.at != null) {
+      let best = null;
+      for (const t of passiveRows) {
+        if (taken.has(String(t._id))) continue;
+        const gap = Math.abs(new Date(t.createdAt).getTime() - r.at);
+        if (gap <= window && (best == null || gap < best.gap)) best = { t, gap };
+      }
+      match = best?.t;
+    }
+    if (!match) continue;
+    taken.add(String(match._id));
+    chosen.push(match);
+  }
+
+  return [...chosen, ...(goalGone ? goalRows : [])];
+}
+
+/**
+ * The ledger rows a corrected day should lose — rowsToVoidFor over the day's
+ * paid rows.
+ *
+ * @returns {Promise<Array<object>|null>} lean CoinTransaction rows, or null
+ *   when the day cannot be matched.
+ */
+async function ledgerRowsToVoid({ userId, day }) {
+  const paid = await CoinTransaction.find({
+    user: userId,
+    type: 'EARNED',
+    source: { $in: STEP_COIN_SOURCES },
+    'metadata.date': day.date,
+  }).lean();
+  return rowsToVoidFor(day, paid);
+}
+
+/**
+ * Copies rows to the archive and deletes them from the ledger.
+ *
+ * @returns {Promise<number>} coins removed
+ */
+async function voidLedgerRows({ userId, rows, script, reason }) {
+  if (!rows.length) return 0;
+  await CoinTransactionArchive.insertMany(
+    rows.map(t => ({
+      originalId: t._id,
+      user: t.user,
+      type: t.type,
+      amount: t.amount,
+      balanceAfter: t.balanceAfter,
+      source: t.source,
+      description: t.description,
+      metadata: t.metadata || {},
+      originalCreatedAt: t.createdAt || null,
+      archivedAt: new Date(),
+      archivedBy: script,
+      archiveReason: reason,
+      archiveDate: t.metadata?.date || t.metadata?.periodKey || null,
+    })),
+  );
+  await CoinTransaction.deleteMany({ _id: { $in: rows.map(t => t._id) } });
+  return rows.reduce((sum, t) => sum + (Number(t.amount) || 0), 0);
+}
+
+/**
+ * Writes one account's corrections. Shared with reverseHeldSteps.js, which
+ * selects days by a different rule and hands them here in the same shape, so
+ * the two tools cannot disagree about how a correction is written.
+ *
+ * `description` and `script` label the ledger row; a day may carry `rowUpdate`
+ * with extra fields to set on its HealthActivity row alongside the correction.
+ *
+ * With `voidLedger`, the entries are removed rather than offset — see the note
+ * at ledgerRowsToVoid — and the notifications that announced them are deleted.
+ * `timezone` locates the day's notifications.
+ */
+async function applyPlan({
+  userId,
+  days,
+  untrustedOnly,
+  coinDeduct,
+  challengePlans,
+  description = null,
+  script = 'reverseSpoofedSteps',
+  voidLedger = false,
+  timezone = 'Asia/Kolkata',
+}) {
   // ── Every suspect day is marked, even the ones that cannot be corrected ────
   //
   // This was missed in the first pass: only the correctable days were written,
@@ -546,7 +732,7 @@ async function applyPlan({ userId, days, untrustedOnly, coinDeduct, challengePla
   }
 
   for (const day of days) {
-    const update = { originTrusted: false };
+    const update = { originTrusted: false, ...(day.rowUpdate || {}) };
     if (day.restoredSteps != null) {
       // `steps` is walked + bonus; the correction only touches the walked part.
       const bonus = day.bonusSteps || 0;
@@ -564,10 +750,133 @@ async function applyPlan({ userId, days, untrustedOnly, coinDeduct, challengePla
   }
 
   const gam = await Gamification.findOne({ user: userId });
-  const totalClawback =
+  let totalClawback =
     coinDeduct + challengePlans.reduce((s, p) => s + p.clawback, 0);
+  const balance = {
+    before: Number(gam?.coinsBalance) || 0,
+    after: Number(gam?.coinsBalance) || 0,
+    applied: 0,
+    requested: parseFloat(totalClawback.toFixed(4)),
+    removedRows: 0,
+    removedNotifications: 0,
+  };
 
-  if (gam && totalClawback > 0) {
+  // ── Void mode: take the entries out, and let the removal be the deduction ──
+  let voided = false;
+  if (voidLedger) {
+    const rows = [];
+    let unmatched = 0;
+    for (const day of days) {
+      if (day.restoredSteps == null) continue;
+      const found = await ledgerRowsToVoid({ userId, day });
+      if (found == null) {
+        unmatched += 1;
+        continue;
+      }
+      rows.push(...found);
+    }
+    for (const plan of challengePlans) {
+      if (!(plan.clawback > 0)) continue;
+      rows.push(
+        ...(await CoinTransaction.find({
+          user: userId,
+          type: 'EARNED',
+          source: 'CHALLENGE',
+          'metadata.challengeId': plan.challengeId,
+          'metadata.periodKey': plan.periodKey,
+        }).lean()),
+      );
+    }
+
+    // Every day matched, so the removal IS the correction: no DEDUCTED row is
+    // written, and the balance drops by exactly what was removed. A day that
+    // could not be matched leaves the whole account on the offset shape, so
+    // the two never mix on one account.
+    if (unmatched === 0) {
+      voided = true;
+      const removed = await voidLedgerRows({
+        userId,
+        rows,
+        script,
+        reason: description || 'step reversal',
+      });
+      balance.removedRows = rows.length;
+      totalClawback = removed;
+      balance.requested = parseFloat(removed.toFixed(4));
+
+      // The notifications that announced what was removed: the day's goal
+      // (auto-awarded or claimed) where the goal is no longer met, and the
+      // challenge completion for a reverted challenge.
+      const or = [];
+      for (const day of days) {
+        if (day.restoredSteps == null) continue;
+        const goalGone =
+          day.goalSnapshot > 0 &&
+          day.restoredSteps + (day.bonusSteps || 0) < day.goalSnapshot;
+        if (!goalGone) continue;
+        const win = dayWindowMs(day.date, timezone);
+        if (!win) continue;
+        or.push({
+          type: { $in: ['GOAL', 'COIN'] },
+          title: /step goal|daily goal/i,
+          createdAt: { $gte: new Date(win.start), $lt: new Date(win.end) },
+        });
+      }
+      for (const plan of challengePlans) {
+        if (!(plan.clawback > 0) || !plan.rewardedAt) continue;
+        const at = new Date(plan.rewardedAt).getTime();
+        or.push({
+          type: 'CHALLENGE',
+          message: new RegExp(plan.title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')),
+          createdAt: { $gte: new Date(at - 10 * 60_000), $lte: new Date(at + 10 * 60_000) },
+        });
+      }
+      if (or.length) {
+        const res = await Notification.deleteMany({ user: userId, $or: or });
+        balance.removedNotifications = res.deletedCount || 0;
+      }
+    }
+  }
+
+  if (gam && totalClawback > 0 && voided) {
+    const before = Number(gam.coinsBalance) || 0;
+    const applied = Math.min(before, totalClawback);
+    gam.coinsBalance = parseFloat((before - applied).toFixed(4));
+    await gam.save();
+    balance.after = gam.coinsBalance;
+    balance.applied = parseFloat(applied.toFixed(4));
+  }
+  // The rows that remain must still read as a chain ending at the balance.
+  if (voided) await rechainBalances(userId);
+
+  // Filed in the admin action log, attributed to the first admin account, so
+  // the account's audit trail says why its balance moved even though no
+  // ledger row does. Skipped, not failed, when there is no admin to attribute.
+  if (voided) {
+    try {
+      const admin = await User.findOne({ role: 'admin' }).select('_id name').lean();
+      if (admin) {
+        await AdminActionLog.create({
+          admin: admin._id,
+          adminName: `${script} (script)`,
+          targetUser: userId,
+          action: 'STEPS_REVERSAL',
+          reason: description || 'step reversal',
+          metadata: {
+            dates: days.map(d => d.date),
+            removedRows: balance.removedRows,
+            removedNotifications: balance.removedNotifications,
+            coinsRemoved: balance.applied,
+            script,
+          },
+        });
+      }
+    } catch (err) {
+      console.error('[applyPlan] action log failed:', err.message);
+    }
+  }
+
+  if (gam && totalClawback > 0 && !voided) {
     // Clamped at zero: the balance has `min: 0` and a user may already have spent
     // what they were wrongly paid. Recovering it from a later purchase is a
     // support decision, not something a batch job should do silently.
@@ -575,6 +884,8 @@ async function applyPlan({ userId, days, untrustedOnly, coinDeduct, challengePla
     const applied = Math.min(before, totalClawback);
     gam.coinsBalance = parseFloat((before - applied).toFixed(4));
     await gam.save();
+    balance.after = gam.coinsBalance;
+    balance.applied = parseFloat(applied.toFixed(4));
 
     await CoinTransaction.create({
       user: userId,
@@ -583,14 +894,15 @@ async function applyPlan({ userId, days, untrustedOnly, coinDeduct, challengePla
       balanceAfter: gam.coinsBalance,
       source: 'STEPS_REVERTED',
       description:
+        description ||
         `Step coins reversed — ${days.length} day(s) corrected after an ` +
-        'unrecognised step source was found',
+          'unrecognised step source was found',
       metadata: {
         dates: days.map(d => d.date),
         requested: parseFloat(totalClawback.toFixed(4)),
         applied: parseFloat(applied.toFixed(4)),
         shortfall: parseFloat((totalClawback - applied).toFixed(4)),
-        script: 'reverseSpoofedSteps',
+        script,
       },
     });
   }
@@ -610,6 +922,11 @@ async function applyPlan({ userId, days, untrustedOnly, coinDeduct, challengePla
       },
     );
   }
+
+  // What actually happened to the balance, for the caller to print: a
+  // reversal whose deduction was clamped at zero, or found no Gamification
+  // row, should say so rather than look like one that worked.
+  return balance;
 }
 
 // ─── Report ─────────────────────────────────────────────────────────────────
@@ -650,11 +967,13 @@ function printAccount(report) {
             .join(', ')
         : null,
     ].filter(Boolean).join('; ');
-    const src = d.candidates.length
-      ? d.candidates.map(c => c.packageName).join(', ')
-      : d.cappedAt != null
-        ? `capped at ${n(d.cappedAt)} — ${why}`
-        : `no source with history — ${why}`;
+    const src = d.zeroed
+      ? 'reviewed account — every day in range to zero (--zero-days)'
+      : d.candidates.length
+        ? d.candidates.map(c => c.packageName).join(', ')
+        : d.cappedAt != null
+          ? `capped at ${n(d.cappedAt)} — ${why}`
+          : `no source with history — ${why}`;
     console.log(
       `    ${pad(d.date, 12)}${pad(n(d.recordedTotal), 11)}${pad(restored, 14)}${src}`,
     );
@@ -698,6 +1017,19 @@ async function main() {
   const force = args.includes('--force');
   const userArgIdx = args.indexOf('--user');
   const userArg = userArgIdx >= 0 ? args[userArgIdx + 1] : null;
+  // Removes the paid entries rather than offsetting them — see the note at
+  // ledgerRowsToVoid. Off by default here, on by default in reverseHeldSteps.
+  const voidLedger = args.includes('--void-ledger');
+  // Every day of one reviewed account in a range, to zero. See the header.
+  const zeroDays = args.includes('--zero-days');
+  const fromIdx = args.indexOf('--from');
+  const toIdx = args.indexOf('--to');
+  const fromArg = fromIdx >= 0 ? args[fromIdx + 1] : null;
+  const toArg = toIdx >= 0 ? args[toIdx + 1] : null;
+  if (zeroDays && (!userArg || !fromArg || !toArg)) {
+    console.error('--zero-days needs --user <email|id> --from YYYY-MM-DD --to YYYY-MM-DD');
+    process.exit(1);
+  }
 
   await mongoose.connect(process.env.MONGO_URI);
 
@@ -748,7 +1080,36 @@ async function main() {
       )
       .lean();
     const analysis = analyseAccount(rows);
-    const found = suspectDays(rows, analysis, { force: force && Boolean(userArg) });
+    let found;
+    if (zeroDays) {
+      // Every day with steps in the range, from the stored rows rather than
+      // the ledger: the days that predate provenance are exactly the ones this
+      // exists for.
+      const stored = await HealthActivity.find({
+        user: userId,
+        date: { $gte: fromArg, $lte: toArg },
+        steps: { $gt: 0 },
+      })
+        .select('date steps')
+        .lean();
+      found = stored.map(a => ({
+        date: a.date,
+        recordedTotal: a.steps,
+        restoredSteps: 0,
+        candidates: [],
+        untrusted: [],
+        unattributed: [],
+        cappedAt: null,
+        zeroed: true,
+      }));
+    } else {
+      found = suspectDays(rows, analysis, { force: force && Boolean(userArg) });
+      if (fromArg || toArg) {
+        found = found.filter(
+          d => (!fromArg || d.date >= fromArg) && (!toArg || d.date <= toArg),
+        );
+      }
+    }
     if (!found.length) continue;
 
     // Pull the goal that was active on each day and the bonus steps, so the
@@ -822,16 +1183,28 @@ async function main() {
 
     if (apply) {
       const untrustedOnly = days.filter(d => !actionable.includes(d));
-      await applyPlan({
+      const balance = await applyPlan({
         userId,
         days: actionable,
         untrustedOnly,
         coinDeduct: coin.deduct,
         challengePlans,
+        voidLedger,
+        timezone: rows.find(r => r.timezone)?.timezone || 'Asia/Kolkata',
+        description: zeroDays
+          ? `Step coins reversed — ${actionable.length} day(s) zeroed on a reviewed account`
+          : null,
       });
       console.log(
         `\n  ✔ applied — ${actionable.length} day(s) corrected, ` +
-          `${untrustedOnly.length} more marked untrusted`,
+          `${untrustedOnly.length} more marked untrusted; ` +
+          `coins ${money(balance.before)} → ${money(balance.after)}` +
+          (balance.applied < balance.requested
+            ? ` (${money(balance.requested - balance.applied)} short — balance cannot go below zero)`
+            : '') +
+          (voidLedger
+            ? `; ${balance.removedRows} ledger row(s) and ${balance.removedNotifications} notification(s) removed (archived)`
+            : ''),
       );
     }
   }
@@ -878,4 +1251,14 @@ module.exports = {
   unattributedEntries,
   weeklyPeriodKeyFor,
   weekBoundsFor,
+  dayStartMs,
+  dayWindowMs,
+  // The write half, shared with reverseHeldSteps.js.
+  planCoinReversal,
+  planChallengeReversal,
+  applyPlan,
+  ledgerRowsToVoid,
+  rowsToVoidFor,
+  voidLedgerRows,
+  STEP_COIN_SOURCES,
 };

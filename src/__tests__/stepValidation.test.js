@@ -40,6 +40,15 @@ beforeAll(() => {
   jest.useFakeTimers({ now: FROZEN_NOW });
 });
 
+// Several tests below set their own clock and then call jest.useRealTimers()
+// in a `finally`, which discards the frozen clock for every test after them.
+// That made the rest of the file depend on the wall-clock time of day again —
+// it failed in the minutes after midnight IST, when "today so far" is almost
+// nothing. Re-freeze before every test so no test inherits another's clock.
+beforeEach(() => {
+  jest.useFakeTimers({ now: FROZEN_NOW });
+});
+
 afterAll(() => {
   jest.useRealTimers();
 });
@@ -955,12 +964,18 @@ describe('stuck source detection', () => {
       expect(r.clampedSteps).toBe(48_168);
     });
 
+    // A past date, so the whole day is available to the figure: under the
+    // frozen noon clock, 39,088 "today" is over the half-day ceiling, and
+    // these two used to pass only because an earlier test had un-frozen it.
+    const PAST = '2026-08-22';
+
     it('changes nothing when the cadence is healthy', () => {
       const healthy = { delta: 2_270, repeatedDeltaCount: 1, stuck: false };
       const r = validateSteps({
         ...base,
         incomingSteps: 39_088,
         existingSteps: 36_818,
+        syncDate: PAST,
         cadence: healthy,
       });
       expect(r.clampedSteps).toBe(39_088);
@@ -972,6 +987,7 @@ describe('stuck source detection', () => {
         ...base,
         incomingSteps: 39_088,
         existingSteps: 36_818,
+        syncDate: PAST,
       });
       expect(r.clampedSteps).toBe(39_088);
       expect(r.severity).toBe('none');
@@ -1317,6 +1333,7 @@ describe('stuck source — invariant rate', () => {
         cadenceRateMin: result.cadenceRateMin,
         cadenceRateMax: result.cadenceRateMax,
         cadenceStreakAt: result.cadenceStreakAt,
+        samples: result.samples,
       };
     }
     return out;
@@ -1415,8 +1432,35 @@ describe('stuck source — invariant rate', () => {
   });
 
   it('two phones on one account do not look stuck', () => {
-    // Multi-device accounts must fail OPEN. Two devices posting their own totals
-    // produce deltas that jump around, so neither streak survives.
+    // Multi-device accounts must fail OPEN. Two devices each post their OWN
+    // running total, so on one stream the figure keeps dropping back to the
+    // other phone's lower count — and a drop clears every kind of evidence.
+    // The phone in the pocket is on a flat 2,270 a window here, which on its
+    // own would be refused; the second phone's figures keep interrupting it.
+    let phoneA = 0;
+    let phoneB = 0;
+    const syncs = [{ raw: 0, afterMinutes: 0 }];
+    for (let i = 1; i <= 14; i++) {
+      phoneA += 2_270;
+      phoneB += 400;
+      syncs.push({ raw: i % 2 ? phoneA : phoneB, afterMinutes: i * 15 });
+    }
+    let state = {};
+    const results = syncs.map(({ raw, afterMinutes }) => {
+      const r = trackClientCadence({ incomingSteps: raw, at: T0 + afterMinutes * 60_000, ...state });
+      state = { ...r };
+      return r;
+    });
+
+    expect(results.some(r => r.stuck)).toBe(false);
+  });
+
+  it('a run interrupted every other sync is still a run', () => {
+    // This fixture used to stand in for "two phones", and it passed because a
+    // gain of 700 between every 2,270 reset both streaks. It is not two phones
+    // — one monotonic counter gained exactly 2,270 in every second window for
+    // three and a half hours — and it is precisely the shape the day-wide
+    // evidence exists to refuse.
     const results = run([
       { gainedSteps: 0, afterMinutes: 0 },
       ...Array.from({ length: 14 }, (_, i) => ({
@@ -1425,7 +1469,10 @@ describe('stuck source — invariant rate', () => {
       })),
     ]);
 
-    expect(results.some(r => r.stuck)).toBe(false);
+    expect(results.some(r => r.stuck)).toBe(true);
+    // The consecutive detectors never got anywhere: it is the day that saw it.
+    expect(Math.max(...results.map(r => r.cadenceStreak))).toBeLessThan(STUCK_RATE_SAMPLES);
+    expect(Math.max(...results.map(r => r.repeatedDeltaCount))).toBe(0);
   });
 
   it('still catches an exactly repeated delta, which the rate test cannot', () => {
@@ -1505,6 +1552,7 @@ describe('stuck source — a small sync cannot buy back the hold', () => {
         lastIncomingDelta: r.lastIncomingDelta, repeatedDeltaCount: r.repeatedDeltaCount,
         cadenceStreak: r.cadenceStreak, cadenceRateMin: r.cadenceRateMin,
         cadenceRateMax: r.cadenceRateMax, cadenceStreakAt: r.cadenceStreakAt,
+        samples: r.samples,
       };
     }
     return out;
@@ -1531,10 +1579,15 @@ describe('stuck source — a small sync cannot buy back the hold', () => {
 
   it('still releases when the device actually resumes measuring', () => {
     // The hold is a hold, not a penalty. A real, differently-paced gain ends it.
+    //
+    // "Differently paced" by the rule's own definition: this used to resume at
+    // 2,400, which is 4% off the 2,305 half of the run and so inside the 5% the
+    // rule calls the same rate. With the evidence kept for the whole day, a
+    // return to within the band is a return to the band.
     const results = feed([
       ...stuckRun,
       { gainedSteps: 700, afterMinutes: 13 * 15 },
-      { gainedSteps: 2_400, afterMinutes: 14 * 15 },
+      { gainedSteps: 1_900, afterMinutes: 14 * 15 },
     ]);
 
     expect(results[results.length - 1].stuck).toBe(false);
@@ -1697,6 +1750,7 @@ const persisted = (r) => ({
   cadenceRateMin: r.cadenceRateMin,
   cadenceRateMax: r.cadenceRateMax,
   cadenceStreakAt: r.cadenceStreakAt,
+  samples: r.samples,
 });
 
 describe('stuck source — one phone on two streams', () => {
@@ -1788,14 +1842,19 @@ describe('stuck source — one phone on two streams', () => {
     return out;
   };
 
-  it('one merged history never catches it — the wiring this replaces', () => {
+  it('one merged history sees it an hour later, and only by recurrence', () => {
     // Worker-to-service windows run ~195 steps/min and service-to-worker ~131,
     // because Health Connect trails the live sensor. A 40% spread resets the
     // rate streak on every sync, and the exact-delta streak never sees two of
-    // the service's 2,250s in a row. The whole day is accepted.
+    // the service's 2,250s in a row — so before the evidence was kept for the
+    // whole day, one merged history accepted every sync and the day closed at
+    // 26,367. It now catches the ~131 rate the worker keeps returning to, but
+    // only on its sixth return, seventy minutes after the per-stream wiring
+    // below refuses the service outright.
     const day = runDay(SEP12, { perStream: false });
-    expect(day.some((s) => s.stuck)).toBe(false);
-    expect(day.at(-1).stored).toBe(26_367);
+    const first = day.find((s) => s.stuck);
+    expect(first).toMatchObject({ at: '2026-09-12T05:32:30Z', source: 'worker' });
+    expect(Math.max(...day.map((s) => s.stored))).toBeGreaterThan(20_000);
   });
 
   it('per stream, the service is refused at its fifth identical delta', () => {
@@ -1866,6 +1925,238 @@ describe('stuck source — one phone on two streams', () => {
     const day = runDay(syncs);
     expect(day.some((s) => s.stuck)).toBe(false);
     expect(day.at(-1).stored).toBe(live);
+  });
+});
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Evidence that survives an interruption — the 21 Sep day.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('stuck source — a run that breaks itself every fifth sync', () => {
+  const {
+    STUCK_RATE_SAMPLES: RATE_SAMPLES,
+    MAX_BASELINE_CEILING: BASELINE_ROOF,
+    MAX_CADENCE_SAMPLES,
+  } = require('../utils/stepValidation');
+
+  // A real day, from the provenance ledger: a Xiaomi 23049PCD8I on build 81,
+  // its foreground service posting the live sensor count every fifteen minutes.
+  // The service gained 2,240 / 2,250 / 2,260 / 2,260 / 2,260 — five windows
+  // inside 1.2% of each other — then 1,018, then a 2,260 again, then a stretch
+  // of ordinary figures, then 2,260 three more times. Google Fit and the
+  // platform pedometer agreed with the sensor's total, so the figure was
+  // genuinely coming off the hardware; a rate that identical across windows
+  // of 15.02 to 15.07 minutes is a phone being moved by a machine, not walked.
+  // The final raw figure is inferred: the ledger shows the sync landing on the
+  // 30,000 baseline roof, one more 2,260 above the previous total.
+  // [ISO time, raw client total, X-Client-Source]
+  const SEP21 = [
+    ['2026-09-21T01:59:54Z',    270, 'worker'],
+    ['2026-09-21T02:02:35Z',    351, 'worker'],
+    ['2026-09-21T02:14:53Z',    475, 'native_service'],
+    ['2026-09-21T02:29:56Z',    500, 'native_service'],
+    ['2026-09-21T02:44:57Z',  2_560, 'native_service'],
+    ['2026-09-21T02:45:51Z',  2_580, 'worker'],
+    ['2026-09-21T03:00:01Z',  4_800, 'native_service'],
+    ['2026-09-21T03:00:53Z',  4_810, 'worker'],
+    ['2026-09-21T03:15:05Z',  7_050, 'native_service'],
+    ['2026-09-21T03:30:09Z',  9_310, 'native_service'],
+    ['2026-09-21T03:45:12Z', 11_570, 'native_service'],
+    ['2026-09-21T04:00:16Z', 13_830, 'native_service'],
+    ['2026-09-21T04:15:19Z', 14_848, 'native_service'],
+    ['2026-09-21T04:31:33Z', 14_858, 'native_service'],
+    ['2026-09-21T04:46:34Z', 16_396, 'native_service'],
+    ['2026-09-21T05:01:37Z', 17_738, 'native_service'],
+    ['2026-09-21T05:16:38Z', 19_998, 'native_service'],
+    ['2026-09-21T05:31:41Z', 20_823, 'native_service'],
+    ['2026-09-21T05:47:53Z', 20_833, 'native_service'],
+    ['2026-09-21T06:15:30Z', 20_834, 'native_service'],
+    ['2026-09-21T07:20:39Z', 21_223, 'native_service'],
+    ['2026-09-21T07:49:01Z', 21_233, 'native_service'],
+    ['2026-09-21T08:04:11Z', 21_286, 'native_service'],
+    ['2026-09-21T08:33:35Z', 21_296, 'native_service'],
+    ['2026-09-21T09:25:28Z', 21_303, 'native_service'],
+    ['2026-09-21T09:40:30Z', 21_801, 'native_service'],
+    ['2026-09-21T09:55:33Z', 21_885, 'native_service'],
+    ['2026-09-21T10:10:36Z', 21_899, 'native_service'],
+    ['2026-09-21T10:25:43Z', 21_909, 'native_service'],
+    ['2026-09-21T10:52:55Z', 21_919, 'native_service'],
+    ['2026-09-21T11:07:59Z', 22_278, 'native_service'],
+    ['2026-09-21T11:23:03Z', 22_423, 'native_service'],
+    ['2026-09-21T11:47:12Z', 22_438, 'native_service'],
+    ['2026-09-21T12:02:20Z', 22_480, 'native_service'],
+    ['2026-09-21T12:17:26Z', 22_787, 'native_service'],
+    ['2026-09-21T12:32:30Z', 23_748, 'native_service'],
+    ['2026-09-21T12:45:55Z', 24_530, 'worker'],
+    ['2026-09-21T12:47:33Z', 24_759, 'native_service'],
+    ['2026-09-21T13:02:35Z', 27_019, 'native_service'],
+    ['2026-09-21T13:17:38Z', 29_279, 'native_service'],
+    ['2026-09-21T13:32:41Z', 31_539, 'native_service'],
+  ];
+
+  /**
+   * The controller's wiring, as in the two-stream block above, with the
+   * account's real ceiling — its history had already earned the roof. With
+   * `keepSamples: false` the day's samples are not carried between syncs,
+   * which is exactly the streak-only tracker this replaces.
+   */
+  const runDay = (syncs, { keepSamples = true } = {}) => {
+    let stored = 0;
+    let streams = {};
+    let held = { by: null, since: null, forfeit: 0 };
+    const out = [];
+    try {
+      for (const [iso, raw, source] of syncs) {
+        const at = new Date(iso);
+        jest.setSystemTime(at);
+        const cadence = track({ incomingSteps: raw, at, ...(streams[source] || {}) });
+        const hold = resolveDayHold({
+          source, cadence, streams,
+          heldBy: held.by, heldSince: held.since, forfeit: held.forfeit,
+          existingWalked: stored, at,
+        });
+        const r = validateSteps({
+          ...base,
+          incomingSteps: Math.max(0, raw - hold.stuckForfeit),
+          existingSteps: stored,
+          syncDate: '2026-09-21',
+          stepBaseline: BASELINE_ROOF,
+          cadence: { ...cadence, stuck: hold.stuck, stuckReason: hold.stuckReason },
+        });
+        if (r.clampedSteps > stored) stored = r.clampedSteps;
+        const state = persisted(cadence);
+        if (!keepSamples) delete state.samples;
+        streams = { ...streams, [source]: state };
+        held = { by: hold.stuckSource, since: hold.stuckSince, forfeit: hold.stuckForfeit };
+        out.push({
+          at: iso, source, raw, delta: cadence.delta, stored,
+          stuck: hold.stuck, released: hold.released, forfeit: hold.stuckForfeit,
+          severity: r.severity, reason: hold.stuckReason,
+        });
+      }
+    } finally {
+      jest.setSystemTime(FROZEN_NOW);
+    }
+    return out;
+  };
+
+  it('was accepted in full by the streak-only tracker', () => {
+    // Five in a band is one short of RATE_SAMPLES; three identical deltas is one
+    // short of the fourth that DELTA_REPEATS refuses; and every break put both
+    // counters back to zero. Nothing was refused, and only the account's own
+    // roof stopped the day.
+    const day = runDay(SEP21, { keepSamples: false });
+    expect(day.some((s) => s.stuck)).toBe(false);
+    expect(day.at(-1).stored).toBe(BASELINE_ROOF);
+    expect(day.at(-1).severity).toBe('clamped');
+  });
+
+  it('is refused the moment the delta comes back for the fourth time', () => {
+    const day = runDay(SEP21);
+    const first = day.find((s) => s.stuck);
+    expect(first).toMatchObject({
+      at: '2026-09-21T05:16:38Z',
+      source: 'native_service',
+      raw: 19_998,
+      delta: 2_260,
+      severity: 'stuck_source',
+    });
+    // The three earlier 2,260s were an hour ago, with three varying windows in
+    // between — which the streak counters had forgotten entirely.
+    expect(first.reason).toMatch(/4 times today/);
+    expect(first.stored).toBe(17_738);
+  });
+
+  it('releases on the window that varied, and sets aside the one it refused', () => {
+    const day = runDay(SEP21);
+    const release = day.find((s) => s.released);
+    expect(release).toMatchObject({ at: '2026-09-21T05:31:41Z', delta: 825 });
+    expect(release.forfeit).toBe(2_260);
+    expect(release.stored).toBe(17_738 + 825);
+  });
+
+  it('refuses every later return to the pattern, however many breaks sit between', () => {
+    // Seven hours of ordinary figures, then 2,260 three more times. Under the
+    // streak-only tracker the run had to rebuild from nothing and never got
+    // there; the day remembers.
+    const day = runDay(SEP21);
+    const evening = day.filter((s) => s.at >= '2026-09-21T13:00:00Z');
+    expect(evening.map((s) => s.stuck)).toEqual([true, true, true]);
+    expect(evening.every((s) => s.severity === 'stuck_source')).toBe(true);
+    expect(new Set(evening.map((s) => s.stored))).toEqual(new Set([22_499]));
+  });
+
+  it('still accepts the figures that varied — the small gains and the worker', () => {
+    // The hold is narrow: only the samples that belong to the pattern are
+    // refused. Everything between them goes through, read net of the forfeit.
+    const day = runDay(SEP21);
+    const between = day.filter(
+      (s) => s.at > '2026-09-21T05:31:41Z' && s.at < '2026-09-21T13:00:00Z',
+    );
+    expect(between.some((s) => s.stuck)).toBe(false);
+    expect(between.at(-1)).toMatchObject({ raw: 24_759, stored: 24_759 - 2_260 });
+  });
+
+  it('closes the day at what varied, not at the roof', () => {
+    const day = runDay(SEP21);
+    expect(day.at(-1).stored).toBe(22_499);
+    expect(day.at(-1).stored).toBeLessThan(BASELINE_ROOF);
+  });
+
+  it('leaves a walker who takes the same route twice a day alone', () => {
+    // Morning and evening walks at a human's variance: the same person, the same
+    // route, and windows that still spread 10-15% because a light changed or a
+    // conversation happened. Six full windows in a day, none of them the same.
+    const T0 = new Date('2026-09-21T02:00:00Z').getTime();
+    const gains = [
+      1_580, 1_650, 1_490, 240,            // morning
+      30, 10, 80, 0, 120, 15, 40, 60,      // the working day
+      1_620, 1_540, 1_700, 310,            // evening
+    ];
+    let live = 0;
+    const syncs = gains.map((g, i) => {
+      live += g;
+      return [new Date(T0 + (i + 1) * 15 * 60_000).toISOString(), live, 'native_service'];
+    });
+    const day = runDay(syncs);
+    expect(day.some((s) => s.stuck)).toBe(false);
+    expect(day.at(-1).stored).toBe(live);
+  });
+
+  it('a stream on a build that kept no samples still holds through a small sync', () => {
+    // A row written before samples were persisted carries only the streak
+    // counters. A hold they earned must still stand across a +10, exactly as
+    // it did before — the fallback is the old derivation.
+    const r = track({
+      incomingSteps: 39_098,
+      at: FROZEN_NOW,
+      lastIncomingSteps: 39_088,
+      lastIncomingAt: FROZEN_NOW.getTime() - 5 * 60_000,
+      lastIncomingDelta: 2_270,
+      repeatedDeltaCount: DELTA_REPEATS,
+      // no `samples`
+    });
+    expect(r.stuck).toBe(true);
+    expect(r.samples).toEqual([]);
+  });
+
+  it('keeps only the newest samples once a stream has produced enough', () => {
+    let state = {};
+    const T0 = new Date('2026-09-21T00:00:00Z').getTime();
+    let total = 0;
+    for (let i = 0; i <= MAX_CADENCE_SAMPLES + 10; i++) {
+      // Every gain distinct and far apart, so nothing here is ever refused and
+      // the only thing being tested is the bound.
+      total += 500 + ((i * 137) % 1_500);
+      state = track({ incomingSteps: total, at: T0 + i * 5 * 60_000, ...state });
+    }
+    expect(state.samples.length).toBe(MAX_CADENCE_SAMPLES);
+    expect(state.samples.at(-1).delta).toBe(500 + (((MAX_CADENCE_SAMPLES + 10) * 137) % 1_500));
+  });
+
+  it('exposes the thresholds it shares with the streak rules', () => {
+    expect(RATE_SAMPLES).toBe(6);
+    expect(MAX_CADENCE_SAMPLES).toBeGreaterThanOrEqual(96);
   });
 });
 

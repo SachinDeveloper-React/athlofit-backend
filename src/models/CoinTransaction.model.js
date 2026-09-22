@@ -73,6 +73,14 @@ const coinTransactionSchema = new mongoose.Schema(
       date: String,
       daysAgo: Number,
       trigger: String,
+      // Written by the step-reversal scripts (STEPS_REVERTED). Absent from the
+      // schema until now, so strict mode dropped them and a reversal row said
+      // nothing about which days it undid.
+      dates: [String],
+      requested: Number,
+      applied: Number,
+      shortfall: Number,
+      script: String,
     },
   },
   {
