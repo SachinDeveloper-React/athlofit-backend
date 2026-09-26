@@ -702,8 +702,24 @@ const syncHealthData = async (req, res, next) => {
       syncDate: today,
       dailyGoal,
       allowCorrection: stepsCorrection === true,
-      // The day-wide verdict, not this stream's own: a healthy stream is still
-      // held while another stream's stuck verdict stands.
+      // What the day's OTHER streams have reported, so a correction from this one
+      // cannot retract steps another reader independently counted — see the
+      // note at Rule 3 in stepValidation.js. Net of any stuck-source forfeit, so
+      // steps already set aside cannot come back as a floor.
+      correctionFloor:
+        stepsCorrection === true && stepsProvided
+          ? Math.max(
+              0,
+              ...Object.entries(cadenceStreams)
+                .filter(([key]) => key !== cadenceSource)
+                .map(([, s]) => Number(s?.lastIncomingSteps) || 0),
+            ) - (existing?.stuckForfeit || 0)
+          : null,
+      // A stuck verdict belongs to the stream that earned it. Other streams on
+      // the same account must continue through their own validation; their
+      // cumulative totals are merged by the stored maximum, and blocking them
+      // here can hide a valid Health Connect/native reading behind a stale
+      // worker cadence.
       cadence: hold
         ? { ...cadence, stuck: hold.stuck, stuckReason: hold.stuckReason }
         : null,
