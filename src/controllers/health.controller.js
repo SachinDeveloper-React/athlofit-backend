@@ -27,6 +27,7 @@ const {
   resolveDayHold,
 } = require('../utils/stepValidation');
 const { loadStepBaseline } = require('../utils/stepBaselineStore');
+const { checkSyncDate } = require('../utils/syncDateWindow');
 const { resolveOriginTrust } = require('../utils/stepOriginTrust');
 const { loadOriginHistory } = require('../utils/stepOriginTrustStore');
 
@@ -105,6 +106,7 @@ const { recordCheatFlag, isCoinBlocked } = require('../utils/cheatPenalty');
 const {
   resolveSharedSource,
   describeSharedSource,
+  describeSharedInstall,
   loadSharedSourceCandidates,
   SHARED_MIN_STEPS,
   SHARED_RECENT_SAMPLES,
@@ -357,6 +359,25 @@ const syncHealthData = async (req, res, next) => {
       });
     }
 
+    // ── Guard: only today and the backfill window may receive steps ──────────
+    // A future date let a client park steps on tomorrow's row; an old date let it
+    // rewrite history the baseline ceiling is computed from. See
+    // utils/syncDateWindow.js. Answered like the guard above — a skip, not an
+    // error — so a client never retries it.
+    if (stepsProvided) {
+      const dateWindow = checkSyncDate({ date: today, timezone });
+      if (!dateWindow.ok) {
+        recordSyncLog(req, {
+          date: today,
+          incomingSteps: Number(steps) || 0,
+          rejected: true,
+          reason: dateWindow.message,
+          timezone,
+        });
+        return success(res, dateWindow.message, { skipped: true });
+      }
+    }
+
     const dailyGoal = req.user.dailyStepGoal || 10000;
 
     // ── FIX #2: Server-side step validation / anti-cheat ─────────────────────
@@ -476,13 +497,17 @@ const syncHealthData = async (req, res, next) => {
       shared = {
         shared: true,
         held: true,
+        via: existing.sharedVia || 'counter',
         otherUser: existing.sharedWith,
         matches: existing.sharedMatches || 0,
-        reason: describeSharedSource({
-          otherUser: existing.sharedWith,
-          matches: existing.sharedMatches || 0,
-          held: true,
-        }),
+        reason:
+          existing.sharedVia === 'install'
+            ? describeSharedInstall({ otherUser: existing.sharedWith })
+            : describeSharedSource({
+                otherUser: existing.sharedWith,
+                matches: existing.sharedMatches || 0,
+                held: true,
+              }),
       };
     } else if (
       stepsProvided &&
@@ -498,6 +523,46 @@ const syncHealthData = async (req, res, next) => {
         samples: mine,
       });
       shared = resolveSharedSource({ userId: req.user._id, mine, candidates });
+    }
+
+    // ── One install, one account's steps per day ─────────────────────────────
+    //
+    // The counter rule above needs both accounts posting at the same moments,
+    // which two copies of the app do. One copy switching accounts does not: log
+    // out of the first, log into the second, and the phone's day-so-far arrives
+    // again under the second account — never at the same instant as the first,
+    // so never matched. The install is the fingerprint that survives the switch.
+    //
+    // The account that posted steps from this install first today keeps the day;
+    // any other account posting from it is held for the rest of the day, graded
+    // like a shared counter. First rather than older, because the two cannot be
+    // logged in at once on one install, so there is no flip-flop to guard
+    // against — and the first account's steps are already paid.
+    //
+    // Skipped when the header is absent (older builds) or this account already
+    // holds the install today.
+    const installId = stepsProvided ? req.deviceCtx?.installId || null : null;
+    if (
+      installId &&
+      !shared?.held &&
+      !(existing?.installIds || []).includes(installId)
+    ) {
+      const other = await HealthActivity.findOne(
+        { date: today, installIds: installId, user: { $ne: req.user._id } },
+        { user: 1 },
+      )
+        .lean()
+        .catch(() => null);
+      if (other) {
+        shared = {
+          shared: true,
+          held: true,
+          via: 'install',
+          otherUser: other.user,
+          matches: 0,
+          reason: describeSharedInstall({ otherUser: other.user }),
+        };
+      }
     }
 
     if (shared?.shared && !existing?.sharedWith) {
@@ -587,6 +652,9 @@ const syncHealthData = async (req, res, next) => {
       }
     }
 
+    const syncReader = stepsProvided
+      ? (typeof stepSource?.reader === 'string' ? stepSource.reader.trim() : null)
+      : null;
     const stepValidation = validateSteps({
       incomingSteps: effectiveSteps,
       existingSteps: existing?.steps || 0,
@@ -596,10 +664,15 @@ const syncHealthData = async (req, res, next) => {
       // cadence in a way a Health Connect backlog is not. The window has to cover
       // any period the foreground service was killed — TYPE_STEP_COUNTER keeps
       // running in hardware — so the client's own `offlineMinutes` widens it.
-      reader: stepsProvided
-        ? (typeof stepSource?.reader === 'string' ? stepSource.reader.trim() : null)
-        : null,
-      sensorWindowMinutes: sensorWindowMinutes(existing, stepSource, today, timezone),
+      reader: syncReader,
+      // An unattributed figure gets only the window the server itself observed:
+      // the client's offline claim is exactly what would let it widen the bound.
+      sensorWindowMinutes: sensorWindowMinutes(
+        existing,
+        syncReader === 'unknown' ? null : stepSource,
+        today,
+        timezone,
+      ),
       timezone,
       // The date this sync is writing to, which is not necessarily today — the
       // Android widget worker re-posts the last seven days every 15 minutes. The
@@ -898,6 +971,7 @@ const syncHealthData = async (req, res, next) => {
             sharedMatches: shared.matches,
             sharedSince: existing?.sharedSince || new Date(),
             sharedHeld: Boolean(existing?.sharedHeld || shared.held),
+            sharedVia: existing?.sharedVia || shared.via || 'counter',
           }
         : {}),
       // Which build wrote this row. Only stamped when the caller actually
@@ -933,8 +1007,18 @@ const syncHealthData = async (req, res, next) => {
             $set: updateFields,
             // $addToSet, not $push — a day is synced dozens of times from the
             // same build and only the SET of contributing versions is useful.
-            ...(req.deviceCtx?.appVersion
-              ? { $addToSet: { syncVersions: req.deviceCtx.appVersion } }
+            // The install joins the day's set only when its steps were taken —
+            // a held account must not claim the install, or the one-install rule
+            // would see both accounts holding it and let the second through.
+            ...(req.deviceCtx?.appVersion || (installId && !shared?.held)
+              ? {
+                  $addToSet: {
+                    ...(req.deviceCtx?.appVersion
+                      ? { syncVersions: req.deviceCtx.appVersion }
+                      : {}),
+                    ...(installId && !shared?.held ? { installIds: installId } : {}),
+                  },
+                }
               : {}),
             // The sample this sync produced, if it was one, onto the day's flat
             // list of totals — what another account's sync is matched against.

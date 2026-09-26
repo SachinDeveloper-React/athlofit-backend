@@ -270,6 +270,17 @@ function describeSharedSource({ otherUser, matches, offset = 0, held }) {
 }
 
 /**
+ * The reason recorded when the one-install rule holds a day — see the note at
+ * that rule in health.controller.js.
+ */
+function describeSharedInstall({ otherUser }) {
+  return (
+    `Same install already posted steps for account ${otherUser} today — ` +
+    'one phone\'s steps are credited to one account per day, this one held for the day'
+  );
+}
+
+/**
  * Other accounts' rows on this date with a sample at the same moment as one of
  * these, at a total within SHARED_OFFSET_MAX of it. Indexed on
  * {date, sampleTotals.at, sampleTotals.total}: the time window is a few
@@ -315,6 +326,7 @@ module.exports = {
   countSharedSamples,
   matchesNeeded,
   describeSharedSource,
+  describeSharedInstall,
   isNewerAccount,
   accountCreatedMs,
   loadSharedSourceCandidates,

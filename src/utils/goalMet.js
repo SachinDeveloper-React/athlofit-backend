@@ -3,8 +3,15 @@
 //
 // The server decides, because it alone holds the authoritative numbers:
 // `totalSteps` is walked + admin-credited bonus, and `dailyGoal` is the user's
-// goal as of now. The client's `goalMet` is only a HINT, and it can raise the
-// verdict, never lower it.
+// goal as of now. The client's `goalMet` is ignored in both directions.
+//
+// It used to be a hint that could raise the verdict but not lower it. Raising
+// was the half nobody questioned, and it was the loophole: `goalMet: true` on a
+// 100-step payload set the day's goal as met — the streak moved, the goal flag
+// was stored, and the step-goal coins were one config switch away. Accounts in
+// the data had goalMet stored on days of 4,500/10,000 and 15,000/20,000. A
+// client can only ever be BEHIND the server on this question (it cannot see
+// bonus steps, a clamp, or the current goal), so there is nothing its vote adds.
 //
 // This was `goalMet ?? (totalSteps >= dailyGoal)` inside syncHealthData. `??`
 // falls through only on null/undefined, so `false ?? x` is `false` — and three
@@ -34,12 +41,12 @@
  * @param {object} params
  * @param {number} params.totalSteps Walked + bonus steps for the day.
  * @param {number} params.dailyGoal The user's step goal for the day.
- * @param {boolean|undefined|null} [params.clientGoalMet] The client's hint, if any.
- *   Only an exact `true` counts; anything else leaves the decision to the total.
+ * @param {boolean|undefined|null} [params.clientGoalMet] Accepted for older
+ *   callers and ignored — see the header.
  * @returns {boolean}
  */
-function resolveGoalMet({ totalSteps, dailyGoal, clientGoalMet }) {
-  return totalSteps >= dailyGoal || clientGoalMet === true;
+function resolveGoalMet({ totalSteps, dailyGoal }) {
+  return totalSteps >= dailyGoal;
 }
 
 module.exports = { resolveGoalMet };

@@ -35,16 +35,18 @@ describe('resolveGoalMet', () => {
     });
   });
 
-  describe('a client hint can raise the verdict but never lower it', () => {
+  describe('the client has no vote either way', () => {
     it('ignores clientGoalMet:false once the goal is actually met', () => {
       // Regression: the hydration and background-sync payloads.
       expect(resolveGoalMet({ totalSteps: 15_000, dailyGoal, clientGoalMet: false }))
         .toBe(true);
     });
 
-    it('honours clientGoalMet:true when the stored total does not show it', () => {
+    it('ignores clientGoalMet:true when the stored total does not show it', () => {
+      // The loophole: a 100-step payload claiming the goal set it as met — streak,
+      // goal flag and step-goal coins without the steps.
       expect(resolveGoalMet({ totalSteps: 100, dailyGoal, clientGoalMet: true }))
-        .toBe(true);
+        .toBe(false);
     });
 
     it.each([undefined, null, false, 0, '', 'false'])(

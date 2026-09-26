@@ -252,6 +252,11 @@ const healthActivitySchema = new mongoose.Schema(
     sharedMatches: { type: Number, default: 0 },
     sharedSince: { type: Date, default: null },
     sharedHeld: { type: Boolean, default: false },
+    // How the sharing was found: 'counter' (the same totals at the same moments,
+    // sharedStepSource.js) or 'install' (the same X-Install-Id posting for two
+    // accounts on one day, health.controller.js). Null on rows written before
+    // the install rule existed, which were all 'counter'.
+    sharedVia: { type: String, enum: ['counter', 'install', null], default: null },
 
     // Whether the one-off retroactive step-goal bonus has been paid for this
     // date. Separate from the watermark because the goal bonus is a flat amount
@@ -279,6 +284,16 @@ const healthActivitySchema = new mongoose.Schema(
     // Left empty by builds that send no version headers — which is itself the
     // signal that the device has not taken the update.
     syncVersions: { type: [String], default: [] },
+
+    // ── Which installs posted steps to this day ──────────────────────────────
+    //
+    // The X-Install-Id of every sync whose steps were accepted onto this row.
+    // What the one-install rule in health.controller reads: the same install
+    // posting steps for a second account on the same day is one phone's counter
+    // being paid twice — log out of one account, log into another, and the
+    // day's total so far arrives again. The shared-counter rule cannot see this,
+    // because the two accounts never post at the same moment.
+    installIds: { type: [String], default: undefined },
   },
   {
     timestamps: true,
@@ -300,5 +315,9 @@ healthActivitySchema.index({ user: 1, date: 1 }, { unique: true });
 // can bound both; the date prefix keeps it to one day's rows. (An earlier
 // build indexed {date, sampleTotals.total} alone; that index can be dropped.)
 healthActivitySchema.index({ date: 1, 'sampleTotals.at': 1, 'sampleTotals.total': 1 });
+
+// "Has another account posted steps from this install today?" — the one-install
+// read in health.controller.js, once per step sync.
+healthActivitySchema.index({ date: 1, installIds: 1 });
 
 module.exports = mongoose.model('HealthActivity', healthActivitySchema);

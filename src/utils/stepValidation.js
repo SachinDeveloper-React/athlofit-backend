@@ -1082,8 +1082,21 @@ function validateSteps({
   // 0 and passes every finite check, so without the explicit null test a caller
   // that omitted the window would pin the total exactly where it stood — which is
   // how a missing field turns into a silent, total freeze on a real user's day.
+  //
+  // ── A figure nothing accounts for is bounded the same way ─────────────────
+  //
+  // `unknown` is what the app sends before its step reader has resolved — the
+  // figure is whatever the local store held — and `server` is the server's own
+  // stored total handed back. Neither is a measurement, so neither can deliver
+  // a backlog either. This is the path every recent unexplained jump took: all
+  // four syncs of 8,000–21,000 steps from the app with no reader, on build 1.81,
+  // came from the accounts found farming, while honest accounts' syncs on the
+  // same path never moved more than 556. The caller passes a window WITHOUT the
+  // client's offline claim for `unknown`, since that claim is what would widen
+  // it. `server` may not raise the total at all: the server's own figure is
+  // already the stored one.
   if (
-    reader === 'native_sensor' &&
+    (reader === 'native_sensor' || reader === 'unknown') &&
     sensorWindowMinutes !== null &&
     sensorWindowMinutes !== undefined &&
     Number.isFinite(Number(sensorWindowMinutes)) &&
@@ -1094,9 +1107,17 @@ function validateSteps({
     ceilings.push({
       limit: Math.max(existingWalked, existingWalked + maxDelta),
       reason:
-        `Live sensor cannot have counted this: +${steps - existingWalked} steps ` +
+        (reader === 'unknown'
+          ? `Unattributed figure cannot have been counted: +${steps - existingWalked} steps `
+          : `Live sensor cannot have counted this: +${steps - existingWalked} steps `) +
         `across ${Math.round(window)} min of listening ` +
         `(max ${maxDelta} at ${MAX_STEPS_PER_MINUTE}/min)`,
+    });
+  }
+  if (reader === 'server') {
+    ceilings.push({
+      limit: existingWalked,
+      reason: `A figure passed back from the server cannot raise it: ${steps} against ${existingWalked} stored`,
     });
   }
 
