@@ -201,4 +201,99 @@ function advanceStreak(gam, date, cfg) {
   return result;
 }
 
-module.exports = { getStreakConfig, grantProtections, attemptProtect, advanceStreak, restoreStreak, isoWeekKey };
+/**
+ * The runs of consecutive dates in a list of goal-met days.
+ *
+ * @param {string[]} dates - Goal-met "YYYY-MM-DD" dates, in any order.
+ * @returns {{currentRun: number, longestRun: number, lastDate: string|null}}
+ *   `currentRun` is the run ending on the most recent date.
+ */
+function goalMetRuns(dates) {
+  const { isConsecutiveDay } = require('./date');
+  const sorted = [...new Set(dates || [])].sort();
+  if (sorted.length === 0) return { currentRun: 0, longestRun: 0, lastDate: null };
+
+  let run = 1;
+  let longest = 1;
+  for (let i = 1; i < sorted.length; i++) {
+    run = isConsecutiveDay(sorted[i - 1], sorted[i]) ? run + 1 : 1;
+    if (run > longest) longest = run;
+  }
+  return { currentRun: run, longestRun: longest, lastDate: sorted[sorted.length - 1] };
+}
+
+/**
+ * Take a day back out of the streak once its goal turns out not to have been
+ * met — the step-coin settlement found the steps that met it were not walked.
+ * See utils/stepCoinSettlement.js.
+ *
+ * The day counted when it synced, so the streak ran through it. Withdrawing it
+ * breaks the run there: what remains is the goal-met days after it, up to the
+ * cursor. No freeze or life is spent to bridge it — the day was not missed, it
+ * was never earned.
+ *
+ * Counted from the record rather than from the calendar, so a gap that was
+ * protected by a freeze inside the run does not throw the count off.
+ *
+ * Only ever lowers, like the streak repair: the best streak is recounted only
+ * when the current run was the best one, and a badge is cleared only while its
+ * coins are unclaimed — a claimed one is reported, never clawed back.
+ *
+ * Pure; the caller writes the result.
+ *
+ * @param {object} gam - streakDays, bestStreakDays, lastActiveDate,
+ *   lastFreezeGrantStreak, badgeList.
+ * @param {string} date - "YYYY-MM-DD" being withdrawn.
+ * @param {object} record
+ * @param {string[]} record.goalMetDates - Every goal-met date on record,
+ *   with `date` already excluded.
+ * @param {Array<{key: string, threshold: number}>} [record.badgeDefs]
+ * @returns {null|{ streakDays: number, bestStreakDays: number,
+ *   lastFreezeGrantStreak: number, clearBadges: string[], paidBadges: string[] }}
+ *   null when the day was not part of the run the streak counts.
+ */
+function withdrawStreakDay(gam, date, { goalMetDates = [], badgeDefs = [] } = {}) {
+  const streak = gam?.streakDays || 0;
+  const cursor = gam?.lastActiveDate || null;
+  if (!cursor || streak <= 0 || date > cursor) return null;
+
+  // Goal-met days after this one that the run went on to count. Fewer of them
+  // than the streak holds means this day was inside the run.
+  const after = [...new Set(goalMetDates)].filter(d => d > date && d <= cursor).length;
+  if (after >= streak) return null;
+
+  const streakDays = after;
+  let bestStreakDays = gam.bestStreakDays || 0;
+  if (bestStreakDays <= streak) {
+    const { longestRun } = goalMetRuns(goalMetDates);
+    bestStreakDays = Math.min(bestStreakDays, Math.max(longestRun, streakDays));
+  }
+
+  const clearBadges = [];
+  const paidBadges = [];
+  for (const def of badgeDefs) {
+    if (def.threshold <= bestStreakDays) continue;
+    const entry = (gam.badgeList || []).find(b => b.key === def.key);
+    if (!entry?.unlocked) continue;
+    (entry.coinsClaimed ? paidBadges : clearBadges).push(def.key);
+  }
+
+  return {
+    streakDays,
+    bestStreakDays,
+    lastFreezeGrantStreak: Math.min(gam.lastFreezeGrantStreak || 0, streakDays),
+    clearBadges,
+    paidBadges,
+  };
+}
+
+module.exports = {
+  getStreakConfig,
+  grantProtections,
+  attemptProtect,
+  advanceStreak,
+  restoreStreak,
+  isoWeekKey,
+  goalMetRuns,
+  withdrawStreakDay,
+};

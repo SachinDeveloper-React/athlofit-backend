@@ -1820,26 +1820,19 @@ describe('stuck source — one phone on two streams', () => {
           existingWalked: stored,
           at,
         });
-        const holdsThisStream = hold.stuckSource === key;
         const r = validateSteps({
           ...base,
-          incomingSteps: Math.max(0, raw - (holdsThisStream ? hold.stuckForfeit : 0)),
+          incomingSteps: Math.max(0, raw - hold.stuckForfeit),
           existingSteps: stored,
           syncDate: '2026-09-12',
-          cadence: {
-            ...cadence,
-            stuck: holdsThisStream && hold.stuck,
-            stuckReason: holdsThisStream ? hold.stuckReason : null,
-          },
+          cadence: { ...cadence, stuck: hold.stuck, stuckReason: hold.stuckReason },
         });
         if (r.clampedSteps > stored) stored = r.clampedSteps;
         streams = { ...streams, [key]: persisted(cadence) };
         held = { by: hold.stuckSource, since: hold.stuckSince, forfeit: hold.stuckForfeit };
         out.push({
           at: iso, source, raw, stored,
-          stuck: holdsThisStream && hold.stuck,
-          released: hold.released,
-          forfeit: hold.stuckForfeit,
+          stuck: hold.stuck, released: hold.released, forfeit: hold.stuckForfeit,
           severity: r.severity,
         });
       }
@@ -1864,44 +1857,54 @@ describe('stuck source — one phone on two streams', () => {
     expect(Math.max(...day.map((s) => s.stored))).toBeGreaterThan(20_000);
   });
 
-  it('per stream, only the holder is refused', () => {
+  it('per stream, the service is refused at its fifth identical delta', () => {
     const day = runDay(SEP12);
     const first = day.find((s) => s.stuck);
     expect(first).toMatchObject({
+      at: '2026-09-12T04:21:47Z',
+      source: 'native_service',
+      raw: 12_807,
       severity: 'stuck_source',
     });
-    expect(first.stored).toBeLessThan(first.raw);
+    // The stored total is where the day stood when the hold began — the
+    // worker's figure from a minute earlier.
+    expect(first.stored).toBe(12_409);
   });
 
-  it('does not hold a healthy worker when the service stream trips', () => {
-    // A parallel stream on the same account must continue through its own
-    // validation. The stored maximum already deduplicates the cumulative total;
-    // applying the service hold to the worker hides valid Health Connect data.
+  it('holds the worker too, even though its own deltas look healthy', () => {
+    // The worker is a second copy of the same steps. Its own history — jittered
+    // by Health Connect's batching — was not yet stuck when the service tripped,
+    // and if it could go through, the hold would have refused nothing.
     const day = runDay(SEP12);
-    const first = day.find(s => s.stuck);
-    const holderSource = day.find(s => s.stuck).source;
-    const otherSource = holderSource === 'worker' ? 'native_service' : 'worker';
-    const heldOther = day.filter((s) => s.source === otherSource && s.stuck);
-    const healthyOther = day.filter(s => s.source === otherSource);
-    expect(heldOther).toHaveLength(0);
-    expect(healthyOther.some(s => s.stored > first.stored)).toBe(true);
+    const heldWorker = day.filter((s) => s.source === 'worker' && s.stuck);
+    expect(heldWorker.length).toBeGreaterThan(0);
+    expect(heldWorker.every((s) => s.stored === 12_409)).toBe(true);
+    expect(heldWorker.every((s) => s.severity === 'stuck_source')).toBe(true);
   });
 
-  it('releases the holder without blocking the other stream', () => {
+  it('releases only when the service varies, and keeps what it reported meanwhile', () => {
     const day = runDay(SEP12);
     const release = day.find((s) => s.released);
-    expect(release).toBeDefined();
-    expect(release.stuck).toBe(false);
-    const holderSource = day.find(s => s.stuck).source;
-    expect(day.some(s => s.source !== holderSource && !s.stuck && s.stored > 12_409)).toBe(true);
+    // The first delta that was not 2,250: 24,057 → 26,187.
+    expect(release).toMatchObject({ at: '2026-09-12T05:52:07Z', source: 'native_service' });
+    // Everything the service reported while held — from the 12,409 the day was
+    // frozen at up to its last held figure of 24,057 — is set aside.
+    expect(release.forfeit).toBe(24_057 - 12_409);
+    // The releasing delta itself is accepted: it is the first measurement.
+    expect(release.stored).toBe(12_409 + (26_187 - 24_057));
   });
 
-  it('reads later figures net of the holder forfeit only on that stream', () => {
+  it('reads every later figure net of the forfeit, from either stream', () => {
     const day = runDay(SEP12);
     const after = day.filter((s) => s.at > '2026-09-12T05:52:07Z');
     expect(after.every((s) => !s.stuck)).toBe(true);
-    expect(after.some(s => s.source === 'native_service' && s.stored >= 26_000)).toBe(true);
-    expect(day.at(-1).stored).toBeGreaterThan(26_000);
+    expect(after.map((s) => s.stored)).toEqual([
+      26_221 - 11_648, // worker
+      26_306 - 11_648, // service
+      26_367 - 11_648, // service
+    ]);
+    // Unguarded, the day closed at 26,367.
+    expect(day.at(-1).stored).toBe(14_719);
   });
 
   it('leaves a real walker on two streams alone', () => {
@@ -2348,6 +2351,7 @@ describe('resolveDayHold', () => {
       stuckSource: null,
       stuckSince: null,
       stuckForfeit: 0,
+      closed: false,
     });
   });
 });
@@ -2425,5 +2429,329 @@ describe('stuck source — a re-send is not a sample', () => {
     expect(r.stuck).toBe(false);
     expect(r.cadenceStreak).toBe(2);
     expect(r.lastIncomingAt).toBe(T0);
+  });
+});
+
+describe('stuck source — a pattern the account was already held for', () => {
+  const {
+    selectPriorStuckSamples,
+    BASELINE_FLOOR,
+    STUCK_RATE_SAMPLES: RATE_SAMPLES,
+  } = require('../utils/stepValidation');
+  const min = (n) => n * 60_000;
+  const DAY = min(24 * 60);
+
+  // A real day, rebuilt from the account's cadence samples: the same Xiaomi
+  // 23049PCD8I, ~150 steps/min on both streams from 08:00 local, service and
+  // worker a few minutes apart. The worker's first stretch was held from 09:30,
+  // the service's from 13:19 to 18:50 local, with a pause and four short breaks
+  // between. Sub-500 figures between samples are inferred from the next
+  // sample's window. Its ceiling was the 15,000 floor, and the day closed on it.
+  // [ISO time, raw client total, X-Client-Source]
+  const SEP23 = [
+    ['2026-09-23T02:03:15Z',     33, 'worker'],
+    ['2026-09-23T02:14:47Z',     91, 'app'],
+    ['2026-09-23T02:18:03Z',     91, 'native_service'],
+    ['2026-09-23T02:30:04Z',  1_559, 'worker'],
+    ['2026-09-23T02:33:06Z',  2_119, 'native_service'],
+    ['2026-09-23T02:44:58Z',  3_819, 'worker'],
+    ['2026-09-23T02:48:08Z',  4_379, 'native_service'],
+    ['2026-09-23T03:00:11Z',  6_069, 'worker'],
+    ['2026-09-23T03:03:12Z',  6_639, 'native_service'],
+    ['2026-09-23T03:15:11Z',  8_319, 'worker'],
+    ['2026-09-23T03:18:14Z',  8_889, 'native_service'],
+    ['2026-09-23T03:30:04Z', 10_559, 'worker'],
+    ['2026-09-23T03:33:17Z', 11_139, 'native_service'],
+    ['2026-09-23T03:44:58Z', 12_799, 'worker'],
+    ['2026-09-23T03:48:20Z', 13_389, 'native_service'],
+    ['2026-09-23T04:00:04Z', 15_049, 'worker'],
+    ['2026-09-23T04:03:23Z', 15_639, 'native_service'],
+    ['2026-09-23T04:14:53Z', 17_289, 'worker'],
+    ['2026-09-23T04:18:26Z', 17_889, 'native_service'],
+    ['2026-09-23T04:30:03Z', 19_529, 'worker'],
+    ['2026-09-23T04:33:29Z', 20_139, 'native_service'],
+    ['2026-09-23T04:44:57Z', 21_769, 'worker'],
+    ['2026-09-23T04:48:32Z', 22_389, 'native_service'],
+    ['2026-09-23T05:00:01Z', 24_019, 'worker'],
+    ['2026-09-23T05:03:36Z', 24_649, 'native_service'],
+    ['2026-09-23T05:14:54Z', 26_279, 'worker'],
+    ['2026-09-23T05:18:37Z', 26_909, 'native_service'],
+    ['2026-09-23T05:29:59Z', 28_519, 'worker'],
+    ['2026-09-23T05:33:40Z', 28_520, 'native_service'],
+    ['2026-09-23T05:48:48Z', 28_554, 'native_service'],
+    ['2026-09-23T06:03:51Z', 29_082, 'native_service'],
+    ['2026-09-23T06:18:56Z', 30_984, 'native_service'],
+    ['2026-09-23T06:30:02Z', 28_660, 'worker'],
+    ['2026-09-23T06:33:59Z', 31_633, 'native_service'],
+    ['2026-09-23T06:44:55Z', 30_890, 'worker'],
+    ['2026-09-23T06:49:03Z', 33_943, 'native_service'],
+    ['2026-09-23T06:59:45Z', 33_190, 'worker'],
+    ['2026-09-23T07:04:06Z', 36_133, 'native_service'],
+    ['2026-09-23T07:14:46Z', 33_873, 'worker'],
+    ['2026-09-23T07:19:08Z', 36_236, 'native_service'],
+    ['2026-09-23T07:34:13Z', 38_022, 'native_service'],
+    ['2026-09-23T07:49:15Z', 40_322, 'native_service'],
+    ['2026-09-23T08:04:16Z', 42_622, 'native_service'],
+    ['2026-09-23T08:19:20Z', 44_932, 'native_service'],
+    ['2026-09-23T08:34:22Z', 47_232, 'native_service'],
+    ['2026-09-23T08:49:25Z', 49_532, 'native_service'],
+    ['2026-09-23T09:04:26Z', 51_822, 'native_service'],
+    ['2026-09-23T09:19:30Z', 54_122, 'native_service'],
+    ['2026-09-23T09:34:36Z', 56_422, 'native_service'],
+    ['2026-09-23T09:49:39Z', 58_722, 'native_service'],
+    ['2026-09-23T10:04:43Z', 61_022, 'native_service'],
+    ['2026-09-23T10:19:51Z', 63_178, 'native_service'],
+    ['2026-09-23T10:34:56Z', 64_586, 'native_service'],
+    ['2026-09-23T10:49:59Z', 66_886, 'native_service'],
+    ['2026-09-23T11:05:03Z', 69_176, 'native_service'],
+    ['2026-09-23T11:20:05Z', 71_456, 'native_service'],
+    ['2026-09-23T11:35:07Z', 73_736, 'native_service'],
+    ['2026-09-23T11:50:08Z', 76_016, 'native_service'],
+    ['2026-09-23T12:05:10Z', 78_296, 'native_service'],
+    ['2026-09-23T12:20:13Z', 80_576, 'native_service'],
+    ['2026-09-23T12:35:16Z', 82_856, 'native_service'],
+    ['2026-09-23T12:50:19Z', 85_136, 'native_service'],
+    ['2026-09-23T13:05:22Z', 87_416, 'native_service'],
+    ['2026-09-23T13:20:26Z', 89_010, 'native_service'],
+    ['2026-09-23T14:55:54Z', 49_897, 'worker'],
+    ['2026-09-23T16:13:52Z', 89_283, 'app'],
+    ['2026-09-23T16:28:53Z', 68_286, 'worker'],
+    ['2026-09-23T16:51:14Z', 89_339, 'native_service'],
+    ['2026-09-23T16:58:56Z', 68_286, 'worker'],
+  ];
+
+  /**
+   * The controller's wiring — per-stream tracker with the carried samples,
+   * the day hold with its closed flag, the forfeit, validateSteps — carrying
+   * exactly the state the row would, at the account's own ceiling.
+   */
+  const runDay = (syncs, { prior = [], date = '2026-09-23' } = {}) => {
+    let stored = 0;
+    let streams = {};
+    let held = { by: null, since: null, forfeit: 0, closed: false };
+    const day = [];
+    try {
+      for (const [iso, raw, source] of syncs) {
+        const at = new Date(iso);
+        jest.setSystemTime(at);
+        const cadence = track({
+          incomingSteps: raw,
+          at,
+          ...(streams[source] || {}),
+          priorSamples: prior,
+        });
+        const hold = resolveDayHold({
+          source, cadence, streams,
+          heldBy: held.by, heldSince: held.since, forfeit: held.forfeit, closed: held.closed,
+          existingWalked: stored, at,
+        });
+        const r = validateSteps({
+          ...base,
+          incomingSteps: Math.max(0, raw - hold.stuckForfeit),
+          existingSteps: stored,
+          syncDate: date,
+          stepBaseline: BASELINE_FLOOR,
+          cadence: { ...cadence, stuck: hold.stuck, stuckReason: hold.stuckReason },
+        });
+        if (r.clampedSteps > stored) stored = r.clampedSteps;
+        streams = { ...streams, [source]: persisted(cadence) };
+        held = {
+          by: hold.stuckSource, since: hold.stuckSince,
+          forfeit: hold.stuckForfeit, closed: hold.closed,
+        };
+        day.push({
+          at: iso, source, raw, stored, ownStuck: cadence.stuck,
+          stuck: hold.stuck, released: hold.released, closed: hold.closed,
+          severity: r.severity, reason: hold.stuckReason,
+        });
+      }
+    } finally {
+      jest.setSystemTime(FROZEN_NOW);
+    }
+    return { day, streams };
+  };
+
+  const shiftSyncs = (syncs, by) =>
+    syncs.map(([iso, raw, source]) => [new Date(new Date(iso).getTime() + by).toISOString(), raw, source]);
+
+  /** A day's streams as the next day's store reads them off its row. */
+  const asRow = (streams) => ({
+    cadenceBySource: Object.fromEntries(
+      Object.entries(streams).map(([key, state]) => [key, { samples: state.samples || [] }]),
+    ),
+  });
+
+  // The account did the same thing the day before. Nothing about the device
+  // changes overnight, so yesterday is today's own figures a day earlier.
+  const carriedFromYesterday = () =>
+    selectPriorStuckSamples([asRow(runDay(shiftSyncs(SEP23, -DAY), { date: '2026-09-22' }).streams)]);
+
+  it('on its own, still pays for the ninety minutes it takes to see', () => {
+    const { day } = runDay(SEP23);
+    const first = day.find((s) => s.stuck);
+    expect(first).toMatchObject({ at: '2026-09-23T04:00:04Z', source: 'worker', stored: 13_389 });
+    expect(day.some((s) => s.closed)).toBe(false);
+    // The floor, which is also the goal and then some.
+    expect(day.at(-1).stored).toBe(BASELINE_FLOOR);
+  });
+
+  it('carries a stream that kept going for another ninety minutes after its hold', () => {
+    const prior = carriedFromYesterday();
+    expect(prior.length).toBeGreaterThanOrEqual(RATE_SAMPLES);
+    expect(prior.every((s) => s.rate > 140 && s.rate < 160)).toBe(true);
+    expect(prior.every((s) => s.at < new Date('2026-09-23T00:00:00Z').getTime())).toBe(true);
+    // Oldest first, whatever order the streams were read in.
+    expect(prior.map((s) => s.at)).toEqual([...prior.map((s) => s.at)].sort((a, b) => a - b));
+  });
+
+  it('reads a hydrated row the same as a lean one', () => {
+    const row = asRow(runDay(shiftSyncs(SEP23, -DAY), { date: '2026-09-22' }).streams);
+    const hydrated = { cadenceBySource: new Map(Object.entries(row.cadenceBySource)) };
+    expect(selectPriorStuckSamples([hydrated])).toEqual(selectPriorStuckSamples([row]));
+  });
+
+  it('carries nothing from a hold released by stepping off the treadmill', () => {
+    const T0 = new Date('2026-09-22T11:00:00Z').getTime();
+    const window = (i, stuck) => ({
+      delta: 1_800 + (i % 2) * 10, rate: 120 + (i % 2) * 0.7,
+      from: T0 + min(i * 15), at: T0 + min(i * 15 + 15), stuck,
+    });
+    // Ninety minutes of evidence, one refused window, then the cadence changed.
+    const treadmill = [...Array.from({ length: 6 }, (_, i) => window(i, i === 5)), window(6, true)];
+    expect(selectPriorStuckSamples([{ cadenceBySource: { native_service: { samples: treadmill } } }]))
+      .toEqual([]);
+
+    // Enough refusals, but only half an hour of them — a burst of rapid syncs.
+    const burst = Array.from({ length: RATE_SAMPLES }, (_, i) => ({
+      delta: 600, rate: 120, from: T0 + min(i * 5), at: T0 + min(i * 5 + 5), stuck: true,
+    }));
+    expect(selectPriorStuckSamples([{ cadenceBySource: { app: { samples: burst } } }])).toEqual([]);
+  });
+
+  it('refuses the first return to the band the next morning, and closes the day', () => {
+    const { day } = runDay(SEP23, { prior: carriedFromYesterday() });
+    const first = day.find((s) => s.stuck);
+    // The worker's second window, the first at the device's rate. Only the two
+    // partial windows before it were accepted.
+    expect(first).toMatchObject({
+      at: '2026-09-23T02:44:58Z',
+      source: 'worker',
+      stored: 2_119,
+      closed: true,
+      severity: 'stuck_source',
+    });
+    expect(first.reason).toMatch(/earlier days/);
+
+    const after = day.filter((s) => s.at >= first.at);
+    expect(after.every((s) => s.stuck && s.closed && s.severity === 'stuck_source')).toBe(true);
+    expect(after.some((s) => s.released)).toBe(false);
+    expect(day.at(-1).stored).toBe(2_119);
+  });
+
+  it('does not reopen when the device pauses, or when the holder goes quiet', () => {
+    const { day } = runDay(SEP23, { prior: carriedFromYesterday() });
+    const first = day.find((s) => s.stuck);
+    // Every figure the device's own stream did not call stuck — its breaks —
+    // and the worker's return after six hours of silence, which an ordinary
+    // hold would have let release it.
+    const quiet = day.filter((s) => s.at > first.at && !s.ownStuck);
+    expect(quiet.map((s) => s.at)).toEqual(
+      expect.arrayContaining(['2026-09-23T07:14:46Z', '2026-09-23T13:20:26Z', '2026-09-23T14:55:54Z']),
+    );
+    expect(quiet.every((s) => s.stuck && !s.released && s.stored === 2_119)).toBe(true);
+    expect(day.find((s) => s.at === '2026-09-23T14:55:54Z').reason).toMatch(/day closed/);
+  });
+
+  it('leaves a person walking the next day alone', () => {
+    // Deltas that vary the way a person does, on both streams, the morning
+    // after the account was held all day at ~150 steps/min.
+    const T0 = new Date('2026-09-23T03:00:00Z').getTime();
+    const gains = [900, 1_400, 300, 1_700, 650, 1_100, 2_000, 400, 1_250, 800, 1_500, 200, 1_800, 950];
+    let live = 0;
+    const syncs = [];
+    gains.forEach((g, i) => {
+      live += g;
+      syncs.push([new Date(T0 + min(i * 15 + 11)).toISOString(), Math.max(0, live - 80), 'worker']);
+      syncs.push([new Date(T0 + min(i * 15 + 15)).toISOString(), live, 'native_service']);
+    });
+    const { day } = runDay(syncs, { prior: carriedFromYesterday() });
+    expect(day.some((s) => s.stuck)).toBe(false);
+    expect(day.at(-1).stored).toBe(live);
+  });
+
+  it('judges carried samples as evidence only, never as today’s history', () => {
+    const T0 = new Date('2026-09-23T02:30:00Z').getTime();
+    const prior = Array.from({ length: RATE_SAMPLES }, (_, i) => ({
+      delta: 2_250 + (i % 3) * 10,
+      rate: 150 + (i % 3) * 0.6,
+      from: T0 - DAY + min(i * 15),
+      at: T0 - DAY + min(i * 15 + 15),
+    }));
+    const sync = {
+      incomingSteps: 3_819,
+      at: T0 + min(15),
+      lastIncomingSteps: 1_559,
+      lastIncomingAt: T0,
+      lastIncomingDelta: 1_526,
+      samples: [],
+    };
+
+    const alone = track(sync);
+    expect(alone.stuck).toBe(false);
+
+    const r = track({ ...sync, priorSamples: prior });
+    expect(r).toMatchObject({ stuck: true, recurrent: true });
+    expect(r.stuckReason).toMatch(/6 samples were refused in as a stuck source on earlier days/);
+    expect(r.samples).toHaveLength(1);
+    expect(r.samples[0].total).toBe(3_819);
+  });
+
+  it('closes the day only on a verdict resting on earlier days', () => {
+    const T0 = new Date('2026-09-23T02:44:58Z').getTime();
+    const ordinary = resolveDayHold({
+      source: 'worker',
+      cadence: { stuck: true, stuckReason: '+2250 steps reported 4 times in a row', recurrent: false },
+      existingWalked: 2_119,
+      at: T0,
+    });
+    expect(ordinary).toMatchObject({ stuck: true, closed: false });
+
+    const recurrent = resolveDayHold({
+      source: 'worker',
+      cadence: { stuck: true, stuckReason: 'the pattern this account was already held for', recurrent: true },
+      existingWalked: 2_119,
+      at: T0,
+    });
+    expect(recurrent).toMatchObject({
+      stuck: true, closed: true, stuckSource: 'worker', stuckSince: T0, released: false,
+    });
+  });
+
+  it('nothing releases a closed day', () => {
+    const T0 = new Date('2026-09-23T02:44:58Z').getTime();
+    const closedDay = { heldBy: 'worker', heldSince: T0, closed: true, existingWalked: 2_119 };
+
+    // The holder varies — an ordinary hold's release.
+    const varied = resolveDayHold({
+      source: 'worker',
+      cadence: { stuck: false, stuckReason: null },
+      streams: { worker: { lastIncomingSteps: 33_190, lastIncomingAt: T0 + min(255) } },
+      ...closedDay,
+      at: T0 + min(270),
+    });
+    expect(varied).toMatchObject({
+      stuck: true, released: false, closed: true, stuckSource: 'worker', stuckForfeit: 0,
+    });
+
+    // The holder has gone quiet and another stream posts — the stale release.
+    const stale = resolveDayHold({
+      source: 'native_service',
+      cadence: { stuck: false, stuckReason: null },
+      streams: { worker: { lastIncomingSteps: 33_873, lastIncomingAt: T0 + min(270) } },
+      ...closedDay,
+      at: T0 + min(270) + min(HOLD_STALE_MIN * 5),
+    });
+    expect(stale).toMatchObject({ stuck: true, released: false, closed: true, stuckSource: 'worker' });
+    expect(stale.stuckReason).toMatch(/day closed \d+ min ago, when the worker stream returned/);
   });
 });

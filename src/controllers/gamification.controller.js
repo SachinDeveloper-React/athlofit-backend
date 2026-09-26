@@ -13,6 +13,8 @@ const { sendPushToUser } = require('../utils/pushNotification');
 const { createNotification } = require('../utils/createNotification');
 const { logCoinTransaction } = require('../utils/logCoinTransaction');
 const { isCoinBlocked } = require('../utils/cheatPenalty');
+const { isStepCoinSettlementEnabled } = require('../utils/stepCoinSettlement');
+const { logStepCoinAward, pendingCoinsFor } = require('../utils/pendingCoins');
 const {
   isStepsTrackingEnabled,
   stepsTrackingStatus,
@@ -51,13 +53,19 @@ const migrateAndSave = async (gam) => {
 // ─── GET /gamification/me ─────────────────────────────────────────────────────
 const getGamification = async (req, res, next) => {
   try {
-    const gam = await ensureGamDoc(req.user._id);
+    const [gam, coinsPending] = await Promise.all([
+      ensureGamDoc(req.user._id),
+      pendingCoinsFor(req.user._id),
+    ]);
 
     // ── Anti-cheat: include coin block status ────────────────────────────────
     const coinBlockStatus = isCoinBlocked(req.user);
 
     return success(res, 'Gamification data fetched', {
       coinsBalance: gam.coinsBalance,
+      // Step coins earned and waiting for their day to be verified — see
+      // utils/stepCoinSettlement.js. Not spendable, and not in the balance.
+      coinsPending,
       streakDays: gam.streakDays,
       bestStreakDays: gam.bestStreakDays,
       lastActiveDate: gam.lastActiveDate,
@@ -220,6 +228,7 @@ const earnCoins = async (req, res, next) => {
     // Atomic AND cap-safe — see awardCappedCoins for why a stale-read `$inc`
     // guarded only by stepGoalCoinDate isn't enough on its own.
     const MAX_DAILY_COINS = getEffectiveDailyCap(req.user, cfg.coin.maxDailyRewards, cfg.coin.unverifiedDailyCap);
+    const settle = isStepCoinSettlementEnabled(cfg);
     const result = await awardCappedCoins(Gamification, {
       userId: req.user._id,
       requested: stepGoalCoins,
@@ -227,6 +236,7 @@ const earnCoins = async (req, res, next) => {
       matchExtra: { stepGoalCoinDate: { $ne: today } },
       setExtra: { stepGoalCoinDate: today },
       historyEntry: { rewardId: 'steps_daily_card', source: 'Daily Step Reward' },
+      creditBalance: !settle,
     });
 
     if (!result) {
@@ -243,21 +253,29 @@ const earnCoins = async (req, res, next) => {
     const awarded = result.gam;
 
     if (actualCoins > 0) {
-      logCoinTransaction({
+      await logStepCoinAward({
+        pending: settle,
         userId: req.user._id,
-        type: 'EARNED',
+        date: today,
         amount: actualCoins,
         balanceAfter: awarded.coinsBalance,
         source: 'DAILY_STEP_GOAL',
         description: `Daily Step Reward — ${actualCoins} coins`,
-        metadata: { rewardId: 'steps_daily_card', date: today, steps: todaySteps },
+        metadata: { rewardId: 'steps_daily_card', date: today, steps: todaySteps, goal: dailyGoal },
       });
     }
 
-    return success(res, `Earned ${actualCoins} coins`, {
-      coinsBalance: awarded.coinsBalance,
-      coinsEarnedToday: awarded.coinsEarnedToday,
-    });
+    return success(
+      res,
+      settle
+        ? `${actualCoins} coins will be added once today's steps are verified`
+        : `Earned ${actualCoins} coins`,
+      {
+        coinsBalance: awarded.coinsBalance,
+        coinsEarnedToday: awarded.coinsEarnedToday,
+        ...(settle ? { coinsPendingAdded: actualCoins } : {}),
+      },
+    );
   } catch (err) {
     next(err);
   }
@@ -431,6 +449,10 @@ const getCoinData = async (req, res, next) => {
 
     return success(res, 'Coin data fetched', {
       balance: gam.coinsBalance,
+      // Step coins earned and waiting for their day to be verified, and whether
+      // new step coins wait at all — so the screen can say when they arrive.
+      coinsPending: await pendingCoinsFor(userId),
+      stepCoinSettlement: isStepCoinSettlementEnabled(cfg),
       transactions,
       claimable,
       pagination: {
@@ -579,6 +601,11 @@ const claimReward = async (req, res, next) => {
     let actualCoins;
     let updatedGam;
 
+    // Only the step goal is a step coin; water and streak badges are paid now
+    // whatever the mode. See utils/stepCoinSettlement.js.
+    const pendingSettlement =
+      rewardId === 'steps_daily' && isStepCoinSettlementEnabled(cfg);
+
     if (rewardDef.bypassDailyCap) {
       updatedGam = await Gamification.findOneAndUpdate(
         {
@@ -608,6 +635,7 @@ const claimReward = async (req, res, next) => {
         matchExtra: { [rewardDef.idempotencyField]: { $ne: today } },
         setExtra: { [rewardDef.idempotencyField]: today },
         historyEntry: { rewardId, source: rewardDef.title },
+        creditBalance: !pendingSettlement,
       });
       if (!result) return error(res, 'Reward already claimed', 400);
       updatedGam = result.gam;
@@ -620,9 +648,10 @@ const claimReward = async (req, res, next) => {
       hydration_daily: 'HYDRATION_GOAL',
     };
     const txSource = sourceMap[rewardId] || (rewardId.startsWith('streak_') ? 'STREAK_BADGE' : 'MANUAL');
-    logCoinTransaction({
+    await logStepCoinAward({
+      pending: pendingSettlement,
       userId,
-      type: 'EARNED',
+      date: today,
       amount: actualCoins,
       balanceAfter: updatedGam.coinsBalance,
       source: txSource,
@@ -631,6 +660,7 @@ const claimReward = async (req, res, next) => {
         rewardId,
         date: today,
         badgeKey: rewardId.startsWith('streak_') ? rewardId.replace('streak_', '') : undefined,
+        ...(rewardId === 'steps_daily' ? { steps: todaySteps, goal: dailyGoal } : {}),
       },
     });
 
@@ -644,7 +674,9 @@ const claimReward = async (req, res, next) => {
       notificationMessage = `Amazing! You've completed your daily water intake goal. Keep yourself hydrated! 🌊`;
     } else if (rewardId === 'steps_daily') {
       notificationTitle = '🎯 Daily Goal Completed!';
-      notificationMessage = `Congratulations! You crushed your daily step goal and earned ${actualCoins} coins. Keep moving! 🚶‍♂️`;
+      notificationMessage = pendingSettlement
+        ? `Congratulations! You crushed your daily step goal. ${actualCoins} coins will be added tomorrow once today's steps are verified. 🚶‍♂️`
+        : `Congratulations! You crushed your daily step goal and earned ${actualCoins} coins. Keep moving! 🚶‍♂️`;
     } else if (rewardId.startsWith('streak_')) {
       notificationTitle = '🔥 Streak Milestone!';
       notificationMessage = `Incredible! You've maintained your ${gam.streakDays}-day streak and earned ${actualCoins} coins. You're unstoppable! 💪`;
@@ -657,10 +689,17 @@ const claimReward = async (req, res, next) => {
       data:    { screen: 'Tracker' },
     });
 
-    return success(res, `Claimed ${actualCoins} coins!`, {
-      newBalance: updatedGam.coinsBalance,
-      rewardId,
-    });
+    return success(
+      res,
+      pendingSettlement
+        ? `${actualCoins} coins will be added once today's steps are verified`
+        : `Claimed ${actualCoins} coins!`,
+      {
+        newBalance: updatedGam.coinsBalance,
+        rewardId,
+        ...(pendingSettlement ? { coinsPendingAdded: actualCoins } : {}),
+      },
+    );
   } catch (err) {
     next(err);
   }

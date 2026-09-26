@@ -38,6 +38,7 @@ jest.mock('../models/MealLog.model', () => mockMakeModel('MealLog'));
 jest.mock('../models/NutritionPreference.model', () => mockMakeModel('NutritionPreference'));
 jest.mock('../models/SearchLog.model', () => mockMakeModel('SearchLog'));
 jest.mock('../models/CoinTransaction.model', () => mockMakeModel('CoinTransaction'));
+jest.mock('../models/PendingCoin.model', () => mockMakeModel('PendingCoin'));
 jest.mock('../models/Gamification.model', () => mockMakeModel('Gamification'));
 jest.mock('../models/UserChallenge.model', () => mockMakeModel('UserChallenge'));
 jest.mock('../models/Notification.model', () => mockMakeModel('Notification'));

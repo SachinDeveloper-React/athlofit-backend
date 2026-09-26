@@ -34,6 +34,7 @@ const BonusSteps = require('../models/BonusSteps.model');
 const Referral = require('../models/Referral.model');
 const Order = require('../models/Order.model');
 const SupportTicket = require('../models/SupportTicket.model');
+const PendingCoin = require('../models/PendingCoin.model');
 const { deleteImage } = require('./uploadImage');
 
 const REDACTED = 'REDACTED';
@@ -47,6 +48,7 @@ const OWNED_BY_USER = [
   ['nutritionPreferences', NutritionPreference],
   ['searchLogs', SearchLog],
   ['coinTransactions', CoinTransaction],
+  ['pendingCoins', PendingCoin],
   ['gamification', Gamification],
   ['userChallenges', UserChallenge],
   ['notifications', Notification],

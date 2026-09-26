@@ -13,7 +13,9 @@
 //   1. Absolute daily cap.
 //   2. Stuck-source rule: a device reporting a constant rather than a
 //      measurement is held where it is. Judged per client stream, and a hold
-//      covers the whole day — see the note at HOLD_STALE_MIN.
+//      covers the whole day — see the note at HOLD_STALE_MIN. A pattern the
+//      account was already held for on an earlier day is refused on its first
+//      return and closes the day — see the note at PRIOR_STUCK_DAYS.
 //      Shared-source rule: a counter that is also feeding an older account is
 //      held where it is, for the day. Decided outside this file, in
 //      utils/sharedStepSource.js, because it needs other accounts' rows; this
@@ -241,6 +243,62 @@ const STUCK_RATE_MIN_WINDOW_MIN = 2;
  */
 const MAX_CADENCE_SAMPLES = 192;
 
+// ── Evidence that survives midnight ─────────────────────────────────────────
+//
+// The day-wide detectors above still started every day from nothing, and that
+// turned the evidence window into a daily allowance. One account (23 Sep, the
+// same Xiaomi 23049PCD8I) ran ~150 steps/min on both streams from 08:00 local;
+// the band completed at 09:30, by which time 13,389 steps had been accepted,
+// and the baseline floor let the day close at 15,000 — goal met, coins paid.
+// Every 15-minute window after that was refused, 72,416 raw steps in all — and
+// nothing about the next morning would have been different: ninety minutes of
+// a pattern the account had already been caught producing, credited fresh each
+// day.
+//
+// The reasoning that made the evidence day-wide was that a counter measuring
+// elapsed time does not keep returning to the same rate, to the step. A device
+// that returns to it the next morning has still done so. So the samples a
+// stream was REFUSED on over the last PRIOR_STUCK_DAYS are carried into the
+// next day and judged alongside that day's own: the first sample that lands
+// back in a band the account was already held for is refused at once, instead
+// of after another ninety minutes of it.
+//
+// Only a hold that was unmistakable is carried. A day qualifies when one
+// stream was refused on at least STUCK_RATE_SAMPLES samples spanning
+// STUCK_RATE_MIN_SPAN_MIN — that is, the pattern kept going for another full
+// evidence span AFTER the hold began, three hours of invariant cadence in all.
+// A treadmill session that trips the rule is released by stepping off it and
+// carries nothing; a device on a swing all day carries its whole band. And a
+// carried band still only refuses samples that fall inside it: walking that
+// varies the way a person does is unaffected, the day after a hold or any day.
+//
+// ── What a recurrence does to the rest of the day ───────────────────────────
+//
+// An ordinary hold releases on the first sample that varies, and accepts that
+// sample as the first measurement since. Replayed with the carried band alone,
+// the same day still closed at 7,919, because every sample that "varied" was
+// the device's own partial window — stopping, restarting, a gap — at 683,
+// 1,786, 1,408 and 1,594 steps, each accepted, and each followed straight back
+// by the band. For an account caught once, a varying sample is some evidence of
+// a person. For an account whose device has just returned to the pattern it
+// was already held for, it is none: the device is running today, and its idle
+// windows look exactly like walking.
+//
+// So a hold that rests on carried evidence CLOSES the day. It stands for every
+// stream until midnight, and neither the holder varying nor the holder going
+// quiet releases it. Steps accepted before the pattern returned still count;
+// nothing after it does. Replayed, the same day closes at 2,119 — the two
+// partial windows before the first return — instead of 15,000.
+//
+// The cost falls only on an account that was held for three hours of invariant
+// cadence within the last week AND is back in that same band today: walking it
+// genuinely does later that day is not counted. The row says so
+// (`stuckClosed`), and an admin can credit it back.
+/** Trailing days whose refused samples are carried forward. */
+const PRIOR_STUCK_DAYS = 7;
+/** Most carried samples judged per day; the newest are kept. */
+const MAX_PRIOR_STUCK_SAMPLES = 96;
+
 // ── One phone, two streams ──────────────────────────────────────────────────
 //
 // Both detectors above follow "the client's" raw totals across syncs, and the
@@ -436,14 +494,20 @@ function computeStepBaseline(recentDailyWalked) {
  * @param {Array<{delta: number, rate: number|null, from: number|Date|null,
  *   at: number|Date, stuck: boolean}>} [params.samples] - Every sample this
  *   stream produced today, oldest first, as returned by the previous call.
+ * @param {Array<{delta: number, rate: number|null, from: number|Date|null,
+ *   at: number|Date}>} [params.priorSamples] - Samples refused on earlier days,
+ *   from selectPriorStuckSamples(). Judged as evidence alongside `samples`, never
+ *   returned in the new history.
  * @returns {{ delta: number, rate: number|null, stuck: boolean, stuckReason: string|null,
  *   lastIncomingSteps: number, lastIncomingAt: number, lastIncomingDelta: number,
  *   repeatedDeltaCount: number, cadenceStreak: number, cadenceRateMin: number|null,
  *   cadenceRateMax: number|null, cadenceStreakAt: number|null,
  *   samples: Array<{delta: number, rate: number|null, from: number|null, at: number, stuck: boolean, total: number}>,
- *   sample: {delta: number, rate: number|null, from: number|null, at: number, stuck: boolean, total: number}|null }}
+ *   sample: {delta: number, rate: number|null, from: number|null, at: number, stuck: boolean, total: number}|null,
+ *   recurrent: boolean }}
  *   `sample` is the one this call recorded, or null when the sync was not one
- *   (a re-send, a drop, a gain too small to say anything).
+ *   (a re-send, a drop, a gain too small to say anything). `recurrent` is true
+ *   when the stuck verdict rests on `priorSamples` — see resolveDayHold.
  */
 function trackClientCadence({
   incomingSteps,
@@ -457,6 +521,7 @@ function trackClientCadence({
   cadenceRateMax = null,
   cadenceStreakAt = null,
   samples = [],
+  priorSamples = [],
 }) {
   const ms = v => (v == null ? null : new Date(v).getTime());
   const incoming = Math.round(Number(incomingSteps) || 0);
@@ -464,16 +529,13 @@ function trackClientCadence({
 
   // Today's samples as plain numbers, whatever shape the caller stored them in.
   // Anything unreadable is dropped rather than allowed to poison a comparison.
-  const history = (Array.isArray(samples) ? samples : [])
-    .map(s => ({
-      delta: Math.round(Number(s?.delta)),
-      rate: s?.rate == null ? null : Number(s.rate),
-      from: ms(s?.from),
-      at: ms(s?.at),
-      stuck: Boolean(s?.stuck),
-      total: s?.total == null ? null : Math.round(Number(s.total)),
-    }))
-    .filter(s => Number.isFinite(s.delta) && s.at != null);
+  const history = readSamples(samples);
+
+  // Refused samples carried in from earlier days — see the note at
+  // PRIOR_STUCK_DAYS. Evidence for the day-wide detectors only: they never
+  // join today's history, so they are not persisted back, cannot be mistaken
+  // for today's totals, and do not decide what a small sync inherits.
+  const prior = readSamples(priorSamples).map(s => ({ ...s, prior: true }));
 
   /** No streak of either kind. Used wherever the evidence has to start over. */
   const cleared = {
@@ -488,6 +550,7 @@ function trackClientCadence({
     sample: null,
     stuck: false,
     stuckReason: null,
+    recurrent: false,
   };
 
   // No previous raw total to measure against — the first sync of a day, or a row
@@ -546,6 +609,7 @@ function trackClientCadence({
       sample: null,
       stuck: heldStuck,
       stuckReason: heldReason,
+      recurrent: false,
     };
   }
 
@@ -589,6 +653,7 @@ function trackClientCadence({
       sample: null,
       stuck: heldStuck,
       stuckReason: heldReason,
+      recurrent: false,
     };
   }
 
@@ -651,28 +716,58 @@ function trackClientCadence({
   // a steady stretch, which is the "sample count is not a unit" problem the
   // rate rule already answered with a span. Samples with no clock never
   // contribute here, so a caller that supplies none keeps the old behaviour.
-  const sameDeltaBefore = history.filter(s => s.delta === delta);
-  const sameDeltaToday = sameDeltaBefore.length;
+  //
+  // Carried samples count exactly like today's, and a match that includes one
+  // needs no span of its own: the pattern was already watched for far longer
+  // than the span asks, on the day it was carried from. That is also what lets
+  // the settlement replay a day with hindsight (utils/stepCoinSettlement.js),
+  // passing the day's own later refusals as carried evidence — their windows
+  // lie AHEAD of the sample being judged, so no span could be measured from
+  // them anyway.
+  const evidence = [...prior, ...history];
+  const sameDeltaBefore = evidence.filter(s => s.delta === delta);
+  const sameDeltaSeen = sameDeltaBefore.length;
+  const sameDeltaPrior = sameDeltaBefore.filter(s => s.prior).length;
   const sameDeltaStarts = sameDeltaBefore.map(s => s.from).filter(v => v != null);
   const sameDeltaSpanMinutes = sameDeltaStarts.length
     ? (now - Math.min(...sameDeltaStarts)) / 60_000
     : 0;
   const dayDeltaStuck =
-    sameDeltaToday >= STUCK_DELTA_REPEATS &&
-    sameDeltaSpanMinutes >= STUCK_RATE_MIN_SPAN_MIN;
+    sameDeltaSeen >= STUCK_DELTA_REPEATS &&
+    (sameDeltaPrior > 0 || sameDeltaSpanMinutes >= STUCK_RATE_MIN_SPAN_MIN);
 
-  const band = rate == null ? null : recurringRateBand(history, rate, prevAt);
+  const band = rate == null ? null : recurringRateBand(evidence, rate, prevAt);
   const bandSpanMinutes =
     band == null || band.since == null ? 0 : (now - band.since) / 60_000;
   const bandStuck =
     band != null &&
     band.count >= STUCK_RATE_SAMPLES &&
-    bandSpanMinutes >= STUCK_RATE_MIN_SPAN_MIN;
+    (band.prior > 0 || bandSpanMinutes >= STUCK_RATE_MIN_SPAN_MIN);
 
   const stuck = deltaStuck || rateStuck || dayDeltaStuck || bandStuck;
 
+  // Whether the verdict rests on samples this account was refused on EARLIER
+  // days — the same device, back on the same pattern. resolveDayHold closes the
+  // day on it rather than holding until the next sample that varies; see the
+  // note at PRIOR_STUCK_DAYS.
+  const recurrentDelta = dayDeltaStuck && sameDeltaPrior > 0;
+  const recurrentBand = bandStuck && band.prior > 0;
+  const recurrent = recurrentDelta || recurrentBand;
+
+  // A recurrence is reported ahead of everything else, because it is what
+  // decides how the day is treated and it names the earlier days that did.
   let stuckReason = null;
-  if (deltaStuck) {
+  if (recurrentDelta) {
+    stuckReason =
+      `+${delta} steps, identical to the step to ${sameDeltaPrior} samples ` +
+      'refused as a stuck source on earlier days — the pattern this account was ' +
+      'already held for';
+  } else if (recurrentBand) {
+    stuckReason =
+      `${band.min.toFixed(1)}–${band.max.toFixed(1)} steps/min, the band ` +
+      `${band.prior} samples were refused in as a stuck source on earlier days — ` +
+      'the pattern this account was already held for';
+  } else if (deltaStuck) {
     stuckReason =
       `+${delta} steps reported ${repeated + 1} times in a row, identical to ` +
       'the step across differently-sized sync windows';
@@ -684,7 +779,7 @@ function trackClientCadence({
       'which a counter measuring elapsed time does not produce';
   } else if (dayDeltaStuck) {
     stuckReason =
-      `+${delta} steps reported ${sameDeltaToday + 1} times today, identical to ` +
+      `+${delta} steps reported ${sameDeltaSeen + 1} times today, identical to ` +
       'the step across differently-sized sync windows';
   } else if (bandStuck) {
     stuckReason =
@@ -717,6 +812,7 @@ function trackClientCadence({
     sample,
     stuck,
     stuckReason,
+    recurrent,
   };
 }
 
@@ -732,11 +828,13 @@ function trackClientCadence({
  * anchoring on the oldest would make the verdict depend on which sample began
  * the day.
  *
- * @param {Array<{rate: number|null, from: number|null}>} history - Today's earlier samples.
+ * @param {Array<{rate: number|null, from: number|null, prior?: boolean}>} history -
+ *   Today's earlier samples, and any carried in from earlier days.
  * @param {number} rate - This sample's steps/min.
  * @param {number|null} from - When this sample's window opened.
- * @returns {{ count: number, min: number, max: number, since: number|null }}
- *   `count` includes this sample; `since` is the earliest window start in the band.
+ * @returns {{ count: number, min: number, max: number, since: number|null, prior: number }}
+ *   `count` includes this sample; `since` is the earliest window start in the band;
+ *   `prior` is how many of the band's samples were carried in.
  */
 function recurringRateBand(history, rate, from) {
   const spread = (lo, hi) => (lo + hi > 0 ? (hi - lo) / ((lo + hi) / 2) : 0);
@@ -746,8 +844,8 @@ function recurringRateBand(history, rate, from) {
   const points = history
     .filter(s => s.rate != null && Number.isFinite(s.rate) && s.rate > 0)
     .filter(s => spread(Math.min(s.rate, rate), Math.max(s.rate, rate)) <= STUCK_RATE_TOLERANCE)
-    .map(s => ({ rate: s.rate, from: s.from, self: false }));
-  points.push({ rate, from, self: true });
+    .map(s => ({ rate: s.rate, from: s.from, self: false, prior: Boolean(s.prior) }));
+  points.push({ rate, from, self: true, prior: false });
   points.sort((a, b) => a.rate - b.rate);
 
   let best = null;
@@ -771,7 +869,66 @@ function recurringRateBand(history, rate, from) {
     min: best[0].rate,
     max: best[best.length - 1].rate,
     since: starts.length ? Math.min(...starts) : null,
+    prior: best.filter(p => p.prior).length,
   };
+}
+
+/**
+ * Cadence samples as plain numbers, whatever shape the caller stored them in —
+ * Date or epoch, hydrated subdocument or lean object. Anything unreadable is
+ * dropped rather than allowed to poison a comparison.
+ */
+function readSamples(samples) {
+  const ms = v => (v == null ? null : new Date(v).getTime());
+  return (Array.isArray(samples) ? samples : [])
+    .map(s => ({
+      delta: Math.round(Number(s?.delta)),
+      rate: s?.rate == null ? null : Number(s.rate),
+      from: ms(s?.from),
+      at: ms(s?.at),
+      stuck: Boolean(s?.stuck),
+      total: s?.total == null ? null : Math.round(Number(s.total)),
+    }))
+    .filter(s => Number.isFinite(s.delta) && s.at != null);
+}
+
+/**
+ * The refused samples worth carrying into the next day, from earlier days' rows.
+ *
+ * Pure, like computeStepBaseline, so the policy is testable without a database
+ * and the store only decides which rows to read. See the note at
+ * PRIOR_STUCK_DAYS for what qualifies and why.
+ *
+ * Judged per stream per day: a stream qualifies when it was refused on at least
+ * STUCK_RATE_SAMPLES samples spanning STUCK_RATE_MIN_SPAN_MIN that day, and
+ * then all of its refused samples are carried. The streams are pooled, because
+ * they describe the same counter — a device held on the service stream
+ * yesterday is the same device when the worker reports it today.
+ *
+ * @param {Array<{cadenceBySource?: Object<string, {samples?: Array}>|Map}>} rows -
+ *   The account's rows for the trailing days, EXCLUDING the day being written.
+ * @returns {Array<{delta: number, rate: number|null, from: number|null, at: number}>}
+ *   Oldest first, at most MAX_PRIOR_STUCK_SAMPLES.
+ */
+function selectPriorStuckSamples(rows) {
+  const carried = [];
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const map = row?.cadenceBySource;
+    if (!map) continue;
+    const streams =
+      typeof map.values === 'function' ? [...map.values()] : Object.values(map);
+    for (const stream of streams) {
+      const refused = readSamples(stream?.samples).filter(s => s.stuck);
+      if (refused.length < STUCK_RATE_SAMPLES) continue;
+      const starts = refused.map(s => s.from ?? s.at);
+      const span = (Math.max(...refused.map(s => s.at)) - Math.min(...starts)) / 60_000;
+      if (span < STUCK_RATE_MIN_SPAN_MIN) continue;
+      for (const s of refused) {
+        carried.push({ delta: s.delta, rate: s.rate, from: s.from, at: s.at });
+      }
+    }
+  }
+  return carried.sort((a, b) => a.at - b.at).slice(-MAX_PRIOR_STUCK_SAMPLES);
 }
 
 /**
@@ -807,10 +964,13 @@ function cadenceSourceKey(clientSource) {
  * @param {string|null} [params.heldBy] - Stream currently holding the day, if any.
  * @param {number|Date|null} [params.heldSince] - When that hold began.
  * @param {number} [params.forfeit] - Raw steps already set aside on this day.
+ * @param {boolean} [params.closed] - Whether a recurrence has already closed
+ *   this day. See the note at PRIOR_STUCK_DAYS.
  * @param {number} params.existingWalked - Stored walked total (bonus excluded).
  * @param {number|Date} [params.at] - When this sync arrived. Defaults to now.
  * @returns {{ stuck: boolean, stuckReason: string|null, released: boolean,
- *   stuckSource: string|null, stuckSince: number|null, stuckForfeit: number }}
+ *   stuckSource: string|null, stuckSince: number|null, stuckForfeit: number,
+ *   closed: boolean }}
  */
 function resolveDayHold({
   source,
@@ -819,6 +979,7 @@ function resolveDayHold({
   heldBy = null,
   heldSince = null,
   forfeit = 0,
+  closed = false,
   existingWalked,
   at = Date.now(),
 }) {
@@ -830,6 +991,30 @@ function resolveDayHold({
   let since = holder ? ms(heldSince) : null;
   let setAside = Math.max(0, Math.round(Number(forfeit) || 0));
   let released = false;
+  let isClosed = Boolean(closed);
+
+  // ── A day the account's known pattern came back on ───────────────────────
+  // Nothing releases it — not the holder varying, not the holder going quiet,
+  // not another stream. Checked first, so neither release path below can run.
+  if (isClosed) {
+    holder = holder || source;
+    since = since ?? now;
+    const minutesHeld = Math.round((now - since) / 60_000);
+    return {
+      released: false,
+      stuckSource: holder,
+      stuckSince: since,
+      stuckForfeit: setAside,
+      closed: true,
+      stuck: true,
+      stuckReason:
+        cadence?.recurrent && cadence.stuckReason
+          ? cadence.stuckReason
+          : `day closed ${minutesHeld} min ago, when the ${holder} stream returned ` +
+            'to a pattern this account was already held for on an earlier day; ' +
+            'nothing after that is counted today',
+    };
+  }
 
   /**
    * What a stream reported while the day was held: its last raw figure, net of
@@ -867,6 +1052,7 @@ function resolveDayHold({
     stuckSource: holder,
     stuckSince: since,
     stuckForfeit: setAside,
+    closed: isClosed,
   });
 
   // ── This stream's own verdict ────────────────────────────────────────────
@@ -878,6 +1064,10 @@ function resolveDayHold({
       holder = source;
       since = now;
     }
+    // The same device, back on the pattern it was already held for. There is
+    // nothing a later sample could show that would make it measurement again
+    // today, so the day closes — see the note at PRIOR_STUCK_DAYS.
+    if (cadence.recurrent) isClosed = true;
     return { ...state(), stuck: true, stuckReason: cadence.stuckReason || null };
   }
 
@@ -1315,6 +1505,10 @@ module.exports = {
   STUCK_RATE_MIN_SPAN_MIN,
   STUCK_RATE_MIN_WINDOW_MIN,
   MAX_CADENCE_SAMPLES,
+  selectPriorStuckSamples,
+  readSamples,
+  PRIOR_STUCK_DAYS,
+  MAX_PRIOR_STUCK_SAMPLES,
   HOLD_STALE_MIN,
   BASELINE_FLOOR,
   BASELINE_MULTIPLIER,

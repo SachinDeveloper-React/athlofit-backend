@@ -11,11 +11,14 @@ jest.mock('../models/HealthActivity.model');
 jest.mock('../utils/pushNotification', () => ({ sendPushToUser: jest.fn() }));
 jest.mock('../utils/createNotification', () => ({ createNotification: jest.fn() }));
 jest.mock('../utils/logCoinTransaction', () => ({ logCoinTransaction: jest.fn() }));
+jest.mock('../models/PendingCoin.model', () => ({ create: jest.fn(async (doc) => doc) }));
 
 const AppConfig = require('../models/AppConfig.model');
 const Gamification = require('../models/Gamification.model');
 const BadgeDefinition = require('../models/BadgeDefinition.model');
 const HealthActivity = require('../models/HealthActivity.model');
+const PendingCoin = require('../models/PendingCoin.model');
+const { logCoinTransaction } = require('../utils/logCoinTransaction');
 
 // Mock todayISO to control the "today" value in tests
 jest.mock('../utils/date', () => ({
@@ -400,5 +403,62 @@ describe('claimReward - steps_daily', () => {
       expect(gam.coinsBalance).toBe(350);
       expect(gam.coinsEarnedToday).toBe(150);
     });
+  });
+});
+
+describe('claimReward - with step-coin settlement on', () => {
+  // The step goal is a step coin: claimed and capped as before, but paid only
+  // once the day is verified. Water is not, and is paid now as always.
+  const settlementConfig = () => {
+    const cfg = buildConfig();
+    cfg.features = { stepCoinSettlement: true };
+    return cfg;
+  };
+
+  it('records the step goal as pending instead of paying it', async () => {
+    AppConfig.findOne = jest.fn().mockResolvedValue(settlementConfig());
+    const gam = buildGamDoc({ coinsBalance: 100, coinsEarnedToday: 20 });
+    mockGam(gam);
+    HealthActivity.findOne = jest.fn().mockResolvedValue({ steps: 12000, hydration: 0 });
+
+    const res = mockRes();
+    await claimReward(buildReq(), res, jest.fn());
+
+    expect(res.status).toHaveBeenCalledWith(200);
+    expect(res.json.mock.calls[0][0].message).toMatch(/once today's steps are verified/);
+    expect(res.json.mock.calls[0][0].data).toMatchObject({ newBalance: 100, coinsPendingAdded: 50 });
+    // Not in the balance, but the day's allowance and the claim are spent —
+    // so the cap and idempotency behave exactly as for a paid award.
+    expect(gam.coinsBalance).toBe(100);
+    expect(gam.coinsEarnedToday).toBe(70);
+    expect(gam.stepGoalCoinDate).toBe('2025-01-15');
+
+    expect(PendingCoin.create).toHaveBeenCalledWith(
+      expect.objectContaining({
+        user: 'user123',
+        date: '2025-01-15',
+        source: 'DAILY_STEP_GOAL',
+        amount: 50,
+        metadata: expect.objectContaining({ goal: 10000, steps: 12000 }),
+      }),
+    );
+    expect(logCoinTransaction).not.toHaveBeenCalled();
+  });
+
+  it('still pays the water goal straight away', async () => {
+    AppConfig.findOne = jest.fn().mockResolvedValue(settlementConfig());
+    const gam = buildGamDoc({ coinsBalance: 100 });
+    mockGam(gam);
+    HealthActivity.findOne = jest.fn().mockResolvedValue({ steps: 0, hydration: 2500 });
+
+    const res = mockRes();
+    await claimReward(buildReq({ rewardId: 'hydration_daily' }), res, jest.fn());
+
+    expect(res.status).toHaveBeenCalledWith(200);
+    expect(gam.coinsBalance).toBe(120);
+    expect(PendingCoin.create).not.toHaveBeenCalled();
+    expect(logCoinTransaction).toHaveBeenCalledWith(
+      expect.objectContaining({ source: 'HYDRATION_GOAL', amount: 20 }),
+    );
   });
 });

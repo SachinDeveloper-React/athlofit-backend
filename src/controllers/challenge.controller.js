@@ -9,11 +9,15 @@ const { success, error } = require('../utils/response');
 const { todayISO } = require('../utils/date');
 const { sendPushToUser } = require('../utils/pushNotification');
 const { createNotification } = require('../utils/createNotification');
-const { logCoinTransaction } = require('../utils/logCoinTransaction');
 const { isCoinBlocked } = require('../utils/cheatPenalty');
 const { getCachedAppConfig } = require('../utils/appConfigCache');
 const { getEffectiveDailyCap, awardCappedCoins } = require('../utils/dailyCoinCap');
 const { DEFAULT_MAX_DAILY_REWARDS } = require('../constants/coinDefaults');
+const {
+  isStepCoinSettlementEnabled,
+  isFitnessChallenge,
+} = require('../utils/stepCoinSettlement');
+const { logStepCoinAward } = require('../utils/pendingCoins');
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
@@ -348,6 +352,13 @@ const syncChallengeProgress = async (userId) => {
           cfg.coin?.unverifiedDailyCap,
         );
 
+        // A challenge measured by the step pipeline is a step coin: with
+        // settlement on it is completed and capped exactly as before, but paid
+        // only once its day — or, for a weekly one, its week so far — has been
+        // verified. See utils/stepCoinSettlement.js.
+        const pendingSettlement =
+          isStepCoinSettlementEnabled(cfg) && isFitnessChallenge(challenge.criteriaType);
+
         // Atomic and cap-safe. A plain `$inc` guarded only by `{ user: userId }`
         // — what this replaced — computed `actualCoins` from a `coinsEarnedToday`
         // read at the top of this function, then wrote unconditionally. Two
@@ -369,6 +380,7 @@ const syncChallengeProgress = async (userId) => {
             rewardId: `challenge_${challenge._id}_${periodKey}`,
             source: `Challenge: ${challenge.title}`,
           },
+          creditBalance: !pendingSettlement,
         });
         if (!result) continue;
         const { actualCoins, capped } = result;
@@ -410,12 +422,16 @@ const syncChallengeProgress = async (userId) => {
           title:      challenge.title,
           emoji:      challenge.emoji,
           coinReward: actualCoins,
+          // The coins wait for settlement; the app says so instead of
+          // announcing them as earned.
+          ...(pendingSettlement ? { pending: true } : {}),
         });
 
         // Log coin transaction for challenge completion
-        logCoinTransaction({
+        await logStepCoinAward({
+          pending: pendingSettlement,
           userId,
-          type: 'EARNED',
+          date: today,
           amount: actualCoins,
           balanceAfter: gam.coinsBalance,
           source: 'CHALLENGE',
@@ -426,9 +442,14 @@ const syncChallengeProgress = async (userId) => {
             rewardId: `challenge_${challenge._id}_${periodKey}`,
             challengeId: challenge._id,
             periodKey,
-            date: todayISO(),
+            date: today,
             fullReward: challenge.coinReward,
             capped,
+            // What the settlement re-checks the challenge against.
+            challengeType: challenge.type,
+            criteriaType: challenge.criteriaType,
+            targetValue: challenge.targetValue,
+            weekStart: challenge.type === 'weekly' ? weekStartISO : undefined,
           },
         });
 
@@ -436,7 +457,9 @@ const syncChallengeProgress = async (userId) => {
         createNotification(userId, {
           type:    'CHALLENGE',
           title:   `${challenge.emoji} Challenge Complete!`,
-          message: `You finished "${challenge.title}" and earned ${actualCoins} coins!`,
+          message: pendingSettlement
+            ? `You finished "${challenge.title}"! ${actualCoins} coins will be added once your steps for the day are verified.`
+            : `You finished "${challenge.title}" and earned ${actualCoins} coins!`,
           data:    { screen: 'ChallengeDetail', params: JSON.stringify({ challengeId: challenge._id.toString() }) },
         });
       }

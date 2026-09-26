@@ -32,6 +32,7 @@ const BonusSteps = require('../models/BonusSteps.model');
 const Referral = require('../models/Referral.model');
 const Order = require('../models/Order.model');
 const SupportTicket = require('../models/SupportTicket.model');
+const PendingCoin = require('../models/PendingCoin.model');
 
 // Fields on the User document that are credentials or server-side bookkeeping,
 // not personal data. `select('-x')` in the query is not enough on its own —
@@ -88,6 +89,7 @@ async function exportUserData(userId) {
     referrals,
     orders,
     supportTickets,
+    pendingCoins,
   ] = await Promise.all([
     HealthActivity.find({ user: userId }).sort({ date: 1 }).lean(),
     BmiRecord.find({ user: userId }).sort({ createdAt: 1 }).lean(),
@@ -103,6 +105,7 @@ async function exportUserData(userId) {
     Referral.find({ $or: [{ referrer: userId }, { referee: userId }] }).lean(),
     Order.find({ user: userId }).sort({ createdAt: 1 }).lean(),
     SupportTicket.find({ user: userId }).sort({ createdAt: 1 }).lean(),
+    PendingCoin.find({ user: userId }).sort({ createdAt: 1 }).lean(),
   ]);
 
   return {
@@ -132,6 +135,18 @@ async function exportUserData(userId) {
     // ── Rewards ─────────────────────────────────────────────────────────────
     gamification,
     coinTransactions,
+    // Step coins held for their day to be verified, and what became of them.
+    // The `reason` is left out for the same reason the anti-cheat entries
+    // below leave theirs out.
+    pendingCoins: pendingCoins.map((p) => ({
+      date: p.date,
+      source: p.source,
+      amount: p.amount,
+      status: p.status,
+      settledAmount: p.settledAmount,
+      settledAt: p.settledAt,
+      createdAt: p.createdAt,
+    })),
     userChallenges,
     bonusSteps,
 
@@ -169,6 +184,7 @@ async function exportUserData(userId) {
       mealLogs: mealLogs.length,
       searchLogs: searchLogs.length,
       coinTransactions: coinTransactions.length,
+      pendingCoins: pendingCoins.length,
       userChallenges: userChallenges.length,
       notifications: notifications.length,
       orders: orders.length,
@@ -189,6 +205,7 @@ const EXPORTED_COLLECTIONS = [
   'nutritionPreferences',
   'searchLogs',
   'coinTransactions',
+  'pendingCoins',
   'gamification',
   'userChallenges',
   'notifications',

@@ -24,7 +24,6 @@ const HealthActivity = require('../models/HealthActivity.model');
 const AppConfig = require('../models/AppConfig.model');
 const User = require('../models/User.model');
 const { todayISO } = require('../utils/date');
-const { logCoinTransaction } = require('../utils/logCoinTransaction');
 const { isCoinBlocked } = require('../utils/cheatPenalty');
 const { isStepsTrackingEnabled } = require('../utils/stepsTracking');
 const {
@@ -33,6 +32,8 @@ const {
 } = require('../utils/passiveCoins');
 const { getEffectiveDailyCap, awardCappedCoins } = require('../utils/dailyCoinCap');
 const { configuredStepGoalBonus } = require('../utils/stepGoalAward');
+const { isStepCoinSettlementEnabled } = require('../utils/stepCoinSettlement');
+const { logStepCoinAward } = require('../utils/pendingCoins');
 const {
   DEFAULT_RATE_PER_100_STEPS,
   DEFAULT_DAILY_EARN_LIMIT,
@@ -65,6 +66,10 @@ async function distributePassiveCoins() {
   if (!capState.capBinds) {
     console.warn(`[CRON:PassiveCoins] ${capState.summary}`);
   }
+
+  // Same switch the health sync reads: with settlement on, these coins wait for
+  // the day to be verified instead of reaching the balance now.
+  const settle = isStepCoinSettlementEnabled(cfg);
 
   // Find all users who have health activity today (meaning they synced steps)
   // bonusSteps is selected so walked steps can be derived — see the comment on
@@ -195,9 +200,7 @@ async function distributePassiveCoins() {
               lastPassiveCoinTime: now,
               coinsEarnedToday: finalCoins,
             },
-            $inc: {
-              coinsBalance: finalCoins,
-            },
+            ...(settle ? {} : { $inc: { coinsBalance: finalCoins } }),
           }
         : {
             $set: {
@@ -205,10 +208,9 @@ async function distributePassiveCoins() {
               lastPassiveCoinSteps: currentSteps,
               lastPassiveCoinTime: now,
             },
-            $inc: {
-              coinsBalance: finalCoins,
-              coinsEarnedToday: finalCoins,
-            },
+            $inc: settle
+              ? { coinsEarnedToday: finalCoins }
+              : { coinsBalance: finalCoins, coinsEarnedToday: finalCoins },
           };
 
       const atomicResult = await Gamification.findOneAndUpdate(
@@ -236,9 +238,10 @@ async function distributePassiveCoins() {
       ).catch(() => { /* non-fatal: the retro path re-checks anyway */ });
 
       // Log transaction
-      logCoinTransaction({
+      await logStepCoinAward({
+        pending: settle,
         userId,
-        type: 'EARNED',
+        date: today,
         amount: finalCoins,
         balanceAfter: atomicResult.coinsBalance,
         source: 'PASSIVE_STEPS',
@@ -297,8 +300,10 @@ async function eodAutoClaimStepGoal() {
   // We need to join HealthActivity (has steps) with User (has dailyStepGoal)
   // and Gamification (has stepGoalCoinDate)
   const activities = await HealthActivity.find({ date: today, goalMet: true })
-    .select('user steps')
+    .select('user steps goalSnapshot')
     .lean();
+
+  const settle = isStepCoinSettlementEnabled(cfg);
 
   if (activities.length === 0) {
     console.log(`[CRON:EOD-GoalClaim] No goal-met activities for ${today}. Skipping.`);
@@ -361,20 +366,23 @@ async function eodAutoClaimStepGoal() {
         matchExtra: { stepGoalCoinDate: { $ne: today } },
         setExtra: { stepGoalCoinDate: today },
         historyEntry: { rewardId: 'steps_daily_eod', source: 'Daily Step Goal — EOD Auto Claim' },
+        creditBalance: !settle,
       });
 
       if (result && result.actualCoins > 0) {
         claimed++;
 
-        logCoinTransaction({
+        await logStepCoinAward({
+          pending: settle,
           userId,
-          type: 'EARNED',
+          date: today,
           amount: result.actualCoins,
           balanceAfter: result.gam.coinsBalance,
           source: 'DAILY_STEP_GOAL_AUTO',
           description: `Daily Step Goal — EOD auto-claim (${activity.steps.toLocaleString()} steps)`,
           metadata: {
             steps: activity.steps,
+            goal: activity.goalSnapshot || undefined,
             date: today,
             trigger: 'eod_cron',
           },

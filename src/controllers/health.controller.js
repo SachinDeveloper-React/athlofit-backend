@@ -27,6 +27,7 @@ const {
   resolveDayHold,
 } = require('../utils/stepValidation');
 const { loadStepBaseline } = require('../utils/stepBaselineStore');
+const { loadPriorStuckSamples } = require('../utils/stuckHistoryStore');
 const { resolveOriginTrust } = require('../utils/stepOriginTrust');
 const { loadOriginHistory } = require('../utils/stepOriginTrustStore');
 
@@ -130,6 +131,9 @@ const {
   checkStepSyncVersion,
 } = require('../utils/versionGate');
 const { recordSyncLog } = require('../utils/syncLog');
+const { isStepCoinSettlementEnabled } = require('../utils/stepCoinSettlement');
+const { stepMetricCeilings, boundStepMetrics } = require('../utils/stepMetrics');
+const { logStepCoinAward, pendingCoinsFor } = require('../utils/pendingCoins');
 const {
   normalizeStepSource,
   recordStepProvenance,
@@ -412,7 +416,19 @@ const syncHealthData = async (req, res, next) => {
     // Both results are persisted below, so the next sync can measure against
     // what the client itself last said rather than against a total this one may
     // be about to freeze.
+    //
+    // The refusals this account earned on EARLIER days are judged alongside
+    // today's, read once per user per date and frozen onto the row like the
+    // baseline below. A stream that comes back to a pattern it was already held
+    // for closes the day. See the note at PRIOR_STUCK_DAYS in stepValidation.js.
     const rawSteps = stepsProvided ? Math.round(Number(steps) || 0) : null;
+    let priorStuckSamples = existing?.priorStuckSamples ?? null;
+    if (stepsProvided && priorStuckSamples == null) {
+      priorStuckSamples = await loadPriorStuckSamples({
+        userId: req.user._id,
+        date: today,
+      });
+    }
     const cadenceSource = stepsProvided
       ? cadenceSourceKey(req.deviceCtx?.lastSource)
       : null;
@@ -421,6 +437,7 @@ const syncHealthData = async (req, res, next) => {
       ? trackClientCadence({
           incomingSteps: rawSteps,
           ...(cadenceStreams[cadenceSource] || {}),
+          priorSamples: priorStuckSamples || [],
         })
       : null;
     const hold = stepsProvided
@@ -431,6 +448,7 @@ const syncHealthData = async (req, res, next) => {
           heldBy: existing?.stuckSource ?? null,
           heldSince: existing?.stuckSince ?? null,
           forfeit: existing?.stuckForfeit || 0,
+          closed: existing?.stuckClosed === true,
           existingWalked: Math.max(
             0,
             (existing?.steps || 0) - (existing?.bonusSteps || 0),
@@ -438,7 +456,12 @@ const syncHealthData = async (req, res, next) => {
         })
       : null;
 
-    if (hold?.stuck) {
+    if (hold?.closed && !existing?.stuckClosed) {
+      console.warn(
+        `[HealthSync] Day closed for user ${req.user._id} on ${today} ` +
+          `(${cadenceSource}): ${hold.stuckReason} — nothing further counted today`,
+      );
+    } else if (hold?.stuck) {
       console.warn(
         `[HealthSync] Stuck step source for user ${req.user._id} on ${today} ` +
           `(${cadenceSource}): ${hold.stuckReason} — holding stored total, no coins awarded`,
@@ -454,9 +477,8 @@ const syncHealthData = async (req, res, next) => {
     // set aside. Everything that judges the figure — validation, origin trust —
     // sees this; the sync log and the cadence trackers keep seeing the raw one,
     // because the pattern has to stay visible to be released.
-    const holdsThisStream = hold?.stuckSource === cadenceSource;
     const effectiveSteps = stepsProvided
-      ? Math.max(0, rawSteps - (holdsThisStream ? hold.stuckForfeit : 0))
+      ? Math.max(0, rawSteps - (hold?.stuckForfeit || 0))
       : steps;
 
     // ── Is this counter also feeding another account? ────────────────────────
@@ -608,17 +630,10 @@ const syncHealthData = async (req, res, next) => {
       syncDate: today,
       dailyGoal,
       allowCorrection: stepsCorrection === true,
-      // A stuck verdict belongs to the stream that earned it. Other streams on
-      // the same account must continue through their own validation; their
-      // cumulative totals are merged by the stored maximum, and blocking them
-      // here can hide a valid Health Connect/native reading behind a stale
-      // worker cadence.
+      // The day-wide verdict, not this stream's own: a healthy stream is still
+      // held while another stream's stuck verdict stands.
       cadence: hold
-        ? {
-            ...cadence,
-            stuck: holdsThisStream && hold.stuck,
-            stuckReason: holdsThisStream ? hold.stuckReason : null,
-          }
+        ? { ...cadence, stuck: hold.stuck, stuckReason: hold.stuckReason }
         : null,
       // The cross-account verdict. Held on the newer of two accounts sharing a
       // counter; the older is paid for the steps.
@@ -763,13 +778,34 @@ const syncHealthData = async (req, res, next) => {
       clientGoalMet: goalMet,
     });
 
+    // ── Distance, calories, active minutes: no more than the steps allow ─────
+    //
+    // Merged as before, then held to what the day's ACCEPTED walked steps can
+    // account for. The Android app derives all three from its raw count, so a
+    // held day's figures used to arrive at full size regardless — 53 km beside
+    // 15,000 stored steps — and they are what the distance, calorie and
+    // active-minute challenges pay on. Applied to the merged value, so a stored
+    // figure that was never justified comes down too. See utils/stepMetrics.js.
+    const stepMetrics = boundStepMetrics(
+      {
+        distance: merge(distance, existing?.distance),
+        calories: merge(calories, existing?.calories),
+        activeMinutes: merge(activeMinutes, existing?.activeMinutes),
+      },
+      stepMetricCeilings({
+        walkedSteps: deviceSteps,
+        weightKg: req.user.weight,
+        minutesOnDate: minutesElapsedOnDate(today, timezone),
+      }),
+    );
+
     const updateFields = {
       // Steps = walked (from device) + bonus (from admin/system)
       steps: totalSteps,
       bonusSteps: bonusSteps, // preserve, don't overwrite
-      distance: merge(distance, existing?.distance),
-      calories: merge(calories, existing?.calories),
-      activeMinutes: merge(activeMinutes, existing?.activeMinutes),
+      distance: stepMetrics.distance,
+      calories: stepMetrics.calories,
+      activeMinutes: stepMetrics.activeMinutes,
       // Vitals — keep existing value if incoming is 0 (device may not have
       // a reading for this sync cycle)
       heartRate: merge(heartRate, existing?.heartRate),
@@ -853,7 +889,13 @@ const syncHealthData = async (req, res, next) => {
             stuckSince:
               hold.stuckSince == null ? null : new Date(hold.stuckSince),
             stuckForfeit: hold.stuckForfeit,
+            stuckClosed: hold.closed,
           }
+        : {}),
+      // Frozen on the first step sync of the day, like stepBaseline. Not frozen
+      // when the read failed, so the next sync asks again.
+      ...(priorStuckSamples != null && existing?.priorStuckSamples == null
+        ? { priorStuckSamples }
         : {}),
       // Who else this day's counter turned out to belong to. Written on both
       // rows; `sharedHeld` only ever goes true, and stays true for the day.
@@ -1037,6 +1079,16 @@ const syncHealthData = async (req, res, next) => {
     let goalCoinsAwarded = false;
     let awardedGoalCoins = 0;
 
+    // ── Step coins now, or after the day is verified? ────────────────────────
+    //
+    // With settlement on, every step-coin award below is computed exactly as
+    // before — the same caps, the same idempotency markers, the same
+    // coinsEarnedToday accounting — but the balance is left alone and the coins
+    // are recorded as pending for the settlement job to pay once the day is
+    // over. See utils/stepCoinSettlement.js for why a day has to be over before
+    // its steps can be judged.
+    const settleStepCoins = isStepCoinSettlementEnabled(cfg);
+
     // ── Anti-cheat: check if user is blocked from earning coins ──────────────
     // Safe to consult unconditionally: `coinBlockedUntil` is written only by
     // recordCheatFlag, and only when features.cheatPenaltyEnabled is on. While that
@@ -1207,10 +1259,12 @@ const syncHealthData = async (req, res, next) => {
           },
           {
             $set: { stepGoalCoinDate: today },
-            $inc: {
-              coinsBalance: actualStepGoalCoins,
-              coinsEarnedToday: actualStepGoalCoins,
-            },
+            $inc: settleStepCoins
+              ? { coinsEarnedToday: actualStepGoalCoins }
+              : {
+                  coinsBalance: actualStepGoalCoins,
+                  coinsEarnedToday: actualStepGoalCoins,
+                },
             $push: {
               claimHistory: {
                 $each: [
@@ -1248,15 +1302,17 @@ const syncHealthData = async (req, res, next) => {
         // Log coin transaction. No amount check here any more: the claim above
         // only runs when there are coins to pay, so reaching this point means a
         // real award happened.
-        logCoinTransaction({
+        await logStepCoinAward({
+          pending: settleStepCoins,
           userId: req.user._id,
-          type: 'EARNED',
+          date: today,
           amount: actualStepGoalCoins,
           balanceAfter: gam.coinsBalance,
           source: 'DAILY_STEP_GOAL_AUTO',
           description: `Daily Step Goal — ${dailyGoal.toLocaleString()} steps reached`,
           metadata: {
             steps: validatedSteps ?? 0,
+            goal: dailyGoal,
             date: today,
             rewardId: 'steps_daily_auto',
             ...clientStamp(req),
@@ -1300,7 +1356,9 @@ const syncHealthData = async (req, res, next) => {
           title: '🎯 Daily Step Goal Reached!',
           message:
             awardedGoalCoins > 0
-              ? `You hit your ${dailyGoal.toLocaleString()} step goal and earned ${awardedGoalCoins} coins!`
+              ? settleStepCoins
+                ? `You hit your ${dailyGoal.toLocaleString()} step goal! ${awardedGoalCoins} coins will be added tomorrow once today's steps are verified.`
+                : `You hit your ${dailyGoal.toLocaleString()} step goal and earned ${awardedGoalCoins} coins!`
               : `You hit your ${dailyGoal.toLocaleString()} step goal. Keep it going!`,
           data: { screen: 'Steps' },
         });
@@ -1366,10 +1424,9 @@ const syncHealthData = async (req, res, next) => {
                   // coinsBalance with a stale in-memory value).
                   lastPassiveCoinTime: new Date(),
                 },
-                $inc: {
-                  coinsBalance: actualAdded,
-                  coinsEarnedToday: actualAdded,
-                },
+                $inc: settleStepCoins
+                  ? { coinsEarnedToday: actualAdded }
+                  : { coinsBalance: actualAdded, coinsEarnedToday: actualAdded },
               },
               { new: true },
             );
@@ -1397,9 +1454,10 @@ const syncHealthData = async (req, res, next) => {
               // Previously throttled to 3-hour intervals, which caused gaps in
               // the user's transaction history (steps were awarded but not logged).
 
-              logCoinTransaction({
+              await logStepCoinAward({
+                pending: settleStepCoins,
                 userId: req.user._id,
-                type: 'EARNED',
+                date: today,
                 amount: actualAdded,
                 balanceAfter: gam.coinsBalance,
                 source: 'PASSIVE_STEPS',
@@ -1435,6 +1493,7 @@ const syncHealthData = async (req, res, next) => {
     //      claim on that date's HealthActivity watermark, not by reading back a
     //      CoinTransaction row that may not have been written yet.
     let retroCoinsAwarded = 0;
+    let retroCoinsPending = 0;
     if (!isTodaySync && !userCoinBlocked && totalSteps > 0) {
       const { daysBetween } = require('../utils/date');
       const daysAgo = daysBetween(today, actualToday); // positive = today is in the past
@@ -1551,23 +1610,30 @@ const syncHealthData = async (req, res, next) => {
           );
 
           if (totalRetro > 0) {
-            const retroResult = await Gamification.findOneAndUpdate(
-              { user: req.user._id },
-              { $inc: { coinsBalance: totalRetro } },
-              { new: true },
-            );
+            // With settlement on, a past date's coins wait like any other
+            // day's: the balance is not touched, and the claim above is already
+            // what stops a second sync recording them again.
+            const retroResult = settleStepCoins
+              ? gam
+              : await Gamification.findOneAndUpdate(
+                  { user: req.user._id },
+                  { $inc: { coinsBalance: totalRetro } },
+                  { new: true },
+                );
 
             if (retroResult) {
               gam = retroResult;
-              retroCoinsAwarded = totalRetro;
+              if (settleStepCoins) retroCoinsPending = totalRetro;
+              else retroCoinsAwarded = totalRetro;
 
               // Awaited, so the transaction log is durable before we respond.
               // These are the user's coin-history rows; dropping them on a slow
               // write left balances that no transaction explained.
               if (retroPassive > 0) {
-                await logCoinTransaction({
+                await logStepCoinAward({
+                  pending: settleStepCoins,
                   userId: req.user._id,
-                  type: 'EARNED',
+                  date: today,
                   amount: retroPassive,
                   balanceAfter: gam.coinsBalance - retroGoalCoins,
                   source: 'PASSIVE_STEPS_RETRO',
@@ -1585,15 +1651,17 @@ const syncHealthData = async (req, res, next) => {
               }
 
               if (retroGoalCoins > 0) {
-                await logCoinTransaction({
+                await logStepCoinAward({
+                  pending: settleStepCoins,
                   userId: req.user._id,
-                  type: 'EARNED',
+                  date: today,
                   amount: retroGoalCoins,
                   balanceAfter: gam.coinsBalance,
                   source: 'DAILY_STEP_GOAL_RETRO',
                   description: `Retroactive Step Goal (${today}) — ${dailyGoal.toLocaleString()} steps reached`,
                   metadata: {
                     steps: retroWalkedSteps,
+                    goal: dailyGoal,
                     date: today,
                     daysAgo,
                     trigger: 'retro_sync',
@@ -1633,14 +1701,24 @@ const syncHealthData = async (req, res, next) => {
       // compared against `undefined`, never passed, and the widget silently stopped
       // following the server total.
       date: today,
-      goalCoinsAwarded,
+      // Only true when the coins are in the balance: the app announces "you
+      // earned N coins" on it. A bonus waiting for settlement is reported as
+      // `goalCoinsPending` instead, so a build that predates settlement says
+      // nothing rather than something untrue.
+      goalCoinsAwarded: goalCoinsAwarded && !settleStepCoins,
+      goalCoinsPending: goalCoinsAwarded && settleStepCoins ? awardedGoalCoins : undefined,
       coinsBalance: gam.coinsBalance,
+      // Everything earned and waiting for its day to be verified. Only read
+      // while settlement is on, so every other sync skips the query.
+      coinsPending: settleStepCoins ? await pendingCoinsFor(req.user._id) : undefined,
+      stepCoinSettlement: settleStepCoins || undefined,
       stepGoalCoins: awardedGoalCoins,
       bonusSteps, // bonus steps credited for today (so app can show total)
       totalSteps, // walked + bonus combined
       deviceSteps, // walked only — what the client should compare its own figure against
-      newlyCompleted, // array of { title, emoji, coinReward }
+      newlyCompleted, // array of { title, emoji, coinReward, pending? }
       retroCoinsAwarded: retroCoinsAwarded > 0 ? retroCoinsAwarded : undefined,
+      retroCoinsPending: retroCoinsPending > 0 ? retroCoinsPending : undefined,
       // Confirms a requested downward correction was applied, so the client can
       // stop re-sending the flag.
       stepCorrection: stepValidation.corrected

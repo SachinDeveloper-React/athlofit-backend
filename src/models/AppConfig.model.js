@@ -48,6 +48,16 @@ const appConfigSchema = new mongoose.Schema(
       // itself. Flags are recorded either way, so leaving this false collects the
       // evidence without anyone being blocked on a theory.
       cheatPenaltyEnabled:      { type: Boolean, default: false },
+      // Whether step coins are paid the day after they are earned, once the
+      // whole day has been verified, instead of as each sync arrives. Covers
+      // passive step coins, the step-goal bonus, and challenges measured in
+      // steps, distance, calories or active minutes. See
+      // utils/stepCoinSettlement.js.
+      //
+      // Default false so that deploying it changes nothing: the app build that
+      // shows pending coins should be out before this is switched on. Pending
+      // coins already recorded are still settled if it is switched off again.
+      stepCoinSettlement:       { type: Boolean, default: false },
     },
 
     nutrition: {
