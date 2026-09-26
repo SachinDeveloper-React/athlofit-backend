@@ -212,6 +212,71 @@ describe('validateSteps — a correction cannot retract corroborated steps', () 
   });
 });
 
+// The path every recent unexplained jump took: the app posting a figure before
+// its reader had resolved (`unknown`), or passing the server's own total back
+// (`server`). Neither is a measurement.
+describe('validateSteps — figures nothing accounts for', () => {
+  it('bounds an unattributed figure by the observed window, like a live sensor', () => {
+    // +8,752 in a 2-minute window — one of the fraud accounts' syncs.
+    const result = validateSteps({
+      ...base,
+      incomingSteps: 15000,
+      existingSteps: 6248,
+      reader: 'unknown',
+      sensorWindowMinutes: 2,
+    });
+    expect(result.clampedSteps).toBe(6248 + 440);
+    expect(result.flagged).toBe(true);
+    expect(result.reason).toMatch(/Unattributed/);
+  });
+
+  it('lets an ordinary unattributed increase through', () => {
+    // Honest syncs on this path never moved more than 556 steps.
+    const result = validateSteps({
+      ...base,
+      incomingSteps: 4556,
+      existingSteps: 4000,
+      reader: 'unknown',
+      sensorWindowMinutes: 15,
+    });
+    expect(result.clampedSteps).toBe(4556);
+    expect(result.flagged).toBe(false);
+  });
+
+  it('leaves the bound off when the caller has no window', () => {
+    const result = validateSteps({
+      ...base,
+      incomingSteps: 4000,
+      existingSteps: 0,
+      reader: 'unknown',
+      sensorWindowMinutes: null,
+    });
+    expect(result.clampedSteps).toBe(4000);
+  });
+
+  it('never lets the server’s own figure raise the stored total', () => {
+    const result = validateSteps({
+      ...base,
+      incomingSteps: 9000,
+      existingSteps: 7000,
+      reader: 'server',
+    });
+    expect(result.clampedSteps).toBe(7000);
+    expect(result.flagged).toBe(true);
+  });
+
+  it('accepts the server’s figure when it matches', () => {
+    const result = validateSteps({
+      ...base,
+      incomingSteps: 7000,
+      existingSteps: 7000,
+      reader: 'server',
+    });
+    expect(result.clampedSteps).toBe(7000);
+    expect(result.flagged).toBe(false);
+  });
+});
+
 describe('validateSteps — hard limits', () => {
   it('clamps to the absolute daily cap', () => {
     // A past date, because that is now the only way the daily cap is the binding

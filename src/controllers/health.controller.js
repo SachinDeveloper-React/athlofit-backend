@@ -27,7 +27,7 @@ const {
   resolveDayHold,
 } = require('../utils/stepValidation');
 const { loadStepBaseline } = require('../utils/stepBaselineStore');
-const { loadPriorStuckSamples } = require('../utils/stuckHistoryStore');
+const { checkSyncDate } = require('../utils/syncDateWindow');
 const { resolveOriginTrust } = require('../utils/stepOriginTrust');
 const { loadOriginHistory } = require('../utils/stepOriginTrustStore');
 
