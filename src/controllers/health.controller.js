@@ -608,6 +608,19 @@ const syncHealthData = async (req, res, next) => {
       syncDate: today,
       dailyGoal,
       allowCorrection: stepsCorrection === true,
+      // What the day's OTHER streams have reported, so a correction from this one
+      // cannot retract steps another reader independently counted — see the
+      // note at Rule 3 in stepValidation.js. Net of any stuck-source forfeit, so
+      // steps already set aside cannot come back as a floor.
+      correctionFloor:
+        stepsCorrection === true && stepsProvided
+          ? Math.max(
+              0,
+              ...Object.entries(cadenceStreams)
+                .filter(([key]) => key !== cadenceSource)
+                .map(([, s]) => Number(s?.lastIncomingSteps) || 0),
+            ) - (existing?.stuckForfeit || 0)
+          : null,
       // A stuck verdict belongs to the stream that earned it. Other streams on
       // the same account must continue through their own validation; their
       // cumulative totals are merged by the stored maximum, and blocking them
@@ -695,6 +708,27 @@ const syncHealthData = async (req, res, next) => {
     // measured against.
     const stepsIncreased = deviceSteps > previousWalked;
 
+    // ── A figure this row has already judged ─────────────────────────────────
+    //
+    // The Android widget worker re-posts the last seven days every 15 minutes,
+    // and a past day's raw figure never changes. Each re-post was judged afresh
+    // and, when over a ceiling, written as a new SyncLog row and — when
+    // implausible — a new CheatFlag. One account reached 1,992 sync logs and
+    // 1,064 cheat flags in a week, most of them the same two figures (66,406
+    // for 20 Sep, 68,286 for 23 Sep) re-flagged 40 times a day. That buries the
+    // real events, and it breaks the penalty's "3 flags in a day" threshold: a
+    // single bad figure re-posted three times would meet it on its own.
+    //
+    // A sync is a re-send when it carries the same raw total as the last one
+    // received for this date and it moved nothing. The first arrival was already
+    // logged and flagged; the repeats are not new evidence.
+    const isResend =
+      stepsProvided &&
+      existing?.lastIncomingSteps != null &&
+      existing.lastIncomingSteps === rawSteps &&
+      !stepsIncreased &&
+      !stepValidation.corrected;
+
     // ── Step provenance ──────────────────────────────────────────────────────
     //
     // Normalised once and used twice: the compact form goes on the SyncLog row
@@ -732,6 +766,7 @@ const syncHealthData = async (req, res, next) => {
           ? `${hold.stuckForfeit} raw steps set aside under a stuck-source hold earlier today`
           : null),
       corrected: stepValidation.corrected,
+      resend: isResend,
       timezone,
       source: provenance,
     });
@@ -956,10 +991,13 @@ const syncHealthData = async (req, res, next) => {
     // phone's counter is a choice, not a fault, and the flag is how the pattern
     // becomes visible per account. 'stuck_source' never does — see the severity
     // note in stepValidation.js.
+    //
+    // A re-send of a figure already flagged is skipped — see `isResend`.
     let cheatPenaltyResult = null;
     if (
-      stepValidation.severity === 'implausible' ||
-      stepValidation.severity === 'shared_source'
+      !isResend &&
+      (stepValidation.severity === 'implausible' ||
+        stepValidation.severity === 'shared_source')
     ) {
       cheatPenaltyResult = await recordCheatFlag({
         userId: req.user._id,

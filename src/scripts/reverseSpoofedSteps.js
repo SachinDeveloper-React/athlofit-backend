@@ -64,6 +64,9 @@
 //     node src/scripts/reverseSpoofedSteps.js --user <id> --zero-days --from 2026-08-28 --to 2026-09-21 --apply
 //                                                                  # reviewed account: every day
 //                                                                  # in the range to zero
+//     node src/scripts/reverseSpoofedSteps.js --user <id> --cap-days 15000 --from 2026-08-10 --to 2026-09-26 --apply
+//                                                                  # reviewed account: every day
+//                                                                  # in the range lowered to 15,000
 //     node src/scripts/reverseSpoofedSteps.js ... --void-ledger    # remove the paid entries
 //                                                                  # (archived) instead of
 //                                                                  # writing one DEDUCTED row
@@ -80,6 +83,19 @@
 // zero, through the same applyPlan as everything else: steps, watermark,
 // goal, originTrusted, the paid entries (void mode), the notifications, the
 // challenges. It requires --user, --from and --to, so it cannot be run wide.
+//
+// ── --cap-days <n> ──────────────────────────────────────────────────────────
+//
+// The same reviewed-account path, for when zero is the wrong answer. Zero is
+// an invented number too (see capUnverifiable): we know a machine-driven day
+// is wrong, not that the person walked nothing. --cap-days lowers every day
+// over <n> to exactly <n> and leaves the rest untouched — steps, watermark,
+// goal, and the coins paid above what <n> earns, through the same applyPlan.
+// 15,000 is the natural value: BASELINE_FLOOR, the ceiling the live rule gives
+// an account with no trusted history, so the correction is "what the fixed
+// system would have allowed". Run it without --void-ledger: a capped day has no
+// list of refused syncs to match rows against, so the difference is written as
+// one DEDUCTED row. Requires --user, --from and --to, like --zero-days.
 
 require('dotenv').config();
 const mongoose = require('mongoose');
@@ -969,7 +985,9 @@ function printAccount(report) {
     ].filter(Boolean).join('; ');
     const src = d.zeroed
       ? 'reviewed account — every day in range to zero (--zero-days)'
-      : d.candidates.length
+      : d.reviewedCap
+        ? `reviewed account — capped at ${n(d.cappedAt)} (--cap-days)`
+        : d.candidates.length
         ? d.candidates.map(c => c.packageName).join(', ')
         : d.cappedAt != null
           ? `capped at ${n(d.cappedAt)} — ${why}`
@@ -1022,12 +1040,26 @@ async function main() {
   const voidLedger = args.includes('--void-ledger');
   // Every day of one reviewed account in a range, to zero. See the header.
   const zeroDays = args.includes('--zero-days');
+  // Every day of one reviewed account in a range, lowered to a ceiling. See the
+  // note at --cap-days in the header.
+  const capDaysIdx = args.indexOf('--cap-days');
+  const capDays = capDaysIdx >= 0 ? Math.round(Number(args[capDaysIdx + 1])) : null;
   const fromIdx = args.indexOf('--from');
   const toIdx = args.indexOf('--to');
   const fromArg = fromIdx >= 0 ? args[fromIdx + 1] : null;
   const toArg = toIdx >= 0 ? args[toIdx + 1] : null;
-  if (zeroDays && (!userArg || !fromArg || !toArg)) {
-    console.error('--zero-days needs --user <email|id> --from YYYY-MM-DD --to YYYY-MM-DD');
+  if (capDaysIdx >= 0 && !(capDays > 0)) {
+    console.error('--cap-days needs a positive step count, e.g. --cap-days 15000');
+    process.exit(1);
+  }
+  if (zeroDays && capDays != null) {
+    console.error('--zero-days and --cap-days are alternatives; pass one');
+    process.exit(1);
+  }
+  if ((zeroDays || capDays != null) && (!userArg || !fromArg || !toArg)) {
+    console.error(
+      `${zeroDays ? '--zero-days' : '--cap-days'} needs --user <email|id> --from YYYY-MM-DD --to YYYY-MM-DD`,
+    );
     process.exit(1);
   }
 
@@ -1102,6 +1134,33 @@ async function main() {
         cappedAt: null,
         zeroed: true,
       }));
+    } else if (capDays != null) {
+      // Same selection as --zero-days — the stored rows, so days that predate
+      // the ledger are included — but only the days over the ceiling, and only
+      // down to it. Walked steps: bonus steps are left exactly as they are.
+      const stored = await HealthActivity.find({
+        user: userId,
+        date: { $gte: fromArg, $lte: toArg },
+      })
+        .select('date steps bonusSteps')
+        .lean();
+      found = stored
+        .map(a => ({
+          date: a.date,
+          walked: Math.max(0, (Number(a.steps) || 0) - (Number(a.bonusSteps) || 0)),
+        }))
+        .filter(a => a.walked > capDays)
+        .map(a => ({
+          date: a.date,
+          recordedTotal: a.walked,
+          restoredSteps: capDays,
+          candidates: [],
+          untrusted: [],
+          unattributed: [],
+          cappedAt: capDays,
+          reviewedCap: true,
+        }))
+        .sort((a, b) => (a.date < b.date ? -1 : 1));
     } else {
       found = suspectDays(rows, analysis, { force: force && Boolean(userArg) });
       if (fromArg || toArg) {
@@ -1193,7 +1252,9 @@ async function main() {
         timezone: rows.find(r => r.timezone)?.timezone || 'Asia/Kolkata',
         description: zeroDays
           ? `Step coins reversed — ${actionable.length} day(s) zeroed on a reviewed account`
-          : null,
+          : capDays != null
+            ? `Step coins reversed — ${actionable.length} day(s) capped at ${n(capDays)} on a reviewed account`
+            : null,
       });
       console.log(
         `\n  ✔ applied — ${actionable.length} day(s) corrected, ` +

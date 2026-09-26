@@ -942,6 +942,9 @@ function resolveDayHold({
  *   (utils/sharedStepSource.js). When it reports `held`, this account's counter
  *   is also feeding an older account, which is the one being paid for it, so
  *   the total is held where it is.
+ * @param {number|null} [params.correctionFloor] - The highest figure another
+ *   client stream has reported for this date. An `allowCorrection` sync may not
+ *   lower the stored total below it. Omit and only the no-zero rule applies.
  *
  * @returns {{ clampedSteps: number, flagged: boolean,
  *   severity: 'none'|'clamped'|'implausible'|'stuck_source'|'shared_source', reason: string|null,
@@ -968,6 +971,7 @@ function validateSteps({
   reader = null,
   sensorWindowMinutes = null,
   sharedSource = null,
+  correctionFloor = null,
 }) {
   // If no steps provided or negative, return 0
   if (
@@ -1276,13 +1280,39 @@ function validateSteps({
   // This is not a cheat vector: it can only ever LOWER the stored count. Coin
   // awards are driven by a separate high-water mark, so a decrease neither refunds
   // nor re-mints coins — it just stops the wrong number being displayed forever.
+  //
+  // ── But a lower figure is usually a reader that is behind, not a repair ─────
+  //
+  // Every correction in the sync logs up to 26 Sep came from the app, and not one
+  // was an over-count being repaired. Nine of eleven lowered the day below a
+  // figure ANOTHER stream had already reported on its own: the foreground service
+  // said 4,882 and the app, reading a different source, "corrected" it to 775.
+  // One user's 10,945-step day was set to 0 at 23:59:52 by a reader that had
+  // already rolled over, and nothing afterwards put it back. The client's test —
+  // "lower than what I last sent" — cannot tell a reset reader from a repair.
+  //
+  // So a correction may only walk back steps that nothing else vouches for:
+  //
+  //   * never below `correctionFloor`, the highest figure another client stream
+  //     reported for this date. Two readers agreeing on a figure is not an
+  //     over-count one of them can retract.
+  //   * never to zero. A repair lands on the real count; zero is what a reader
+  //     sends before it has read anything, or after it has rolled over.
   let corrected = false;
   let correctedFrom = null;
   if (steps < existingWalked - DECREASE_TOLERANCE && existingWalked > 0) {
-    if (allowCorrection) {
+    const floor = Math.min(
+      existingWalked,
+      Math.max(0, Math.round(Number(correctionFloor) || 0)),
+    );
+    const target = Math.max(steps, floor);
+    if (allowCorrection && steps > 0 && target < existingWalked - DECREASE_TOLERANCE) {
       corrected = true;
       correctedFrom = existingWalked;
-      reason = `Client-requested correction: ${existingWalked} → ${steps}`;
+      reason =
+        `Client-requested correction: ${existingWalked} → ${target}` +
+        (target > steps ? ` (asked for ${steps}; another stream reported ${floor})` : '');
+      steps = target;
     } else {
       steps = existingWalked;
     }

@@ -121,6 +121,97 @@ describe('validateSteps — no-decrease rule', () => {
   });
 });
 
+// Replayed from the sync logs. Every correction on record was the app reading a
+// source that was behind, not repairing an over-count — and one wiped a whole
+// 10,945-step day to 0 at 23:59:52.
+describe('validateSteps — a correction cannot retract corroborated steps', () => {
+  it('refuses a correction to zero', () => {
+    const result = validateSteps({
+      ...base,
+      incomingSteps: 0,
+      existingSteps: 1730,
+      allowCorrection: true,
+    });
+    expect(result.clampedSteps).toBe(1730);
+    expect(result.corrected).toBe(false);
+  });
+
+  it('keeps a day another stream already reported in full', () => {
+    // The foreground service said 10,945; the app then asked for 0.
+    const result = validateSteps({
+      ...base,
+      incomingSteps: 0,
+      existingSteps: 10945,
+      allowCorrection: true,
+      correctionFloor: 10945,
+    });
+    expect(result.clampedSteps).toBe(10945);
+    expect(result.corrected).toBe(false);
+  });
+
+  it('keeps the stored total when the app is merely behind the service', () => {
+    // Service 4,882, app 775 — five of these in one morning on one account.
+    const result = validateSteps({
+      ...base,
+      incomingSteps: 775,
+      existingSteps: 4882,
+      allowCorrection: true,
+      correctionFloor: 4882,
+    });
+    expect(result.clampedSteps).toBe(4882);
+    expect(result.corrected).toBe(false);
+  });
+
+  it('treats a floor within tolerance of the stored total as no correction', () => {
+    const result = validateSteps({
+      ...base,
+      incomingSteps: 592,
+      existingSteps: 4087,
+      allowCorrection: true,
+      correctionFloor: 4072,
+    });
+    expect(result.clampedSteps).toBe(4087);
+    expect(result.corrected).toBe(false);
+  });
+
+  it('walks back only the steps nothing else vouches for', () => {
+    const result = validateSteps({
+      ...base,
+      incomingSteps: 1720,
+      existingSteps: 7097,
+      allowCorrection: true,
+      correctionFloor: 4000,
+    });
+    expect(result.clampedSteps).toBe(4000);
+    expect(result.corrected).toBe(true);
+    expect(result.correctedFrom).toBe(7097);
+  });
+
+  it('still repairs a figure only this stream reported', () => {
+    const result = validateSteps({
+      ...base,
+      incomingSteps: 3230,
+      existingSteps: 3450,
+      allowCorrection: true,
+      correctionFloor: 1730,
+    });
+    expect(result.clampedSteps).toBe(3230);
+    expect(result.corrected).toBe(true);
+  });
+
+  it('never lets the floor raise the stored total', () => {
+    const result = validateSteps({
+      ...base,
+      incomingSteps: 500,
+      existingSteps: 3000,
+      allowCorrection: true,
+      correctionFloor: 9000,
+    });
+    expect(result.clampedSteps).toBe(3000);
+    expect(result.corrected).toBe(false);
+  });
+});
+
 describe('validateSteps — hard limits', () => {
   it('clamps to the absolute daily cap', () => {
     // A past date, because that is now the only way the daily cap is the binding

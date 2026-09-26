@@ -50,6 +50,8 @@ function isTracing(user) {
  * @param {string}  p.severity      validator severity
  * @param {boolean} p.flagged       validator raised a flag
  * @param {boolean} p.corrected     client asked to walk its own count back
+ * @param {boolean} [p.resend]      same raw total as the last sync for this date,
+ *                                  and it changed nothing
  * @param {number}  p.incomingSteps
  * @param {number}  p.clampedSteps
  * @param {number}  p.existingSteps
@@ -62,6 +64,7 @@ function resolveLogReason({
   severity,
   flagged,
   corrected,
+  resend = false,
   incomingSteps,
   clampedSteps,
   existingSteps,
@@ -87,6 +90,16 @@ function resolveLogReason({
   // hydration log would otherwise become a permanent write on the hot path,
   // which is the volume problem this module exists to avoid.
   if (!stepsProvided) return tracing ? 'trace_no_steps' : null;
+
+  // ── A figure already recorded ─────────────────────────────────────────────
+  //
+  // The widget worker re-posts the last seven days every 15 minutes, and a past
+  // day's figure does not change. When it is over a ceiling, every re-post used
+  // to come back 'clamped' or 'implausible' and write another row — one account
+  // produced 1,992 rows in a week, almost all of them the same few figures. The
+  // first arrival was recorded with the same verdict; the repeats add volume and
+  // no information. Still kept while tracing, which is asking for everything.
+  if (resend && !tracing) return null;
   // A device that has stopped measuring. Kept ahead of every other reason
   // because it is the only one that says the sync itself is untrustworthy rather
   // than merely large, and it is the row an investigation needs to find first.
@@ -124,6 +137,7 @@ function recordSyncLog(req, {
   severity = 'none',
   reason = null,
   corrected = false,
+  resend = false,
   rejected = false,
   timezone = null,
   // Normalised provenance block, or null when the build does not send one.
@@ -139,6 +153,7 @@ function recordSyncLog(req, {
       severity,
       flagged,
       corrected,
+      resend,
       incomingSteps,
       clampedSteps,
       existingSteps,

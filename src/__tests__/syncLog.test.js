@@ -170,3 +170,42 @@ describe('resolveLogReason — payloads with no steps', () => {
     expect(resolveLogReason({ ...withoutFlag, tracing: true })).toBe('trace');
   });
 });
+
+// ── The same figure, posted again ────────────────────────────────────────────
+//
+// The Android widget worker re-posts the last seven days every 15 minutes. A
+// past day over its ceiling came back 'clamped' or 'implausible' on every
+// re-post and wrote a new row each time — one account reached 1,992 rows in a
+// week, almost all of them the same few figures. The first arrival is the
+// record; the repeats are not.
+describe('resolveLogReason — re-sends', () => {
+  const pastDay = {
+    ...base,
+    incomingSteps: 66406,
+    clampedSteps: 30000,
+    existingSteps: 30000,
+  };
+
+  it('records the first arrival of an over-ceiling figure', () => {
+    expect(call({ ...pastDay, severity: 'implausible' })).toBe('implausible');
+    expect(call(pastDay)).toBe('clamped');
+  });
+
+  it('skips the same figure re-posted', () => {
+    expect(call({ ...pastDay, severity: 'implausible', resend: true })).toBeNull();
+    expect(call({ ...pastDay, resend: true })).toBeNull();
+    expect(call({ ...pastDay, severity: 'shared_source', resend: true })).toBeNull();
+  });
+
+  it('still keeps a re-send while tracing, under its real label', () => {
+    expect(call({ ...pastDay, tracing: true, resend: true })).toBe('clamped');
+  });
+
+  it('still reports a rejection', () => {
+    expect(call({ ...pastDay, rejected: true, resend: true })).toBe('rejected');
+  });
+
+  it('defaults to not a re-send, for callers that predate the flag', () => {
+    expect(resolveLogReason({ ...base, ...pastDay })).toBe('clamped');
+  });
+});
