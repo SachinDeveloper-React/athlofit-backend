@@ -216,6 +216,46 @@ const healthActivitySchema = new mongoose.Schema(
     stuckSince: { type: Date, default: null },
     stuckForfeit: { type: Number, default: 0 },
 
+    // ── A pattern this account was already held for ─────────────────────────
+    //
+    // `priorStuckSamples` is what the account was refused on over the days
+    // before this one, frozen on the day's first step sync exactly like
+    // stepBaseline — see selectPriorStuckSamples and the note at
+    // PRIOR_STUCK_DAYS in stepValidation.js. Every stream judges its samples
+    // against it as well as against today's. Undefined means "not loaded yet";
+    // an empty list means "loaded, and nothing qualified".
+    //
+    // `stuckClosed` goes true when a stream came back to that pattern today.
+    // The hold then stands for every stream until midnight and nothing
+    // releases it, so `stuckForfeit` stops growing: the refused figures are the
+    // raw totals on this day's samples, from `stuckSince` on. Sticky for the
+    // day.
+    priorStuckSamples: { type: [cadenceSampleSchema], default: undefined },
+    stuckClosed: { type: Boolean, default: false },
+
+    // ── What settlement found when it judged the finished day ───────────────
+    //
+    // Written by the step-coin settlement (crons/stepCoinSettlement.js) on a
+    // day it could not verify in full. `steps`, `goalMet`, distance, calories
+    // and active minutes are then lowered to what was verified, and the day is
+    // closed (`stuckClosed`) so a later re-sync of the same date cannot raise
+    // it back. This keeps what was there before, so an admin can see it and
+    // credit it back if the verdict was wrong. Null on every other day.
+    stepVerification: {
+      type: new mongoose.Schema(
+        {
+          status: { type: String, default: null },
+          walkedBefore: { type: Number, default: 0 },
+          payableWalked: { type: Number, default: 0 },
+          goalMetBefore: { type: Boolean, default: false },
+          reason: { type: String, default: null },
+          at: { type: Date, default: null },
+        },
+        { _id: false },
+      ),
+      default: null,
+    },
+
     // ── The day's sample totals, for matching against other accounts ────────
     //
     // Every sample any stream produced today — the raw total and when it

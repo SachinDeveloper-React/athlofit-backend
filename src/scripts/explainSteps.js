@@ -57,6 +57,7 @@ const mongoose = require('mongoose');
 const User = require('../models/User.model');
 const HealthActivity = require('../models/HealthActivity.model');
 const StepProvenance = require('../models/StepProvenance.model');
+const PendingCoin = require('../models/PendingCoin.model');
 const { describeEntry } = require('../utils/stepProvenance');
 
 const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
@@ -221,7 +222,7 @@ async function main() {
 
   for (const day of days) {
     const activity = await HealthActivity.findOne({ user: user._id, date: day.date })
-      .select('steps bonusSteps sharedWith sharedMatches sharedHeld sharedSince stuckSource stuckForfeit')
+      .select('steps bonusSteps sharedWith sharedMatches sharedHeld sharedSince stuckSource stuckSince stuckForfeit stuckClosed stepVerification goalMet')
       .lean();
 
     console.log('  ' + '─'.repeat(76));
@@ -250,6 +251,40 @@ async function main() {
       console.log(
         `  ⚠ STUCK SOURCE — ${n(activity.stuckForfeit)} raw steps set aside under a hold` +
           (activity.stuckSource ? ` (held by the ${activity.stuckSource} stream)` : ''),
+      );
+    }
+    if (activity?.stuckClosed) {
+      console.log(
+        `  ⚠ DAY CLOSED — the ${activity.stuckSource || 'unknown'} stream returned to a ` +
+          'pattern this account was already held for on an earlier day' +
+          (activity.stuckSince ? ` at ${new Date(activity.stuckSince).toISOString()}` : '') +
+          '; nothing after that was counted',
+      );
+    }
+    // What step-coin settlement did with the day's coins, when it was on.
+    const pending = await PendingCoin.find({ user: user._id, date: day.date }).lean();
+    if (pending.length) {
+      const sum = (rows, f) => rows.reduce((a, r) => a + (f(r) || 0), 0);
+      const waiting = pending.filter(p => p.status === 'pending');
+      const done = pending.filter(p => p.status !== 'pending');
+      const earned = sum(done, p => p.amount);
+      const paid = sum(done, p => p.settledAmount);
+      console.log(
+        `  COINS    ${waiting.length ? `${sum(waiting, p => p.amount).toFixed(2)} pending; ` : ''}` +
+          (done.length ? `settled ${paid.toFixed(2)} of ${earned.toFixed(2)}` : 'not settled yet'),
+      );
+      const refused = done.find(p => p.reason);
+      if (refused) console.log(`           held back: ${refused.reason}`);
+    }
+    const verification = activity?.stepVerification;
+    if (verification?.status) {
+      console.log(
+        `  ⚠ SETTLED DOWN — ${n(verification.walkedBefore)} walked steps stored, ` +
+          `${n(verification.payableWalked)} verified (${verification.status})` +
+          (verification.goalMetBefore && !activity.goalMet
+            ? '; its goal no longer holds and it was taken out of the streak'
+            : '') +
+          (verification.reason ? `\n           ${verification.reason}` : ''),
       );
     }
     console.log('');

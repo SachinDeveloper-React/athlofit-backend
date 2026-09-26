@@ -198,6 +198,11 @@ function describeDailyRewardCap({
  * @param {{rewardId: string, source: string}} [p.historyEntry] - if given, a
  *   `claimHistory` entry is pushed (capped to the last 50) whenever
  *   `actualCoins > 0`, with `amount` filled in automatically.
+ * @param {boolean} [p.creditBalance=true] - false when the award waits for
+ *   step-coin settlement: the allowance is still consumed and every marker
+ *   still set, so caps and idempotency behave exactly as for a paid award, but
+ *   the balance is left alone. The caller records the coins as pending. See
+ *   utils/stepCoinSettlement.js.
  * @param {number} [p.maxAttempts=5]
  * @returns {Promise<{gam: object, actualCoins: number, capped: boolean} | null>}
  *   null means `matchExtra` never matched (already claimed by this or a
@@ -212,6 +217,7 @@ async function awardCappedCoins(Model, {
   matchExtra = {},
   setExtra = {},
   historyEntry,
+  creditBalance = true,
   maxAttempts = 5,
 }) {
   const hasSetExtra = Object.keys(setExtra).length > 0;
@@ -233,7 +239,9 @@ async function awardCappedCoins(Model, {
     const update = {};
     if (hasSetExtra) update.$set = setExtra;
     if (actualCoins > 0) {
-      update.$inc = { coinsBalance: actualCoins, coinsEarnedToday: actualCoins };
+      update.$inc = creditBalance
+        ? { coinsBalance: actualCoins, coinsEarnedToday: actualCoins }
+        : { coinsEarnedToday: actualCoins };
       if (historyEntry) {
         update.$push = {
           claimHistory: {

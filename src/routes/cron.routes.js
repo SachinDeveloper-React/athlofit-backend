@@ -5,6 +5,7 @@ const { evaluateStreaks, grantWeeklyLives, applyPendingGoals } = require('../con
 const { distributePassiveCoins, eodAutoClaimStepGoal } = require('../crons/passiveCoinDistribution');
 const { sendInactivityNudges } = require('../crons/inactivityNudge');
 const { processAccountDeletions } = require('../crons/accountDeletion');
+const { settleStepCoins } = require('../crons/stepCoinSettlement');
 
 // Authorization is handled inside the controller via CRON_SECRET.
 // Support both GET (for curl/crontab) and POST.
@@ -74,6 +75,25 @@ router.all('/process-account-deletions', async (req, res) => {
   try {
     const result = await processAccountDeletions();
     return res.json({ success: true, message: 'Account deletions processed', data: result });
+  } catch (err) {
+    return res.status(500).json({ success: false, message: err.message });
+  }
+});
+
+// Step-coin settlement — pays the step coins that waited for their day to be
+// verified. Also registered as an in-process job (services/scheduler.js); this
+// endpoint is for the external crontab and for running it by hand. Safe to
+// call repeatedly: each pending award is paid or refused exactly once.
+router.all('/settle-step-coins', async (req, res) => {
+  const secret = process.env.CRON_SECRET;
+  const auth = req.headers.authorization || '';
+  const keyParam = req.query?.key;
+  if (!secret || (auth !== `Bearer ${secret}` && keyParam !== secret)) {
+    return res.status(401).json({ success: false, message: 'Unauthorized' });
+  }
+  try {
+    const result = await settleStepCoins();
+    return res.json({ success: true, message: 'Step coins settled', data: result });
   } catch (err) {
     return res.status(500).json({ success: false, message: err.message });
   }

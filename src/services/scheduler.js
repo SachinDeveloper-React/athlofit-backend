@@ -8,6 +8,7 @@ const { detectUninstalledUsers } = require('./uninstallDetection.service');
 const { cleanupInactiveSessions } = require('./inactivityCleanup.service');
 const { sendInactivityNudges } = require('../crons/inactivityNudge');
 const { processAccountDeletions } = require('../crons/accountDeletion');
+const { settleStepCoins } = require('../crons/stepCoinSettlement');
 
 function startScheduler() {
   // ─── Uninstall Detection ────────────────────────────────────────────────────
@@ -70,11 +71,30 @@ function startScheduler() {
     }
   }, { timezone: 'Asia/Kolkata' });
 
+  // ─── Step-coin settlement ──────────────────────────────────────────────────
+  // Runs at 3:30 AM IST — paying yesterday's step coins once the day is over
+  // and has been verified as a whole: late enough that the last syncs of the
+  // day have landed, early enough that users wake up to their coins — and
+  // again every six hours after, so a phone that was offline overnight and
+  // delivers a past day later is paid the same day it syncs, not the next
+  // morning. Each run only looks at dates before today and at awards still
+  // pending, so the extra runs are no-ops unless something arrived.
+  // See crons/stepCoinSettlement.js.
+  cron.schedule('30 3,9,15,21 * * *', async () => {
+    console.log('[Scheduler] Running step-coin settlement...');
+    try {
+      await settleStepCoins();
+    } catch (err) {
+      console.error('[Scheduler] Step-coin settlement failed:', err.message);
+    }
+  }, { timezone: 'Asia/Kolkata' });
+
   console.log('[Scheduler] Cron jobs registered:');
   console.log('  • Uninstall detection — every 6 hours');
   console.log('  • Inactivity cleanup  — daily at 3:00 AM');
   console.log('  • Inactivity nudge    — daily at 8:00 PM IST');
   console.log('  • Account deletion    — daily at 4:00 AM IST');
+  console.log('  • Step-coin settlement — 3:30 AM IST, then every 6 hours');
 }
 
 module.exports = { startScheduler };

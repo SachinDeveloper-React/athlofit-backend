@@ -42,11 +42,8 @@ const User = require('../src/models/User.model');
 const HealthActivity = require('../src/models/HealthActivity.model');
 const Gamification = require('../src/models/Gamification.model');
 const BadgeDefinition = require('../src/models/BadgeDefinition.model');
-const {
-  todayISO,
-  daysBetween,
-  isConsecutiveDay,
-} = require('../src/utils/date');
+const { todayISO, daysBetween } = require('../src/utils/date');
+const { goalMetRuns } = require('../src/utils/streak');
 
 // ─── Args ────────────────────────────────────────────────────────────────────
 const argv = process.argv.slice(2);
@@ -55,30 +52,6 @@ const userArg = (() => {
   const i = argv.indexOf('--user');
   return i !== -1 ? argv[i + 1] : null;
 })();
-
-/**
- * Recount the streak from a user's goal-met dates.
- *
- * @param {string[]} dates Goal-met "YYYY-MM-DD" dates, ascending, deduplicated.
- * @returns {{currentRun: number, longestRun: number, lastDate: string|null}}
- *   `currentRun` is the run ending on the most recent goal-met date.
- */
-function recount(dates) {
-  if (dates.length === 0)
-    return { currentRun: 0, longestRun: 0, lastDate: null };
-
-  let run = 1;
-  let longest = 1;
-  for (let i = 1; i < dates.length; i++) {
-    run = isConsecutiveDay(dates[i - 1], dates[i]) ? run + 1 : 1;
-    if (run > longest) longest = run;
-  }
-  return {
-    currentRun: run,
-    longestRun: longest,
-    lastDate: dates[dates.length - 1],
-  };
-}
 
 async function main() {
   if (!process.env.MONGO_URI) {
@@ -136,7 +109,7 @@ async function main() {
       .lean();
     const dates = [...new Set(rows.map(r => r.date))].sort();
 
-    const { currentRun, longestRun, lastDate } = recount(dates);
+    const { currentRun, longestRun, lastDate } = goalMetRuns(dates);
 
     // A streak can never be older than the account itself. Kept as a second,
     // independent ceiling: it catches an inflated value even for a user whose

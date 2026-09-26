@@ -16,7 +16,7 @@
 //   X-OS-Version        "14"
 //   X-Device-Model      "Pixel 7"
 //   X-Device-Brand      "Google"
-//   X-Install-Id        stable per-install uuid
+//   X-Install-Id        stable install id (ANDROID_ID on Android)
 //   X-Client-Source     "app" | "native_service" | "worker"
 //
 // Everything is optional — an old build sends none of it, and "no headers at
@@ -64,14 +64,29 @@ function readDeviceHeaders(req) {
  * True when the incoming build/install differs from what is stored — i.e. this
  * is a genuine change worth appending to the history, not just another request
  * from the same install.
+ *
+ * An install id the history already holds, on the same build and OS, is not a
+ * change. Builds up to 1.81 send two ids from one phone — ANDROID_ID from the
+ * JS layer, a random UUID from the native service (fixed in DeviceHeaders.kt)
+ * — and they alternate with every sync. Read as installs, each switch pushed a
+ * history entry, and the 20-entry cap evicted the real update trail within
+ * hours. A phone going back to an id it has already been seen with is the same
+ * phone, and the snapshot still follows it on the usual refresh.
  */
-function isNewInstallSnapshot(stored, incoming) {
+function isNewInstallSnapshot(stored, incoming, history = []) {
   if (!stored) return true;
-  return (
-    stored.appVersion !== incoming.appVersion ||
-    stored.buildNumber !== incoming.buildNumber ||
-    stored.installId !== incoming.installId ||
-    stored.osVersion !== incoming.osVersion
+  const sameBuild =
+    stored.appVersion === incoming.appVersion &&
+    stored.buildNumber === incoming.buildNumber &&
+    stored.osVersion === incoming.osVersion;
+  if (!sameBuild) return true;
+  if (stored.installId === incoming.installId) return false;
+  return !(history || []).some(
+    h =>
+      h?.installId === incoming.installId &&
+      h?.appVersion === incoming.appVersion &&
+      h?.buildNumber === incoming.buildNumber &&
+      h?.osVersion === incoming.osVersion,
   );
 }
 
@@ -93,7 +108,7 @@ function captureDeviceContext(req, user) {
 
   try {
     const stored = user.device || null;
-    const changed = isNewInstallSnapshot(stored, incoming);
+    const changed = isNewInstallSnapshot(stored, incoming, user.deviceHistory);
     const lastSeen = stored?.lastSeenAt ? new Date(stored.lastSeenAt).getTime() : 0;
     const stale = Date.now() - lastSeen > REFRESH_INTERVAL_MS;
 
@@ -157,4 +172,4 @@ function captureDeviceContext(req, user) {
   }
 }
 
-module.exports = { captureDeviceContext, readDeviceHeaders };
+module.exports = { captureDeviceContext, readDeviceHeaders, isNewInstallSnapshot };
