@@ -1,5 +1,9 @@
 const HealthActivity = require('../models/HealthActivity.model');
 const { getEffectiveDailyCap } = require('../utils/dailyCoinCap');
+const {
+  normaliseStepStatusReport,
+  isEmptyStepStatusReport,
+} = require('../utils/stepStatusReport');
 const BmiRecord = require('../models/BmiRecord.model');
 const Gamification = require('../models/Gamification.model');
 const User = require('../models/User.model');
@@ -2657,6 +2661,54 @@ const getDayDetail = async (req, res, next) => {
   }
 };
 
+// ─── POST /health/device-status ──────────────────────────────────────────────
+//
+// What the DEVICE says about its own step pipeline.
+//
+// Every other endpoint here records what the server observed. This one exists
+// because observation is not enough: both clients skip posting a day that reads
+// zero steps, so a revoked permission, a disconnected Health Connect and an app
+// that never ran all reach the server as the same thing — no rows at all. The
+// server can see the silence; only the device can say what caused it.
+//
+// ── The rule that makes it worth having ─────────────────────────────────────
+//
+// The app must post this EVEN WHEN STEPS ARE ZERO, and ideally especially then.
+// A status ping that is only sent alongside a successful step sync describes
+// exactly the accounts that were never a mystery.
+//
+// Deliberately separate from /health/sync rather than a field on it: a sync
+// carries steps and is refused outright when the kill switch or the version
+// gate is on (see the rejections at the top of syncHealthData). A device that
+// is being refused is one whose status we most want, so it cannot ride along on
+// the request being refused.
+const reportDeviceStatus = async (req, res, next) => {
+  try {
+    const report = normaliseStepStatusReport(req.body, {
+      appVersion: req.deviceCtx?.appVersion || null,
+    });
+
+    // A build that pings on a timer with nothing to say must not overwrite a
+    // report that did say something. Yesterday's "permission denied" is worth
+    // more than today's silence.
+    if (isEmptyStepStatusReport(report)) {
+      return success(res, 'Nothing reported', { stored: false });
+    }
+
+    await User.updateOne({ _id: req.user._id }, { $set: { stepStatus: report } });
+
+    // Echoed back so the client can confirm what the server understood — and
+    // so a field being dropped by normalisation is visible during integration
+    // rather than silently absent months later.
+    return success(res, 'Device status recorded', {
+      stored: true,
+      stepStatus: report,
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
 module.exports = {
   getWeeklySteps,
   syncHealthData,
@@ -2669,4 +2721,5 @@ module.exports = {
   getDayDetail,
   saveBmi,
   getBmiHistory,
+  reportDeviceStatus,
 };

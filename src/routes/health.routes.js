@@ -13,6 +13,7 @@ const {
   getDayDetail,
   saveBmi,
   getBmiHistory,
+  reportDeviceStatus,
 } = require('../controllers/health.controller');
 const { protect } = require('../middleware/auth.middleware');
 
@@ -58,6 +59,17 @@ router.get('/history', getHealthHistory);
 
 // POST /health/sync  — push daily snapshot from device
 router.post('/sync', syncRateLimiter, syncHealthData);
+
+// POST /health/device-status — what the DEVICE says about its own step
+// pipeline: permissions, Health Connect availability, the step count the app
+// itself believes, and any sync attempt that died before reaching us.
+//
+// Separate from /sync on purpose. /sync is refused outright when the step kill
+// switch or the version gate is on, and a device being refused is exactly the
+// one whose status we most need — so this must not ride on the request being
+// turned away. Must be posted even when steps are zero; that is the case it
+// exists to explain.
+router.post('/device-status', reportDeviceStatus);
 
 // GET  /health/bmi        — fetch BMI history
 // POST /health/bmi        — save a new BMI reading

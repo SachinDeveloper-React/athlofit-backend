@@ -20,6 +20,14 @@ const { processAccountDeletions } = require('../crons/accountDeletion');
 const SyncLog = require('../models/SyncLog.model');
 const StepProvenance = require('../models/StepProvenance.model');
 const { describeEntry } = require('../utils/stepProvenance');
+const { checkStepSyncVersion } = require('../utils/versionGate');
+const { isCoinBlocked } = require('../utils/cheatPenalty');
+const { resolveCoinDay } = require('../utils/date');
+const {
+  resolveStepDiagnosisVerdict,
+  ACTIVE_WINDOW_HOURS: DIAG_ACTIVE_WINDOW_HOURS,
+} = require('../utils/stepDiagnosis');
+const { summariseStepStatus } = require('../utils/stepStatusReport');
 
 const escapeRegex = (str) => str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 
@@ -1318,6 +1326,322 @@ const getUserStepProvenance = async (req, res, next) => {
   }
 };
 
+// ─── GET /admin/users/:id/step-diagnostics ───────────────────────────────────
+//
+// "Why does this user show 0 steps?" — answered in one call.
+//
+// The evidence is spread across five collections and two middleware
+// side-effects, which is why answering it has meant a manual investigation
+// every time. This assembles the account-level summary that
+// src/scripts/diagnoseStepGap.js prints on the CLI, for the admin panel's
+// Steps & Activity tab.
+//
+// ── The inference that does the real work ───────────────────────────────────
+//
+// `lastActiveAt` is bumped by EVERY authenticated request (auth.middleware),
+// including the background step syncs. Step data lands separately, on
+// HealthActivity. Reading the two TOGETHER separates causes that look identical
+// if you only look at the step count:
+//
+//   app reaching the server, no steps arriving  → the device's step pipeline is
+//     what is broken (permission revoked, Health Connect disconnected, no step
+//     writer installed). The app is fine.
+//   nothing reaching the server at all          → the app is not running, was
+//     force-stopped, or was never opened after signup.
+//
+// ── What this can never tell you ────────────────────────────────────────────
+//
+// The backend observes SILENCE, never the reason for it. Both clients skip
+// posting a day that reads zero steps (see diagnoseStepGap.js), so "permission
+// denied", "Health Connect not connected" and "app never ran" all arrive here
+// as the same absence of rows. `notCaptured` states that explicitly, so an
+// empty field is never mistaken for a finding.
+
+const hoursSince = (date) =>
+  date ? (Date.now() - new Date(date).getTime()) / 3_600_000 : null;
+
+const getUserStepDiagnostics = async (req, res, next) => {
+  try {
+    const userId = req.params.id;
+
+    const [user, gam, cfg] = await Promise.all([
+      User.findById(userId)
+        .select(
+          'name email emailVerified createdAt dailyStepGoal coinBlockedUntil ' +
+            'stepsTracking syncDebug device lastActiveAt lastLoginAt stepStatus',
+        )
+        .lean(),
+      Gamification.findOne({ user: userId }).select('lastKnownTimezone timezoneFlagged').lean(),
+      AppConfig.findOne({ key: 'global' }).lean(),
+    ]);
+
+    if (!user) return error(res, 'User not found', 404);
+
+    // The user's own day boundary, not the server's — a step row is written
+    // under the date the DEVICE was on, so asking IST for "today" would read
+    // the wrong row for anyone outside it.
+    const today = resolveCoinDay(gam);
+
+    const [todayRow, latestRow, latestStepRow, provenance, syncLogs] = await Promise.all([
+      HealthActivity.findOne({ user: userId, date: today })
+        .select('date steps bonusSteps lastSync lastStepIncreaseAt lastIncomingAt updatedAt originTrusted')
+        .lean(),
+      // Most recent row of ANY kind — including a hydration-only row with zero
+      // steps, which is precisely the "app alive, no steps" evidence.
+      HealthActivity.findOne({ user: userId })
+        .sort({ date: -1 })
+        .select('date steps bonusSteps lastSync lastStepIncreaseAt lastIncomingAt updatedAt')
+        .lean(),
+      // Most recent row that actually carried steps.
+      HealthActivity.findOne({ user: userId, steps: { $gt: 0 } })
+        .sort({ date: -1 })
+        .select('date steps bonusSteps lastSync lastStepIncreaseAt')
+        .lean(),
+      StepProvenance.findOne({ user: userId })
+        .sort({ date: -1 })
+        .select('date readers origins lastSyncAt walkedSteps')
+        .lean(),
+      SyncLog.find({ user: userId })
+        .sort({ createdAt: -1 })
+        .limit(20)
+        .lean(),
+    ]);
+
+    const gate = checkStepSyncVersion(cfg, { appVersion: user.device?.appVersion || null });
+    const coinBlock = isCoinBlocked(user);
+    const tracing =
+      user.syncDebug?.enabled === true &&
+      (!user.syncDebug.expiresAt || new Date(user.syncDebug.expiresAt) > new Date());
+
+    // Anomalous rows only — 'trace' rows exist solely because verbose tracing
+    // is on and say nothing about health.
+    const issues = syncLogs.filter((l) => l.logReason && l.logReason !== 'trace');
+    const rejectedSyncs = issues.filter((l) => l.logReason === 'rejected').length;
+    const clampedSyncs = issues.filter((l) => l.severity && l.severity !== 'none').length;
+
+    const hoursSinceActive = hoursSince(user.lastActiveAt);
+    const lastStepDataAt =
+      latestStepRow?.lastStepIncreaseAt || latestStepRow?.lastSync?.at || null;
+
+    // What the device said about itself, if this build reports it at all.
+    // Null for every build that does not, which is why the verdict can still
+    // stand on server-side inference alone.
+    const reported = user.stepStatus || null;
+    const deviceReport = summariseStepStatus(reported);
+
+    const verdict = resolveStepDiagnosisVerdict({
+      stepsTrackingEnabled: user.stepsTracking?.enabled !== false,
+      stepsTrackingReason: user.stepsTracking?.reason || null,
+      buildGateBlocked: gate.blocked,
+      buildGateReason: gate.reason,
+      hasTelemetry: Boolean(user.device?.appVersion),
+      everSynced: Boolean(latestRow),
+      todaySteps: todayRow?.steps || 0,
+      hoursSinceActive,
+      hoursSinceStepData: hoursSince(lastStepDataAt),
+      rejectedSyncs,
+      clampedSyncs,
+      deviceReport,
+      // Only comparable when the device's own day matches the row we read.
+      localStepsToday:
+        reported?.localStepsDate === today ? reported.localStepsToday : null,
+    });
+
+    return success(res, 'Step diagnostics fetched', {
+      verdict,
+
+      activity: {
+        accountCreatedAt: user.createdAt,
+        // Every authenticated request, 5-min throttle — background syncs
+        // included, so this says "something from this account reached us",
+        // NOT "the user opened the app".
+        lastActiveAt: user.lastActiveAt || null,
+        lastLoginAt: user.lastLoginAt || null,
+        // Only written alongside device headers, 30-min throttle.
+        deviceLastSeenAt: user.device?.lastSeenAt || null,
+        hoursSinceActive: hoursSinceActive == null ? null : Math.round(hoursSinceActive),
+        appReachingServer:
+          hoursSinceActive != null && hoursSinceActive <= DIAG_ACTIVE_WINDOW_HOURS,
+      },
+
+      device: {
+        appVersion: user.device?.appVersion || null,
+        buildNumber: user.device?.buildNumber ?? null,
+        platform: user.device?.platform || null,
+        osVersion: user.device?.osVersion || null,
+        model: user.device?.model || null,
+        manufacturer: user.device?.manufacturer || null,
+        installId: user.device?.installId || null,
+        lastSource: user.device?.lastSource || null,
+        firstSeenVersion: user.device?.firstSeenVersion || null,
+        // False means a build from before version headers existed. Every
+        // "which build produced this?" question is unanswerable for them.
+        hasTelemetry: Boolean(user.device?.appVersion),
+      },
+
+      gates: {
+        stepsTracking: {
+          enabled: user.stepsTracking?.enabled !== false,
+          reason: user.stepsTracking?.reason || null,
+          disabledAt: user.stepsTracking?.disabledAt || null,
+        },
+        buildGate: { blocked: gate.blocked, rule: gate.rule, reason: gate.reason },
+        coinBlocked: {
+          blocked: coinBlock.isBlocked,
+          until: coinBlock.isBlocked ? coinBlock.blockedUntil : null,
+        },
+      },
+
+      steps: {
+        // Resolved in the USER's timezone, so this matches the row their app
+        // is writing to.
+        today: {
+          date: today,
+          rowExists: Boolean(todayRow),
+          steps: todayRow?.steps || 0,
+          bonusSteps: todayRow?.bonusSteps || 0,
+          lastSyncAt: todayRow?.lastSync?.at || null,
+          lastStepIncreaseAt: todayRow?.lastStepIncreaseAt || null,
+          // A row that exists with zero steps is the single most informative
+          // state here: the app reached the server and had nothing to send.
+          appPostedButNoSteps: Boolean(todayRow) && !(todayRow?.steps > 0),
+        },
+        lastRowAnyKind: latestRow
+          ? {
+              date: latestRow.date,
+              steps: latestRow.steps,
+              lastSyncAt: latestRow.lastSync?.at || null,
+              appVersion: latestRow.lastSync?.appVersion || null,
+              clientSource: latestRow.lastSync?.source || null,
+            }
+          : null,
+        lastRowWithSteps: latestStepRow
+          ? {
+              date: latestStepRow.date,
+              steps: latestStepRow.steps,
+              lastStepIncreaseAt: latestStepRow.lastStepIncreaseAt || null,
+              daysAgo: latestStepRow.lastStepIncreaseAt
+                ? Math.floor(hoursSince(latestStepRow.lastStepIncreaseAt) / 24)
+                : null,
+            }
+          : null,
+        everSynced: Boolean(latestRow),
+      },
+
+      // Where the steps came from, most recent attributed day. Null means no
+      // day has attribution — an older build, not an absence of steps.
+      stepSource: provenance
+        ? {
+            asOfDate: provenance.date,
+            readers: provenance.readers || [],
+            lastSyncAt: provenance.lastSyncAt || null,
+            origins: (provenance.origins || []).map((o) => ({
+              packageName: o.packageName,
+              steps: o.steps,
+              contributed: o.contributed,
+            })),
+          }
+        : null,
+
+      syncTrail: {
+        tracing,
+        tracingExpiresAt: user.syncDebug?.expiresAt || null,
+        // Stated so an empty list is not read as "no problems": by default only
+        // anomalous syncs are stored at all, and they expire after 7 days.
+        note:
+          'Only anomalous syncs are logged unless tracing is on, and SyncLog rows expire after 7 days. ' +
+          'An empty list means nothing unusual was recorded, not that the device never synced.',
+        rejectedCount: rejectedSyncs,
+        clampedCount: clampedSyncs,
+        recentIssues: issues.slice(0, 10).map((l) => ({
+          at: l.createdAt,
+          date: l.date,
+          logReason: l.logReason,
+          severity: l.severity,
+          reason: l.reason,
+          incomingSteps: l.incomingSteps,
+          clampedSteps: l.clampedSteps,
+          storedSteps: l.storedSteps,
+          appVersion: l.appVersion,
+          clientSource: l.clientSource,
+        })),
+      },
+
+      // ── What the DEVICE says about itself ────────────────────────────────
+      //
+      // Null throughout until the app starts posting POST /health/device-status.
+      // These are the only fields that can distinguish "permission denied" from
+      // "Health Connect disconnected" from "app never ran" — the server sees
+      // the same silence for all three — so a null here is a missing client
+      // report, never a finding about the user.
+      deviceReported: reported
+        ? {
+            reportedAt: reported.reportedAt || null,
+            reportedAppVersion: reported.reportedAppVersion || null,
+            stale: reported.reportedAt
+              ? hoursSince(reported.reportedAt) > 48
+              : null,
+            permissions: {
+              activityRecognition: reported.activityPermission || null,
+              healthConnect: reported.healthConnectPermission || null,
+            },
+            healthConnect: {
+              availability: reported.healthConnectAvailability || null,
+              hasStepWriter: reported.hasStepWriter ?? null,
+            },
+            localSteps: {
+              date: reported.localStepsDate || null,
+              today: reported.localStepsToday ?? null,
+              readStatus: reported.readStatus || null,
+              readError: reported.readError || null,
+              // The comparison the "app shows steps, admin shows 0" report
+              // needs. Null when the device's day and ours do not line up,
+              // because then the two numbers are not describing the same thing.
+              matchesServer:
+                reported.localStepsDate === today && reported.localStepsToday != null
+                  ? reported.localStepsToday === (todayRow?.steps || 0)
+                  : null,
+            },
+            lastSyncAttempt: {
+              at: reported.lastSyncAttemptAt || null,
+              ok: reported.lastSyncOk ?? null,
+              error: reported.lastSyncError || null,
+            },
+            batteryOptimisationIgnored: reported.batteryOptimisationIgnored ?? null,
+            summary: deviceReport,
+          }
+        : null,
+
+      // Named explicitly so a missing field reads as a known limit rather than
+      // as a bug in this endpoint.
+      notCaptured: reported
+        ? []
+        : [
+            {
+              field: 'Step / activity permission status',
+              why:
+                'An OS-level state on the device. This build does not post POST /health/device-status, ' +
+                'and the server can only observe that nothing arrived — never why.',
+            },
+            {
+              field: 'Health Connect connected',
+              why:
+                'Only inferable when a sync actually arrives (reader = health_connect). A user who never ' +
+                'syncs produces no row at all, which is exactly the 0-step case.',
+            },
+            {
+              field: 'Client-side sync failures',
+              why:
+                'A request that fails before reaching the server (no network, auth failure, crash) leaves ' +
+                'no trace here by definition. Only the app can report those.',
+            },
+          ],
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
 module.exports = {
   getUsers,
   getUserById,
@@ -1348,4 +1672,5 @@ module.exports = {
   getUserSyncLogs,
   setSyncDebug,
   getUserStepProvenance,
+  getUserStepDiagnostics,
 };

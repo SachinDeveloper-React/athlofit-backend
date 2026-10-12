@@ -217,6 +217,67 @@ const userSchema = new mongoose.Schema(
       firstSeenVersion: { type: String, default: null },
     },
 
+    // ─── Device-side step pipeline status (reported BY the app) ─────────────
+    //
+    // Everything else in this file records what the server OBSERVED. This
+    // records what the device says about itself, and it exists because the two
+    // are not the same question.
+    //
+    // Both clients skip posting a day that reads zero steps, so "permission
+    // revoked", "Health Connect disconnected" and "app never ran" all reach the
+    // server as the same thing: no rows. The server can see silence but never
+    // its cause. This is the only channel that can carry the cause, so the one
+    // rule that matters is that the app posts it EVEN WHEN STEPS ARE ZERO —
+    // that is precisely the case it exists to explain.
+    //
+    // Every field is optional and nullable. An old build sends nothing, a
+    // partial report is still worth more than none, and a null must always read
+    // as "this build does not say" rather than as a finding.
+    stepStatus: {
+      // 'granted' | 'denied' | 'never_asked' | 'restricted' | 'unknown'
+      activityPermission: { type: String, default: null },
+      healthConnectPermission: { type: String, default: null },
+      // 'installed' | 'not_installed' | 'update_required' | 'not_supported'
+      healthConnectAvailability: { type: String, default: null },
+      // Whether ANY app on the phone is writing step records Health Connect can
+      // read. False with permission granted is its own distinct diagnosis: the
+      // plumbing is fine and there is simply no source of steps.
+      hasStepWriter: { type: Boolean, default: null },
+
+      // ── What the APP believes, for comparison with what we stored ─────────
+      //
+      // The direct answer to "the app shows 8,000 steps but the admin panel
+      // shows 0" — without it that report is one person's word against a
+      // number, and there is nothing to compare.
+      localStepsToday: { type: Number, default: null },
+      localStepsDate: { type: String, default: null }, // "YYYY-MM-DD", device-local
+      // 'ok' | 'empty' | 'error' | 'permission_denied'
+      readStatus: { type: String, default: null },
+      readError: { type: String, default: null },
+
+      // ── The failure the server can never see for itself ───────────────────
+      //
+      // A sync that dies before reaching us — no network, auth refused, a
+      // timeout, a crash — leaves no trace server-side by definition. Reported
+      // on the NEXT successful connection, so it arrives late or not at all;
+      // that is the nature of the signal, not a defect in it.
+      lastSyncAttemptAt: { type: Date, default: null },
+      lastSyncOk: { type: Boolean, default: null },
+      // 'network_error' | 'auth_error' | 'server_error' | 'timeout' | ...
+      lastSyncError: { type: String, default: null },
+
+      // Android kills background work for apps under battery optimisation, and
+      // it is one of the most common causes of a device that syncs only when
+      // opened by hand.
+      batteryOptimisationIgnored: { type: Boolean, default: null },
+
+      // When the app last told us any of the above. Distinct from every other
+      // timestamp here: it dates the REPORT, not the thing reported.
+      reportedAt: { type: Date, default: null },
+      // The build that sent it, so a status from a stale build is recognisable.
+      reportedAppVersion: { type: String, default: null },
+    },
+
     // ─── Verbose sync tracing (admin-controlled, per user) ──────────────────
     //
     // When on, EVERY /health/sync from this account is written to SyncLog, not

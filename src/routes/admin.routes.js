@@ -36,6 +36,7 @@ const {
   getUserSyncLogs,
   setSyncDebug,
   getUserStepProvenance,
+  getUserStepDiagnostics,
 } = require('../controllers/admin.controller');
 
 const {
@@ -148,6 +149,17 @@ router.get(
   param('id').isMongoId(),
   validate,
   getUserStepProvenance,
+);
+
+// ── "Why does this user show 0 steps?" ───────────────────────────────────────
+// GET /admin/users/:id/step-diagnostics — one call behind the Steps & Activity
+// tab. Joins device telemetry, the gates, today's row and the sync trail into a
+// single verdict, and names what the server cannot know (see `notCaptured`).
+router.get(
+  '/users/:id/step-diagnostics',
+  param('id').isMongoId(),
+  validate,
+  getUserStepDiagnostics,
 );
 
 router.get('/users/:id/sessions', getUserSessions);
