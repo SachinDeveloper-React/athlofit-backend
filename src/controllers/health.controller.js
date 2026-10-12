@@ -624,6 +624,9 @@ const syncHealthData = async (req, res, next) => {
     // the raw one because the answer is needed before validation, and it only
     // looks at two fields it re-checks itself.
     let originTrust = null;
+    // Hoisted out of the `stepsProvided` block below so the diagnostic near
+    // `stepsIncreased` (further down) can name the origin this sync claimed.
+    let claimedOrigin = null;
     let originHistory =
       existing?.establishedOrigins == null
         ? null
@@ -634,7 +637,7 @@ const syncHealthData = async (req, res, next) => {
     if (stepsProvided) {
       const claimedReader =
         typeof stepSource?.reader === 'string' ? stepSource.reader.trim() : null;
-      const claimedOrigin =
+      claimedOrigin =
         typeof stepSource?.primaryOrigin === 'string'
           ? stepSource.primaryOrigin.trim().slice(0, 120)
           : null;
@@ -785,6 +788,31 @@ const syncHealthData = async (req, res, next) => {
     // leave it alone, so they cannot shrink the window a later real sync is
     // measured against.
     const stepsIncreased = deviceSteps > previousWalked;
+
+    // ── DIAGNOSTIC: is a clamp silently stalling origin trust? ───────────────
+    //
+    // recordStepProvenance (below) runs only `if (stepsIncreased)`, and that is
+    // ALSO the only way a day counts toward the 3-of-28 threshold that
+    // establishes a step source (stepOriginTrust.js). The two rules were
+    // written independently, for unrelated reasons, and share this one gate —
+    // so a day that any other rule clamps back to `previousWalked` (the
+    // stuck-source hold, a ceiling, a re-send) contributes NOTHING toward
+    // trusting a new but perfectly legitimate source, even though the device
+    // did report it. That would show up in production as a source stuck
+    // "untrusted" for far longer than the three days the design intends.
+    //
+    // Logged only while the source is still unestablished, so it falls silent
+    // once trust settles. Here to confirm or rule out that coupling before the
+    // gating itself is changed — remove once the question is answered.
+    if (stepsProvided && claimedOrigin && !stepsIncreased && originTrust && !originTrust.trusted) {
+      console.warn(
+        `[HealthSync] Origin-trust day NOT recorded for user ${req.user._id} on ${today}: ` +
+          `claimed origin ${claimedOrigin} reported but stepsIncreased=false ` +
+          `(rawSteps=${rawSteps} deviceSteps=${deviceSteps} previousWalked=${previousWalked} ` +
+          `stuckForfeit=${hold?.stuckForfeit || 0} heldByStuckSource=${!!hold?.stuck}) — ` +
+          `this day will not count toward the 3-of-28 origin-trust threshold`,
+      );
+    }
 
     // ── A figure this row has already judged ─────────────────────────────────
     //
@@ -1507,19 +1535,54 @@ const syncHealthData = async (req, res, next) => {
         // each clamped to dailyEarnLimit. Using coinsEarnedToday here was a bug:
         // it includes goal (+50) and hydration coins, so hitting the step goal
         // instantly exceeded the small passive cap and blocked all step coins.
-        const { coins: actualAdded } = computePassiveCoinDelta({
+        const { coins: passiveEligible } = computePassiveCoinDelta({
           currentSteps,
           watermark: effectiveWatermark,
           rate,
           dailyEarnLimit,
         });
 
+        // ── And then the OVERALL ceiling, which is a different number ────────
+        //
+        // The clamp above stops goal and hydration coins from eating the
+        // passive allowance. Nothing stopped the opposite: passive coins never
+        // consulted `maxDailyRewards` at all, so while `dailyEarnLimit` had
+        // room, a live sync kept paying out past the total an admin had
+        // configured as the day's cap — which is the one number "the daily cap"
+        // is taken to mean. With the shipped rate the step-only limit is not
+        // even reachable (see describePassiveCoinCap), so in practice the
+        // overall cap was the only one that could ever bind, and it was the one
+        // not being checked.
+        //
+        // The cron that pays these same coins (distributePassiveCoins) has
+        // always clamped to both. This is the live-sync path catching up.
+        //
+        // Settlement-agnostic on purpose: `coinsEarnedToday` is incremented in
+        // BOTH modes below, so the day's spend means the same thing whether the
+        // coins reach the balance now or wait to be settled.
+        const overallCap = getEffectiveDailyCap(
+          req.user,
+          cfg.coin.maxDailyRewards ?? DEFAULT_MAX_DAILY_REWARDS,
+          cfg.coin.unverifiedDailyCap,
+        );
+        const overallRemaining = Math.max(0, overallCap - (gam.coinsEarnedToday || 0));
+        const actualAdded = parseFloat(
+          Math.min(passiveEligible, overallRemaining).toFixed(4),
+        );
+
         if (actualAdded > 0) {
           {
-            // FIX #1 (passive coins): Atomic update to prevent race condition
+            // FIX #1 (passive coins): Atomic update to prevent race condition.
+            // Guarded on BOTH the step watermark (so this exact delta cannot be
+            // paid twice) and `coinsEarnedToday` (so a goal, hydration or
+            // challenge award landing between the read above and this write
+            // cannot be stacked on top of a stale allowance, pushing the day
+            // past the cap). A lost race is a no-op: the next sync recomputes
+            // from a fresh watermark and a fresh total.
             const passiveResult = await Gamification.findOneAndUpdate(
               {
                 user: req.user._id,
+                coinsEarnedToday: gam.coinsEarnedToday || 0,
                 // Atomic guard: only update if the watermark hasn't moved past us
                 $or: [
                   { lastPassiveCoinSteps: { $lte: effectiveWatermark } },
