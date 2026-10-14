@@ -22,7 +22,8 @@ const StepProvenance = require('../models/StepProvenance.model');
 const { describeEntry } = require('../utils/stepProvenance');
 const { checkStepSyncVersion } = require('../utils/versionGate');
 const { isCoinBlocked } = require('../utils/cheatPenalty');
-const { resolveCoinDay } = require('../utils/date');
+const { resolveCoinDay, todayISO } = require('../utils/date');
+const { shiftDate } = require('../utils/stepBaselineStore');
 const {
   resolveStepDiagnosisVerdict,
   ACTIVE_WINDOW_HOURS: DIAG_ACTIVE_WINDOW_HOURS,
@@ -1326,6 +1327,86 @@ const getUserStepProvenance = async (req, res, next) => {
   }
 };
 
+// ─── GET /admin/dashboard/step-milestones ────────────────────────────────────
+//
+// How many users crossed 10k / 15k / 20k steps, over a selectable window.
+//
+// ── What "crossed" means here ───────────────────────────────────────────────
+//
+// A user's BEST SINGLE DAY in the window, not the sum of the window. Summing
+// would make the thresholds meaningless as the window grows — 10,000 steps
+// over 30 days is 333 a day, which is the opposite of the thing being counted.
+// So a user appears in the 7d column if they hit 10k on any ONE of those days.
+//
+// A consequence worth stating: the counts are not comparable across windows as
+// a rate. 7d will always be >= today, because a longer window contains more
+// chances to have had one good day.
+//
+// ── Which step figure ───────────────────────────────────────────────────────
+//
+// `steps` — walked PLUS admin-credited bonus, which is what the user's own
+// step goal is judged on and what every other admin view shows for a day. The
+// alternative (walked only) would make this card disagree with the number an
+// admin sees on the user's row, and a dashboard that contradicts the page it
+// links to is worse than one that counts a rare admin credit.
+const STEP_MILESTONES = [10_000, 15_000, 20_000];
+
+/** Window key → how many days back the range starts. Today is 0. */
+const MILESTONE_WINDOWS = { today: 0, '7d': 6, '30d': 29 };
+
+const getStepMilestones = async (req, res, next) => {
+  try {
+    const key = ['today', '7d', '30d'].includes(req.query.window)
+      ? req.query.window
+      : 'today';
+
+    // Server IST, not a user timezone: this is an aggregate across everyone,
+    // so there is no single user's day to resolve against. Rows are keyed by
+    // the device's local date, so a window boundary can include a sliver of a
+    // neighbouring day for users far from IST — immaterial at this grain, and
+    // the alternative is no aggregate at all.
+    const to = todayISO();
+    const from = shiftDate(to, MILESTONE_WINDOWS[key]);
+
+    const [row] = await HealthActivity.aggregate([
+      { $match: { date: { $gte: from, $lte: to }, steps: { $gt: 0 } } },
+      // Best single day per user, which is what the thresholds are read against.
+      { $group: { _id: '$user', bestDay: { $max: '$steps' } } },
+      {
+        $group: {
+          _id: null,
+          // Everyone who logged any steps at all in the window — the
+          // denominator, without which the milestone counts cannot be read as
+          // "a lot" or "a little".
+          activeUsers: { $sum: 1 },
+          ...Object.fromEntries(
+            STEP_MILESTONES.map((t) => [
+              `m${t}`,
+              { $sum: { $cond: [{ $gte: ['$bestDay', t] }, 1, 0] } },
+            ]),
+          ),
+        },
+      },
+    ]);
+
+    return success(res, 'Step milestones fetched', {
+      window: key,
+      from,
+      to,
+      // Stated so the counts are never misread as "walked this much in total
+      // over the window", which is the natural wrong reading of a 30d column.
+      basis: 'Users whose BEST SINGLE DAY in this window crossed the threshold.',
+      activeUsers: row?.activeUsers || 0,
+      milestones: STEP_MILESTONES.map((t) => ({
+        steps: t,
+        users: row?.[`m${t}`] || 0,
+      })),
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
 // ─── GET /admin/users/:id/step-diagnostics ───────────────────────────────────
 //
 // "Why does this user show 0 steps?" — answered in one call.
@@ -1673,4 +1754,5 @@ module.exports = {
   setSyncDebug,
   getUserStepProvenance,
   getUserStepDiagnostics,
+  getStepMilestones,
 };

@@ -37,6 +37,7 @@ const {
   setSyncDebug,
   getUserStepProvenance,
   getUserStepDiagnostics,
+  getStepMilestones,
 } = require('../controllers/admin.controller');
 
 const {
@@ -71,6 +72,12 @@ router.use(protect, adminOnly);
 
 // ── Dashboard ─────────────────────────────────────────────────────────────────
 router.get('/dashboard/stats', getDashboardStats);
+
+// GET /admin/dashboard/step-milestones?window=today|7d|30d
+// How many users crossed 10k / 15k / 20k steps on their BEST SINGLE DAY in
+// the window — not the window's sum, which would make the thresholds
+// meaningless as the range grows.
+router.get('/dashboard/step-milestones', getStepMilestones);
 
 // GET /admin/stats/app-versions?days=30 — install-base breakdown by app build.
 router.get('/stats/app-versions', getAppVersionStats);
