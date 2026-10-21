@@ -57,6 +57,7 @@ async function main() {
   await mongoose.connect(process.env.MONGO_URI, { serverSelectionTimeoutMS: 8000 });
 
   const today = todayISO();
+  const since24h = new Date(Date.now() - 24 * 3600 * 1000);
   const findings = [];
 
   // ── 1. Is the running code the fixed build? ───────────────────────────────
@@ -177,7 +178,104 @@ async function main() {
     .lean();
 
   if (!days.length) {
-    console.log(`  No account has logged steps for ${today} yet.`);
+    // Not an empty result — a finding, and the most important one there is.
+    // No coin logic can run on a day that received no steps, so every check
+    // below this point is downstream of a sync problem, not a coin problem.
+    console.log(`  NO account has logged steps for ${today}.`);
+    console.log('  Coins cannot be paid for steps that never arrived. Tracing backwards:\n');
+
+    // When did ANY step data last land, under any date key? This separates
+    // "the app stopped syncing" from "the app is syncing under a date we are
+    // not looking at", which a single-date query cannot tell apart.
+    const lastRow = await HealthActivity.findOne({ steps: { $gt: 0 } })
+      .sort({ updatedAt: -1 })
+      .select('user date steps lastSync updatedAt')
+      .lean();
+
+    if (!lastRow) {
+      console.log('  This database has NEVER received a step row from anyone.');
+      findings.push(
+        'No HealthActivity row with steps exists at all, for any user, on any date. ' +
+          'Either this is not the database the API writes to, or no sync has ever ' +
+          'succeeded against it. Check MONGO_URI matches the running API.',
+      );
+    } else {
+      const ageH = (Date.now() - new Date(lastRow.updatedAt).getTime()) / 3_600_000;
+      const owner = await User.findById(lastRow.user).select('email').lean();
+      console.log(`  last step row anywhere   ${lastRow.date}  ${lastRow.steps} steps`);
+      console.log(`    written              ${new Date(lastRow.updatedAt).toISOString()}  (${Math.round(ageH)}h ago)`);
+      console.log(`    account              ${owner?.email || lastRow.user}`);
+      console.log(`    build                ${lastRow.lastSync?.appVersion || '(no version header)'}`);
+      console.log(`    client source        ${lastRow.lastSync?.source || '—'}`);
+
+      if (lastRow.date !== today) {
+        findings.push(
+          `The newest step row is dated ${lastRow.date}, not ${today}. If it was written ` +
+            'recently, rows are landing under a DIFFERENT date key than the server\'s IST ' +
+            'day — a client-timezone mismatch — and every "today" query, including the ' +
+            'coin award\'s own, is looking at the wrong row.',
+        );
+      }
+      findings.push(
+        `Step data last reached this database ${Math.round(ageH)} hour(s) ago. The problem ` +
+          'is the sync, not the coins. Everything below points at why.',
+      );
+    }
+
+    // Did the sync endpoint refuse anything? Rejections ARE logged, unlike
+    // healthy syncs, so a non-empty result here is the answer outright.
+    const SyncLog = require('../models/SyncLog.model');
+    const recentLogs = await SyncLog.find({ createdAt: { $gte: since24h } })
+      .sort({ createdAt: -1 })
+      .limit(10)
+      .select('date logReason reason severity incomingSteps clampedSteps appVersion createdAt')
+      .lean();
+
+    console.log(`\n  sync-log rows in the last 24h   ${recentLogs.length}`);
+    for (const l of recentLogs) {
+      console.log(
+        `    ${new Date(l.createdAt).toISOString().slice(5, 16)}  ${String(l.logReason).padEnd(14)}` +
+          `sent=${l.incomingSteps} kept=${l.clampedSteps}  ${l.reason || ''}`,
+      );
+    }
+    const rejected = recentLogs.filter((l) => l.logReason === 'rejected');
+    if (rejected.length) {
+      findings.push(
+        `${rejected.length} sync(s) were REJECTED by the server in the last 24h — ` +
+          `"${rejected[0].reason || 'no reason recorded'}". That is why no steps are stored.`,
+      );
+    } else if (!recentLogs.length) {
+      findings.push(
+        'No sync-log rows either. Only anomalous syncs are logged by default, so this is ' +
+          'consistent with BOTH "nothing anomalous happened" and "no sync request arrived ' +
+          'at all". The two are told apart from the API access log, or by switching on ' +
+          'per-user tracing: POST /admin/users/:id/sync-debug {"enabled":true,"hours":24}',
+      );
+    }
+
+    // The gate that silently refuses whole builds.
+    const gate = cfg.stepSync;
+    console.log(`\n  version gate            ${gate?.enabled === true ? 'ON' : 'off'}`);
+    if (gate?.enabled === true) {
+      console.log(`    blockedVersions      ${JSON.stringify(gate.blockedVersions || [])}`);
+      console.log(`    minVersion           ${gate.minVersion || '—'}`);
+      console.log(`    blockUnknownVersion  ${gate.blockUnknownVersion === true}`);
+      findings.push(
+        'The step-sync VERSION GATE is ON. Any build it refuses gets a 403 and stores ' +
+          'nothing — which looks exactly like this. Check the values above against the ' +
+          'build your users are actually running.',
+      );
+    }
+
+    // Accounts switched off by an admin store nothing either.
+    const pausedCount = await User.countDocuments({ 'stepsTracking.enabled': false });
+    console.log(`  accounts with step tracking OFF   ${pausedCount}`);
+    if (pausedCount > 0) {
+      findings.push(
+        `${pausedCount} account(s) have step tracking disabled by an admin. Their syncs are ` +
+          'refused with 403 by design.',
+      );
+    }
   } else {
     const ids = days.map((d) => d.user);
     const [users, gams] = await Promise.all([
@@ -255,9 +353,8 @@ async function main() {
     console.log('  pending awards       (PendingCoin model not present)');
   }
 
-  const since = new Date(Date.now() - 24 * 3600 * 1000);
   const recent = await CoinTransaction.countDocuments({
-    createdAt: { $gte: since },
+    createdAt: { $gte: since24h },
     source: { $in: ['PASSIVE_STEPS', 'PASSIVE_STEPS_RETRO'] },
   });
   console.log(`  step-coin ledger rows in the last 24h   ${recent}`);
