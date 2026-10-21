@@ -14,7 +14,8 @@
     "diagnose:steps": "node src/scripts/diagnoseStepGap.js",
     "explain:steps": "node src/scripts/explainSteps.js",
     "reverse:held": "node src/scripts/reverseHeldSteps.js",
-    "backfill:step-coins": "node src/scripts/backfillUnpaidStepCoins.js"
+    "backfill:step-coins": "node src/scripts/backfillUnpaidStepCoins.js",
+    "diagnose:coins": "node src/scripts/diagnoseCoinStall.js"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1068.0",
