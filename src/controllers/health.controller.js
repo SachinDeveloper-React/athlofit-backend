@@ -1,5 +1,6 @@
 const HealthActivity = require('../models/HealthActivity.model');
 const { getEffectiveDailyCap } = require('../utils/dailyCoinCap');
+const { checkSyncDate } = require('../utils/syncDateWindow');
 const {
   normaliseStepStatusReport,
   isEmptyStepStatusReport,
