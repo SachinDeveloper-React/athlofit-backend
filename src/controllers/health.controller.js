@@ -1579,15 +1579,50 @@ const syncHealthData = async (req, res, next) => {
             // cannot be stacked on top of a stale allowance, pushing the day
             // past the cap). A lost race is a no-op: the next sync recomputes
             // from a fresh watermark and a fresh total.
+            //
+            // `coinsEarnedToday` is matched with the same three-arm treatment
+            // the watermark has had all along, and for the identical reason: a
+            // document written before the field existed does not carry it, a
+            // missing field does not match an equality against 0 in MQL, and
+            // Mongoose only applies the schema default when it hands the
+            // document to this code — not to the query. A bare `: 0` therefore
+            // matched nothing on those accounts, and because a failed match is
+            // a silent no-op by design, they stopped earning passive coins
+            // entirely while their steps kept rising.
+            //
+            // The absent arm is added ONLY when the value read was 0. For any
+            // other value, "absent" is not an equivalent state and matching it
+            // would defeat the compare-and-swap this exists to be.
+            //
+            // `$exists: false` rather than `: null`, which would match both.
+            // An explicit null is a different and already-broken state: `$inc`
+            // refuses to apply to a non-numeric value, so matching one here
+            // would turn a silently-skipped award into a 500 on the whole sync.
+            // A missing field has no such problem — `$inc` creates it. Those
+            // documents are broken for every other `$inc` on this counter too,
+            // including the step-goal award, and repairing them is a migration,
+            // not something to do inside a request that is trying to pay coins.
+            const earnedSoFar = gam.coinsEarnedToday || 0;
+            const earnedArms =
+              earnedSoFar === 0
+                ? [{ coinsEarnedToday: 0 }, { coinsEarnedToday: { $exists: false } }]
+                : [{ coinsEarnedToday: earnedSoFar }];
+
             const passiveResult = await Gamification.findOneAndUpdate(
               {
                 user: req.user._id,
-                coinsEarnedToday: gam.coinsEarnedToday || 0,
-                // Atomic guard: only update if the watermark hasn't moved past us
-                $or: [
-                  { lastPassiveCoinSteps: { $lte: effectiveWatermark } },
-                  { lastPassiveCoinSteps: null },
-                  { lastPassiveCoinSteps: { $exists: false } },
+                // Two independent guards, so both must hold. They cannot be
+                // sibling `$or`s — a second `$or` key would overwrite the first.
+                $and: [
+                  { $or: earnedArms },
+                  {
+                    // Atomic guard: only update if the watermark hasn't moved past us
+                    $or: [
+                      { lastPassiveCoinSteps: { $lte: effectiveWatermark } },
+                      { lastPassiveCoinSteps: null },
+                      { lastPassiveCoinSteps: { $exists: false } },
+                    ],
+                  },
                 ],
               },
               {
