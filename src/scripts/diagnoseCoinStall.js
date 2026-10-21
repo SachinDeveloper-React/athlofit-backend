@@ -208,18 +208,53 @@ async function main() {
       console.log(`    build                ${lastRow.lastSync?.appVersion || '(no version header)'}`);
       console.log(`    client source        ${lastRow.lastSync?.source || '—'}`);
 
-      if (lastRow.date !== today) {
+      // Data arriving right now, just not for today, has two very different
+      // explanations, and calling the wrong one sends the investigation into
+      // the client's timezone handling for no reason. They are told apart by
+      // HOW MANY distinct dates are being written: both clients re-post the
+      // last seven days on every run, so a spread of dates is backfill
+      // catching up. A single date, consistently off, is a date-key problem.
+      const writtenRecently = ageH < 2;
+      const recentDates = await HealthActivity.distinct('date', {
+        updatedAt: { $gte: new Date(Date.now() - 2 * 3600 * 1000) },
+        steps: { $gt: 0 },
+      });
+      recentDates.sort();
+
+      if (writtenRecently) {
+        console.log(`\n  dates written in the last 2h   ${recentDates.join(', ') || '—'}`);
+      }
+
+      if (writtenRecently && recentDates.length > 1) {
         findings.push(
-          `The newest step row is dated ${lastRow.date}, not ${today}. If it was written ` +
-            'recently, rows are landing under a DIFFERENT date key than the server\'s IST ' +
-            'day — a client-timezone mismatch — and every "today" query, including the ' +
-            'coin award\'s own, is looking at the wrong row.',
+          `Steps ARE arriving — ${recentDates.length} different dates were written in the ` +
+            `last two hours (${recentDates[0]} → ${recentDates[recentDates.length - 1]}). ` +
+            'Both clients re-post the last seven days on every run, so this is the backlog ' +
+            'catching up, not a date-key problem. The sync is working.' +
+            (recentDates.includes(today)
+              ? ''
+              : ` Today (${today}) has not appeared yet — expected if the devices are still ` +
+                'working through older days, or if nobody has walked today.'),
+        );
+      } else if (writtenRecently && !recentDates.includes(today)) {
+        findings.push(
+          `Rows are being written right now, but under ${recentDates[0] || lastRow.date} ` +
+            `rather than ${today}, and only that one date. That is a date-key mismatch — ` +
+            'the client and the server disagree about which day this is, and every "today" ' +
+            'query, including the coin award\'s own, is reading the wrong row.',
+        );
+      } else if (writtenRecently) {
+        findings.push(
+          `Steps are arriving normally — the most recent row landed ${Math.round(ageH * 60)} ` +
+            'minute(s) ago and includes today. The sync is healthy.',
+        );
+      } else {
+        findings.push(
+          `Step data last reached this database ${Math.round(ageH)} hour(s) ago. Nothing has ` +
+            'arrived since. The problem is the sync, not the coins — everything below ' +
+            'points at why.',
         );
       }
-      findings.push(
-        `Step data last reached this database ${Math.round(ageH)} hour(s) ago. The problem ` +
-          'is the sync, not the coins. Everything below points at why.',
-      );
     }
 
     // Did the sync endpoint refuse anything? Rejections ARE logged, unlike
