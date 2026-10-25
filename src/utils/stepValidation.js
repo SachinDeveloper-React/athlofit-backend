@@ -1171,6 +1171,7 @@ function validateSteps({
   ) {
     return {
       clampedSteps: 0,
+      reportedSteps: 0,
       flagged: false,
       severity: 'none',
       reason: null,
@@ -1181,6 +1182,22 @@ function validateSteps({
 
   let steps = Math.round(incomingSteps);
   const existingWalked = Math.max(0, existingSteps - bonusSteps);
+
+  // ── What the device actually said, kept alongside what we will pay for ─────
+  //
+  // Every ceiling below exists to bound what can be EARNED, and until now it
+  // bounded what was STORED as well — so a user who genuinely walked 20,000 on
+  // a 15,000 baseline was shown 15,000 and told, in effect, that they had not
+  // walked it. The count is the product; the ceiling is a fraud control, and
+  // the two were sharing one number.
+  //
+  // `reportedSteps` is that number: the device's own figure, bounded only by
+  // what is physically impossible in a day. It drives DISPLAY and nothing
+  // else. `clampedSteps` keeps its exact meaning and keeps driving every coin,
+  // goal, challenge, streak and baseline decision — so a display surface that
+  // is missed still shows a conservative figure, while a payment path that was
+  // missed is impossible, because none of them changed.
+  const reportedSteps = Math.min(Math.round(incomingSteps), MAX_DAILY_STEPS);
 
   let flagged = false;
   let reason = null;
@@ -1533,6 +1550,11 @@ function validateSteps({
 
   return {
     clampedSteps: steps,
+    // Never regresses within a day, for the same reason the stored count does
+    // not: several devices report for one user and a lower figure is usually
+    // just one of them being behind. A deliberate correction still lowers it,
+    // since that is the one case a decrease is intended.
+    reportedSteps: corrected ? Math.max(0, steps) : Math.max(reportedSteps, steps),
     flagged,
     severity,
     reason,

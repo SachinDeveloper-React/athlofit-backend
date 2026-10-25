@@ -109,6 +109,21 @@ const healthActivitySchema = new mongoose.Schema(
     // Walked steps only (bonus excluded), matching the passive-coin rule.
     stepCoinWatermark: { type: Number, default: 0 },
 
+    // ── What the device said, as opposed to what we will pay for ────────────
+    //
+    // `steps` is the VERIFIED figure: every anti-cheat ceiling has been
+    // applied to it, and every coin, goal, challenge, streak and baseline
+    // decision reads it. That is deliberate and unchanged.
+    //
+    // This is the raw count the device reported, bounded only by what is
+    // physically impossible in a day. It exists because the two were one
+    // number, so a user who genuinely walked 20,000 on a 15,000 baseline was
+    // SHOWN 15,000 — the fraud control was quietly editing the product.
+    //
+    // Display reads this. Nothing that pays does. Null on rows written before
+    // the split, where `steps` is the only figure there has ever been.
+    reportedSteps: { type: Number, default: null },
+
     // ── This account's own daily step ceiling ────────────────────────────────
     //
     // computeStepBaseline() over the trailing days that PRECEDE this one, frozen

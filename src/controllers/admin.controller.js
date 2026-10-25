@@ -1665,7 +1665,7 @@ const getUserStepDiagnostics = async (req, res, next) => {
 
     const [todayRow, latestRow, latestStepRow, provenance, syncLogs] = await Promise.all([
       HealthActivity.findOne({ user: userId, date: today })
-        .select('date steps bonusSteps lastSync lastStepIncreaseAt lastIncomingAt updatedAt originTrusted')
+        .select('date steps reportedSteps bonusSteps lastSync lastStepIncreaseAt lastIncomingAt updatedAt originTrusted')
         .lean(),
       // Most recent row of ANY kind — including a hydration-only row with zero
       // steps, which is precisely the "app alive, no steps" evidence.
@@ -1780,6 +1780,14 @@ const getUserStepDiagnostics = async (req, res, next) => {
           date: today,
           rowExists: Boolean(todayRow),
           steps: todayRow?.steps || 0,
+          // What the device reported, when it differs from what was verified.
+          // A support reply of "you walked 20,000, we paid for 15,000" needs
+          // both numbers; showing only the verified one reads as data loss.
+          reportedSteps: todayRow?.reportedSteps ?? null,
+          clampedBy:
+            todayRow?.reportedSteps > (todayRow?.steps || 0)
+              ? todayRow.reportedSteps - todayRow.steps
+              : 0,
           bonusSteps: todayRow?.bonusSteps || 0,
           lastSyncAt: todayRow?.lastSync?.at || null,
           lastStepIncreaseAt: todayRow?.lastStepIncreaseAt || null,

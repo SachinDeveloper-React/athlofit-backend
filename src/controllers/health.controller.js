@@ -784,6 +784,22 @@ const syncHealthData = async (req, res, next) => {
       : Math.max(validatedSteps, previousWalked); // never regress
     const totalSteps = deviceSteps + bonusSteps;
 
+    // ── The device's own figure, for display ────────────────────────────────
+    //
+    // Same no-regression rule as the verified count, and bonus steps are added
+    // the same way, so the two numbers are directly comparable on a day: one
+    // is what was walked, the other what the ceilings will pay for. Falls back
+    // to the verified figure for a build that does not report, so this is
+    // never lower than what is already shown.
+    const previousReported = Math.max(
+      0,
+      (existing?.reportedSteps ?? existing?.steps ?? 0) - bonusSteps,
+    );
+    const deviceReportedSteps = stepValidation.corrected
+      ? (stepValidation.reportedSteps ?? validatedSteps)
+      : Math.max(stepValidation.reportedSteps ?? validatedSteps, previousReported);
+    const totalReportedSteps = deviceReportedSteps + bonusSteps;
+
     // Opens the next rate window only when walked steps actually moved up. A
     // hydration-only sync, a vitals-only sync, or a re-send of the same count all
     // leave it alone, so they cannot shrink the window a later real sync is
@@ -927,8 +943,11 @@ const syncHealthData = async (req, res, next) => {
     );
 
     const updateFields = {
-      // Steps = walked (from device) + bonus (from admin/system)
+      // Steps = walked (from device) + bonus (from admin/system).
+      // VERIFIED — ceilings applied. Everything that pays reads this.
       steps: totalSteps,
+      // What the device reported, for display only. Never below `steps`.
+      ...(stepsProvided ? { reportedSteps: Math.max(totalReportedSteps, totalSteps) } : {}),
       bonusSteps: bonusSteps, // preserve, don't overwrite
       distance: stepMetrics.distance,
       calories: stepMetrics.calories,
@@ -1925,8 +1944,14 @@ const syncHealthData = async (req, res, next) => {
       stepCoinSettlement: settleStepCoins || undefined,
       stepGoalCoins: awardedGoalCoins,
       bonusSteps, // bonus steps credited for today (so app can show total)
-      totalSteps, // walked + bonus combined
+      totalSteps, // walked + bonus combined — VERIFIED, this is what pays
       deviceSteps, // walked only — what the client should compare its own figure against
+      // What the device reported, bounded only by the physically possible.
+      // This is the number to SHOW: the ceilings above bound what can be
+      // earned, and a user who walked 20,000 on a 15,000 baseline should see
+      // 20,000 and be paid for 15,000, not be told they walked less than they
+      // did. Equal to totalSteps whenever no ceiling bound.
+      reportedSteps: stepsProvided ? Math.max(totalReportedSteps, totalSteps) : totalSteps,
       newlyCompleted, // array of { title, emoji, coinReward, pending? }
       retroCoinsAwarded: retroCoinsAwarded > 0 ? retroCoinsAwarded : undefined,
       retroCoinsPending: retroCoinsPending > 0 ? retroCoinsPending : undefined,
