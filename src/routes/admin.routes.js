@@ -38,6 +38,8 @@ const {
   getUserStepProvenance,
   getUserStepDiagnostics,
   getStepMilestones,
+  getStepMilestoneUsers,
+  getDashboardCharts,
 } = require('../controllers/admin.controller');
 
 const {
@@ -78,6 +80,14 @@ router.get('/dashboard/stats', getDashboardStats);
 // the window — not the window's sum, which would make the thresholds
 // meaningless as the range grows.
 router.get('/dashboard/step-milestones', getStepMilestones);
+
+// GET /admin/dashboard/step-milestones/users?threshold=&window=&limit=
+// Who is behind a milestone count, with the day that qualified them.
+router.get('/dashboard/step-milestones/users', getStepMilestoneUsers);
+
+// GET /admin/dashboard/charts — signups, orders and platform split, from the
+// database. These three were hardcoded sample data until now.
+router.get('/dashboard/charts', getDashboardCharts);
 
 // GET /admin/stats/app-versions?days=30 — install-base breakdown by app build.
 router.get('/stats/app-versions', getAppVersionStats);

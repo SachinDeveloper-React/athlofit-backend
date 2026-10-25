@@ -1327,6 +1327,206 @@ const getUserStepProvenance = async (req, res, next) => {
   }
 };
 
+// ─── GET /admin/dashboard/charts ─────────────────────────────────────────────
+//
+// The three dashboard charts, from the database.
+//
+// They were hardcoded — "Mon 12, Tue 19, Wed 8", Jan through Jun, Android 65 /
+// iOS 30 — with a note to replace them when aggregation endpoints existed. A
+// chart that looks real and is not is worse than no chart: it was read as data
+// for as long as it was there, and it never moved.
+//
+// Buckets are built for EVERY day and month in the range, including the empty
+// ones. Grouping alone returns only periods that have rows, which draws a
+// 7-day line from four points and silently flatters a quiet week.
+const getDashboardCharts = async (req, res, next) => {
+  try {
+    // IST, to match every other date boundary in this system.
+    const istNow = () => {
+      const parts = new Intl.DateTimeFormat('en-CA', {
+        timeZone: 'Asia/Kolkata',
+        year: 'numeric', month: '2-digit', day: '2-digit',
+      }).formatToParts(new Date());
+      const get = (t) => Number(parts.find((p) => p.type === t).value);
+      return { y: get('year'), m: get('month'), d: get('day') };
+    };
+    const { y, m, d } = istNow();
+    // IST is UTC+5:30, so an IST day starts at 18:30 UTC the previous day.
+    const istDayStart = (yy, mm, dd) => new Date(Date.UTC(yy, mm - 1, dd, -5, -30, 0));
+
+    // ── Signups, last 7 IST days ────────────────────────────────────────────
+    const dayBuckets = [];
+    for (let i = 6; i >= 0; i--) {
+      const start = istDayStart(y, m, d - i);
+      const end = istDayStart(y, m, d - i + 1);
+      dayBuckets.push({
+        key: new Intl.DateTimeFormat('en-CA', {
+          timeZone: 'Asia/Kolkata', year: 'numeric', month: '2-digit', day: '2-digit',
+        }).format(start),
+        label: new Intl.DateTimeFormat('en-US', {
+          timeZone: 'Asia/Kolkata', weekday: 'short',
+        }).format(start),
+        start, end,
+      });
+    }
+
+    const signupCounts = await Promise.all(
+      dayBuckets.map((b) =>
+        User.countDocuments({ createdAt: { $gte: b.start, $lt: b.end } }),
+      ),
+    );
+
+    // ── Orders, last 6 calendar months ──────────────────────────────────────
+    const monthBuckets = [];
+    for (let i = 5; i >= 0; i--) {
+      const start = istDayStart(y, m - i, 1);
+      const end = istDayStart(y, m - i + 1, 1);
+      monthBuckets.push({
+        label: new Intl.DateTimeFormat('en-US', {
+          timeZone: 'Asia/Kolkata', month: 'short',
+        }).format(start),
+        start, end,
+      });
+    }
+
+    // Cancelled orders are counted separately rather than dropped: an order
+    // that was placed and then cancelled still happened, and hiding it makes a
+    // spike in cancellations look like a drop in demand.
+    const orderCounts = await Promise.all(
+      monthBuckets.map(async (b) => {
+        const range = { createdAt: { $gte: b.start, $lt: b.end } };
+        const [all, cancelled] = await Promise.all([
+          Order.countDocuments(range),
+          Order.countDocuments({ ...range, status: 'CANCELLED' }),
+        ]);
+        return { all, cancelled };
+      }),
+    );
+
+    // ── Platform split ──────────────────────────────────────────────────────
+    //
+    // From `device.platform`, which the headers populate, falling back to the
+    // top-level `platform` set at FCM registration. "Unknown" is reported
+    // rather than hidden — on a build that predates the headers it is the
+    // majority, and a pie chart showing 100% Android off three devices would
+    // be the same kind of lie the mock data was.
+    const [android, ios, total] = await Promise.all([
+      User.countDocuments({ $or: [{ 'device.platform': 'android' }, { platform: 'android' }] }),
+      User.countDocuments({ $or: [{ 'device.platform': 'ios' }, { platform: 'ios' }] }),
+      User.countDocuments({}),
+    ]);
+
+    return success(res, 'Dashboard charts fetched', {
+      signups: dayBuckets.map((b, i) => ({
+        day: b.label,
+        date: b.key,
+        users: signupCounts[i],
+      })),
+      orders: monthBuckets.map((b, i) => ({
+        month: b.label,
+        orders: orderCounts[i].all,
+        cancelled: orderCounts[i].cancelled,
+      })),
+      platforms: [
+        { name: 'Android', value: android },
+        { name: 'iOS', value: ios },
+        { name: 'Unknown', value: Math.max(0, total - android - ios) },
+      ],
+      totalUsers: total,
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
+// ─── GET /admin/dashboard/step-milestones/users ──────────────────────────────
+//
+// Who is behind a milestone number, and what each of them actually walked.
+//
+// The count alone cannot be acted on: "6 users hit 20k" raises the question of
+// which six, and whether their figures look like walking. Ordered by best day
+// descending, so the implausible ones — the reason the step-validation rules
+// exist — are at the top where they get looked at.
+//
+// Query: ?threshold=10000&window=today|7d|30d&limit=50
+const getStepMilestoneUsers = async (req, res, next) => {
+  try {
+    const threshold = STEP_MILESTONES.includes(Number(req.query.threshold))
+      ? Number(req.query.threshold)
+      : STEP_MILESTONES[0];
+    const key = ['today', '7d', '30d'].includes(req.query.window) ? req.query.window : 'today';
+    const limit = Math.min(200, Math.max(1, parseInt(req.query.limit ?? '50', 10) || 50));
+
+    const to = todayISO();
+    const from = shiftDate(to, MILESTONE_WINDOWS[key]);
+
+    const rows = await HealthActivity.aggregate([
+      { $match: { date: { $gte: from, $lte: to }, steps: { $gt: 0 } } },
+      {
+        $group: {
+          _id: '$user',
+          // The day that qualified them, and when it was — the pair an admin
+          // needs to go and look at the day itself.
+          bestDay: { $max: '$steps' },
+          totalSteps: { $sum: '$steps' },
+          daysActive: { $sum: 1 },
+        },
+      },
+      { $match: { bestDay: { $gte: threshold } } },
+      { $sort: { bestDay: -1 } },
+      { $limit: limit },
+    ]);
+
+    // Which date the best day fell on, and the names. Done as a second pass
+    // rather than inside the group, because $max does not carry the sibling
+    // field it was chosen from.
+    const ids = rows.map((r) => r._id);
+    const [users, bestDays] = await Promise.all([
+      User.find({ _id: { $in: ids } }).select('_id name email device.platform').lean(),
+      HealthActivity.find({
+        user: { $in: ids },
+        date: { $gte: from, $lte: to },
+      })
+        .select('user date steps')
+        .lean(),
+    ]);
+
+    const uMap = new Map(users.map((u) => [String(u._id), u]));
+    const bestDate = new Map();
+    for (const a of bestDays) {
+      const k = String(a.user);
+      const cur = bestDate.get(k);
+      if (!cur || a.steps > cur.steps) bestDate.set(k, { date: a.date, steps: a.steps });
+    }
+
+    return success(res, 'Step milestone users fetched', {
+      threshold,
+      window: key,
+      from,
+      to,
+      total: rows.length,
+      truncated: rows.length === limit,
+      users: rows.map((r) => {
+        const u = uMap.get(String(r._id)) || {};
+        return {
+          id: r._id,
+          name: u.name || null,
+          email: u.email || null,
+          platform: u.device?.platform || null,
+          bestDay: r.bestDay,
+          bestDayOn: bestDate.get(String(r._id))?.date || null,
+          // Across the window, so a 30d view shows the whole effort and not
+          // just the one day that cleared the bar.
+          totalSteps: r.totalSteps,
+          daysActive: r.daysActive,
+        };
+      }),
+    });
+  } catch (err) {
+    next(err);
+  }
+};
+
 // ─── GET /admin/dashboard/step-milestones ────────────────────────────────────
 //
 // How many users crossed 10k / 15k / 20k steps, over a selectable window.
@@ -1755,4 +1955,6 @@ module.exports = {
   getUserStepProvenance,
   getUserStepDiagnostics,
   getStepMilestones,
+  getStepMilestoneUsers,
+  getDashboardCharts,
 };
